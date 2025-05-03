@@ -5,10 +5,10 @@
 // 🔧 Language Goals
 // ----------------------
 // - Fixed-size types only (no dynamic memory)
-// - No heap, no GC, no syscalls
+// - No heap, no GC, controlled external calls with capability checks
 // - Stack and register-friendly
-// - Deterministic execution
-// - Crypto and Kaprekar primitives built in
+// - Deterministic execution (except for controlled async operations)
+// - Crypto, Kaprekar, networking, AI, IoT, gaming, and developer tools primitives built in
 
 // ----------------------
 // 🧱 Base Syntax Format
@@ -17,7 +17,7 @@
 // KSL looks like a simplified, typed mix of Rust and WASM
 
 fn main() {
-    let msg: [u8; 32] = sha3("blockroot.epoch.validator");
+    let msg: array<u8, 32> = sha3("blockroot.epoch.validator");
     let ok: bool = bls_verify(msg, pubkey, signature);
 
     if ok == false {
@@ -29,7 +29,63 @@ fn main() {
         fail();
     }
 
+    // Async networking example
+    #[async]
+    fn fetch_data() -> string {
+        let response = http.post("https://api.example.com", "data").await;
+        response
+    }
+
+    // Pattern matching
+    match shard_id in 0..1000 {
+        let shard = shard_route(account);
+    }
+
     return;
+}
+
+// Smart contract example
+#[contract]
+contract MyContract {
+    resource Token { amount: u64 }
+
+    fn transfer(token: Token, recipient: array<u8, 32>) -> bool {
+        true
+    }
+}
+
+// Web3 example with decentralized identity
+did (identity: array<u8, 32], credential: array<u8, 32]) -> array<u8, 32] {
+    let did: array<u8, 32] = create_did(identity, credential);
+    verify_did(did, credential);
+    did
+}
+
+// AI model execution example
+model (weights: array<array<u64, 4>, 2>, biases: array<u64, 4>) -> array<u64, 4] {
+    let output: array<u64, 4> = matrix.mul(weights, biases);
+    let adjusted: array<u64, 4] = tensor_add(output, [1, 1, 1, 1]);
+    adjusted
+}
+
+// IoT device communication example
+device_comm (topic: array<u8, 32], message: array<u8, 32]) -> bool {
+    publish(topic, message)
+}
+
+// Gaming physics and rendering example
+physics (obj1: array<u32, 4], obj2: array<u32, 4]) -> bool {
+    collides(obj1, obj2)
+}
+
+render (sprite: array<u32, 3]) -> bool {
+    draw_sprite(sprite)
+}
+
+// Developer tools debugging example
+debug (message: array<u8, 32]) -> bool {
+    log(message);
+    breakpoint()
 }
 
 // ----------------------
@@ -38,17 +94,90 @@ fn main() {
 // Types:
 // - u8, u16, u32, u64
 // - bool
-// - fixed-size arrays only: [u8; 32], [u64; 4], etc
+// - string (fixed-size, stack-allocated)
+// - fixed-size arrays: array<T, N> (e.g., array<u8, 32>, array<u64, 4>)
+// - result<T, E> (for optional values)
+// - 2D arrays: array<array<T, N>, M> (e.g., array<array<u64, 4>, 2>)
+
+// Operators:
+// - Arithmetic: +, *, -, / (with overflow checks)
+// - Comparisons: ==, !=, <, >, <=, >=
+// - Logical: &&, ||, !
+
+// Control Flow:
+// - if/else
+// - match (pattern matching, e.g., match expr in range { ... })
+// - loop (unrolled at compile time)
+// - No recursion
+
+// Attributes:
+// - #[allow(http)], #[allow(sensor)]: Allow external calls
+// - #[async]: Mark async functions
+// - #[ffi]: Expose for FFI
+// - #[verify], #[contract]: Smart contract annotations
 
 // ----------------------
 // 🔐 Built-in Functions
 // ----------------------
 extern {
-    fn sha3(input: string | [u8; N]) -> [u8; 32];
-    fn bls_verify(message: [u8; 32], pubkey: [u8; 48], signature: [u8; 96]) -> bool;
-    fn dil_verify(message: [u8; 32], pubkey: [u8; 1312], signature: [u8; 2420]) -> bool;
-    fn kaprekar(input: [u8; 4]) -> u16;
-    fn merkle_verify(leaf: [u8; 32], proof: [[u8; 32]; N], flags: [bool; N], root: [u8; 32]) -> bool;
+    // Cryptographic Functions
+    fn sha3(input: string | array<u8, N>) -> array<u8, 32]; // SHA3-512 for Kapra Chain
+    fn bls_verify(message: array<u8, 32], pubkey: array<u8, 48], signature: array<u8, 96]) -> bool;
+    fn dil_verify(message: array<u8, 32], pubkey: array<u8, 1312], signature: array<u8, 2420]) -> bool;
+    fn kaprekar(input: array<u8, 4]) -> u16;
+    fn merkle_verify(leaf: array<u8, 32], proof: array<array<u8, 32>, N>, flags: array<bool, N>, root: array<u8, 32>) -> bool;
+    fn vrf_generate(seed: array<u8, 32], key: array<u8, 32>) -> array<u8, 32>;
+
+    // Web3 Functions
+    fn create_did(identity: array<u8, 32], credential: array<u8, 32]) -> array<u8, 32];
+    fn verify_did(did: array<u8, 32], credential: array<u8, 32]) -> bool;
+    fn fetch_oracle_data(url: string) -> array<u8, 32];
+    fn send_cross_chain(chain_id: u32, message: array<u8, 32]) -> bool;
+
+    // AI Functions
+    fn tensor_add(a: array<u64, N>, b: array<u64, N>) -> array<u64, N>;
+    fn tensor_multiply(a: array<u64, N>, b: array<u64, N>) -> array<u64, N>;
+    fn quantize_to_u8(weights: array<array<u64, N>, M>) -> array<array<u8, N>, M>;
+
+    // IoT Functions
+    fn publish(topic: array<u8, 32], message: array<u8, 32]) -> bool;
+    fn sleep(sleep_duration: u32) -> bool;
+    fn wake() -> bool;
+
+    // Gaming Functions
+    fn collides(obj1: array<u32, 4], obj2: array<u32, 4]) -> bool;
+    fn draw_sprite(sprite: array<u32, 3]) -> bool;
+    fn send_state(peer_id: u32, state: array<u8, 32]) -> bool;
+
+    // Developer Tools Functions
+    fn log(message: array<u8, 32]) -> bool;
+    fn breakpoint() -> bool;
+    fn measure(task: array<u8, 32]) -> array<u64, 3>;
+    fn generate_diagram(data: array<u64, 4]) -> bool;
+
+    // Networking Functions (Async)
+    #[async]
+    fn net.tcp_connect(host: string, port: u32) -> u32;
+    fn net.udp_send(host: string, port: u32, data: array<u8, 1024>) -> u32;
+    #[async]
+    fn http.get(url: string) -> string;
+    #[async]
+    fn http.post(url: string, data: string) -> string;
+
+    // Sharding Functions
+    fn shard_route(account: array<u8, 32]) -> u32;
+    #[async]
+    fn shard_send(shard_id: u32, message: array<u8, N>) -> bool;
+
+    // I/O Functions
+    #[async]
+    fn device.sensor(id: u32) -> f32;
+
+    // Math Functions
+    fn matrix.mul(a: array<array<f64, N>, N>, b: array<array<f64, N>, N>) -> array<array<f64, N>, N>;
+    fn math.sin(x: f64) -> f64;
+
+    // Control Functions
     fn fail() -> !;
 }
 
@@ -56,7 +185,556 @@ extern {
 // 🧠 Example Use Case
 // ----------------------
 // A validator receives a block, verifies the signature, checks a Kaprekar condition,
-// and halts execution if invalid. Otherwise, exits cleanly.
+// and communicates with other validators via networking.
 
-// More complex control flow, arithmetic, loops, etc., will be minimal or precompiled.
+// Validator logic with sharding, AI, IoT, gaming, and debugging
+fn validate_block(block: array<u8, 1024], pubkey: array<u8, 48], signature: array<u8, 96>) -> bool {
+    let msg: array<u8, 32> = sha3(block);
+    let ok: bool = bls_verify(msg, pubkey, signature);
+
+    debug(msg); // Log message for debugging
+    let metrics: array<u64, 3] = profile(msg); // Profile performance
+
+    if ok == false {
+        fail();
+    }
+
+    let kap: u16 = kaprekar(msg[0..4]);
+    if kap != 6174 {
+        fail();
+    }
+
+    // AI inference for fraud detection
+    let weights: array<array<u64, 4>, 2> = [[1, 2, 3, 4], [5, 6, 7, 8]];
+    let biases: array<u64, 4> = [1, 1, 1, 1];
+    let prediction: array<u64, 4] = model(weights, biases);
+    visualize(prediction); // Visualize AI prediction
+
+    // IoT sensor data
+    let sensor_data: array<u8, 8> = device.sensor(1);
+    device_comm(msg, sensor_data);
+    power_manage(1000);
+
+    // Game mechanics (e.g., NFT-based game on Kapra Chain)
+    let player: array<u32, 4> = [0, 0, 10, 10];
+    let enemy: array<u32, 4> = [5, 5, 10, 10];
+    let collided: bool = physics(player, enemy);
+    if collided {
+        let sprite: array<u32, 3] = [5, 5, 1];
+        render(sprite);
+    }
+    multiplayer(1, msg);
+
+    let shard_id: u32 = shard_route(pubkey);
+    shard_send(shard_id, msg);
+
+    true
+}
+
+// More complex control flow, arithmetic, loops, etc., are minimal or precompiled.
+// No recursion, no allocation, no classes or traits. Just fast, safe execution.// KSL Syntax Spec (Kapra Systems Language)
+// Designed for speed, security, and total hardware portability
+
+// ----------------------
+// 🔧 Language Goals
+// ----------------------
+// - Fixed-size types only (no dynamic memory)
+// - No heap, no GC, controlled external calls with capability checks
+// - Stack and register-friendly
+// - Deterministic execution (except for controlled async operations)
+// - Crypto, Kaprekar, networking, AI, IoT, gaming, and developer tools primitives built in
+
+// ----------------------
+// 🧱 Base Syntax Format
+// ----------------------
+
+// KSL looks like a simplified, typed mix of Rust and WASM
+
+fn main() {
+    let msg: array<u8, 32> = sha3("blockroot.epoch.validator");
+    let ok: bool = bls_verify(msg, pubkey, signature);
+
+    if ok == false {
+        fail();
+    }
+
+    let kap: u16 = kaprekar(msg[0..4]);
+    if kap != 6174 {
+        fail();
+    }
+
+    // Async networking example
+    #[async]
+    fn fetch_data() -> string {
+        let response = http.post("https://api.example.com", "data").await;
+        response
+    }
+
+    // Pattern matching
+    match shard_id in 0..1000 {
+        let shard = shard_route(account);
+    }
+
+    return;
+}
+
+// Smart contract example
+#[contract]
+contract MyContract {
+    resource Token { amount: u64 }
+
+    fn transfer(token: Token, recipient: array<u8, 32>) -> bool {
+        true
+    }
+}
+
+// Web3 example with decentralized identity
+did (identity: array<u8, 32], credential: array<u8, 32]) -> array<u8, 32] {
+    let did: array<u8, 32] = create_did(identity, credential);
+    verify_did(did, credential);
+    did
+}
+
+// AI model execution example
+model (weights: array<array<u64, 4>, 2>, biases: array<u64, 4>) -> array<u64, 4] {
+    let output: array<u64, 4> = matrix.mul(weights, biases);
+    let adjusted: array<u64, 4] = tensor_add(output, [1, 1, 1, 1]);
+    adjusted
+}
+
+// IoT device communication example
+device_comm (topic: array<u8, 32], message: array<u8, 32]) -> bool {
+    publish(topic, message)
+}
+
+// Gaming physics and rendering example
+physics (obj1: array<u32, 4], obj2: array<u32, 4]) -> bool {
+    collides(obj1, obj2)
+}
+
+render (sprite: array<u32, 3]) -> bool {
+    draw_sprite(sprite)
+}
+
+// Developer tools debugging example
+debug (message: array<u8, 32]) -> bool {
+    log(message);
+    breakpoint()
+}
+
+// ----------------------
+// 📦 Supported Primitives
+// ----------------------
+// Types:
+// - u8, u16, u32, u64
+// - bool
+// - string (fixed-size, stack-allocated)
+// - fixed-size arrays: array<T, N> (e.g., array<u8, 32>, array<u64, 4>)
+// - result<T, E> (for optional values)
+// - 2D arrays: array<array<T, N>, M> (e.g., array<array<u64, 4>, 2>)
+
+// Operators:
+// - Arithmetic: +, *, -, / (with overflow checks)
+// - Comparisons: ==, !=, <, >, <=, >=
+// - Logical: &&, ||, !
+
+// Control Flow:
+// - if/else
+// - match (pattern matching, e.g., match expr in range { ... })
+// - loop (unrolled at compile time)
+// - No recursion
+
+// Attributes:
+// - #[allow(http)], #[allow(sensor)]: Allow external calls
+// - #[async]: Mark async functions
+// - #[ffi]: Expose for FFI
+// - #[verify], #[contract]: Smart contract annotations
+
+// ----------------------
+// 🔐 Built-in Functions
+// ----------------------
+extern {
+    // Cryptographic Functions
+    fn sha3(input: string | array<u8, N>) -> array<u8, 32]; // SHA3-512 for Kapra Chain
+    fn bls_verify(message: array<u8, 32], pubkey: array<u8, 48], signature: array<u8, 96]) -> bool;
+    fn dil_verify(message: array<u8, 32], pubkey: array<u8, 1312], signature: array<u8, 2420]) -> bool;
+    fn kaprekar(input: array<u8, 4]) -> u16;
+    fn merkle_verify(leaf: array<u8, 32], proof: array<array<u8, 32>, N>, flags: array<bool, N>, root: array<u8, 32>) -> bool;
+    fn vrf_generate(seed: array<u8, 32], key: array<u8, 32>) -> array<u8, 32>;
+
+    // Web3 Functions
+    fn create_did(identity: array<u8, 32], credential: array<u8, 32]) -> array<u8, 32];
+    fn verify_did(did: array<u8, 32], credential: array<u8, 32]) -> bool;
+    fn fetch_oracle_data(url: string) -> array<u8, 32];
+    fn send_cross_chain(chain_id: u32, message: array<u8, 32]) -> bool;
+
+    // AI Functions
+    fn tensor_add(a: array<u64, N>, b: array<u64, N>) -> array<u64, N>;
+    fn tensor_multiply(a: array<u64, N>, b: array<u64, N>) -> array<u64, N>;
+    fn quantize_to_u8(weights: array<array<u64, N>, M>) -> array<array<u8, N>, M>;
+
+    // IoT Functions
+    fn publish(topic: array<u8, 32], message: array<u8, 32]) -> bool;
+    fn sleep(sleep_duration: u32) -> bool;
+    fn wake() -> bool;
+
+    // Gaming Functions
+    fn collides(obj1: array<u32, 4], obj2: array<u32, 4]) -> bool;
+    fn draw_sprite(sprite: array<u32, 3]) -> bool;
+    fn send_state(peer_id: u32, state: array<u8, 32]) -> bool;
+
+    // Developer Tools Functions
+    fn log(message: array<u8, 32]) -> bool;
+    fn breakpoint() -> bool;
+    fn measure(task: array<u8, 32]) -> array<u64, 3>;
+    fn generate_diagram(data: array<u64, 4]) -> bool;
+
+    // Networking Functions (Async)
+    #[async]
+    fn net.tcp_connect(host: string, port: u32) -> u32;
+    fn net.udp_send(host: string, port: u32, data: array<u8, 1024>) -> u32;
+    #[async]
+    fn http.get(url: string) -> string;
+    #[async]
+    fn http.post(url: string, data: string) -> string;
+
+    // Sharding Functions
+    fn shard_route(account: array<u8, 32]) -> u32;
+    #[async]
+    fn shard_send(shard_id: u32, message: array<u8, N>) -> bool;
+
+    // I/O Functions
+    #[async]
+    fn device.sensor(id: u32) -> f32;
+
+    // Math Functions
+    fn matrix.mul(a: array<array<f64, N>, N>, b: array<array<f64, N>, N>) -> array<array<f64, N>, N>;
+    fn math.sin(x: f64) -> f64;
+
+    // Control Functions
+    fn fail() -> !;
+}
+
+// ----------------------
+// 🧠 Example Use Case
+// ----------------------
+// A validator receives a block, verifies the signature, checks a Kaprekar condition,
+// and communicates with other validators via networking.
+
+// Validator logic with sharding, AI, IoT, gaming, and debugging
+fn validate_block(block: array<u8, 1024], pubkey: array<u8, 48], signature: array<u8, 96>) -> bool {
+    let msg: array<u8, 32> = sha3(block);
+    let ok: bool = bls_verify(msg, pubkey, signature);
+
+    debug(msg); // Log message for debugging
+    let metrics: array<u64, 3] = profile(msg); // Profile performance
+
+    if ok == false {
+        fail();
+    }
+
+    let kap: u16 = kaprekar(msg[0..4]);
+    if kap != 6174 {
+        fail();
+    }
+
+    // AI inference for fraud detection
+    let weights: array<array<u64, 4>, 2> = [[1, 2, 3, 4], [5, 6, 7, 8]];
+    let biases: array<u64, 4> = [1, 1, 1, 1];
+    let prediction: array<u64, 4] = model(weights, biases);
+    visualize(prediction); // Visualize AI prediction
+
+    // IoT sensor data
+    let sensor_data: array<u8, 8> = device.sensor(1);
+    device_comm(msg, sensor_data);
+    power_manage(1000);
+
+    // Game mechanics (e.g., NFT-based game on Kapra Chain)
+    let player: array<u32, 4> = [0, 0, 10, 10];
+    let enemy: array<u32, 4> = [5, 5, 10, 10];
+    let collided: bool = physics(player, enemy);
+    if collided {
+        let sprite: array<u32, 3] = [5, 5, 1];
+        render(sprite);
+    }
+    multiplayer(1, msg);
+
+    let shard_id: u32 = shard_route(pubkey);
+    shard_send(shard_id, msg);
+
+    true
+}
+
+// More complex control flow, arithmetic, loops, etc., are minimal or precompiled.
+// No recursion, no allocation, no classes or traits. Just fast, safe execution.
+
+
+// KSL Syntax Spec (Kapra Systems Language)
+// Designed for speed, security, and total hardware portability
+
+// ----------------------
+// 🔧 Language Goals
+// ----------------------
+// - Fixed-size types only (no dynamic memory)
+// - No heap, no GC, controlled external calls with capability checks
+// - Stack and register-friendly
+// - Deterministic execution (except for controlled async operations)
+// - Crypto, Kaprekar, networking, AI, IoT, gaming, and developer tools primitives built in
+
+// ----------------------
+// 🧱 Base Syntax Format
+// ----------------------
+
+// KSL looks like a simplified, typed mix of Rust and WASM
+
+fn main() {
+    let msg: array<u8, 32> = sha3("blockroot.epoch.validator");
+    let ok: bool = bls_verify(msg, pubkey, signature);
+
+    if ok == false {
+        fail();
+    }
+
+    let kap: u16 = kaprekar(msg[0..4]);
+    if kap != 6174 {
+        fail();
+    }
+
+    // Async networking example
+    #[async]
+    fn fetch_data() -> string {
+        let response = http.post("https://api.example.com", "data").await;
+        response
+    }
+
+    // Pattern matching
+    match shard_id in 0..1000 {
+        let shard = shard_route(account);
+    }
+
+    return;
+}
+
+// Smart contract example
+#[contract]
+contract MyContract {
+    resource Token { amount: u64 }
+
+    fn transfer(token: Token, recipient: array<u8, 32>) -> bool {
+        true
+    }
+}
+
+// Web3 examples
+did (identity: array<u8, 32], credential: array<u8, 32]) -> array<u8, 32] {
+    let did: array<u8, 32] = create_did(identity, credential);
+    verify_did(did, credential);
+    did
+}
+
+oracle (url: array<u8, 32]) -> array<u8, 32] {
+    let data: array<u8, 32] = fetch_oracle_data(url);
+    data
+}
+
+cross_chain (chain_id: u32, message: array<u8, 32]) -> bool {
+    send_cross_chain(chain_id, message)
+}
+
+// AI model execution example
+model (weights: array<array<u64, 4>, 2>, biases: array<u64, 4]) -> array<u64, 4] {
+    let output: array<u64, 4] = matrix.mul(weights, biases);
+    let adjusted: array<u64, 4] = tensor_add(output, [1, 1, 1, 1]);
+    adjusted
+}
+
+quantize (weights: array<array<u64, 4>, 2>) -> array<array<u8, 4>, 2] {
+    let quantized: array<array<u8, 4>, 2> = quantize_to_u8(weights);
+    quantized
+}
+
+// IoT examples
+device_comm (topic: array<u8, 32], message: array<u8, 32]) -> bool {
+    publish(topic, message)
+}
+
+power_manage (sleep_duration: u32) -> bool {
+    sleep(sleep_duration);
+    wake()
+}
+
+// Gaming examples
+physics (obj1: array<u32, 4], obj2: array<u32, 4]) -> bool {
+    collides(obj1, obj2)
+}
+
+render (sprite: array<u32, 3]) -> bool {
+    draw_sprite(sprite)
+}
+
+multiplayer (peer_id: u32, state: array<u8, 32]) -> bool {
+    send_state(peer_id, state)
+}
+
+// Developer tools examples
+debug (message: array<u8, 32]) -> bool {
+    log(message);
+    breakpoint()
+}
+
+profile (task: array<u8, 32]) -> array<u64, 3] {
+    measure(task)
+}
+
+visualize (data: array<u64, 4]) -> bool {
+    generate_diagram(data)
+}
+
+// ----------------------
+// 📦 Supported Primitives
+// ----------------------
+// Types:
+// - u8, u16, u32, u64
+// - bool
+// - string (fixed-size, stack-allocated)
+// - fixed-size arrays: array<T, N> (e.g., array<u8, 32>, array<u64, 4>)
+// - result<T, E> (for optional values)
+// - 2D arrays: array<array<T, N>, M> (e.g., array<array<u64, 4>, 2>)
+
+// Operators:
+// - Arithmetic: +, *, -, / (with overflow checks)
+// - Comparisons: ==, !=, <, >, <=, >=
+// - Logical: &&, ||, !
+
+// Control Flow:
+// - if/else
+// - match (pattern matching, e.g., match expr in range { ... })
+// - loop (unrolled at compile time)
+// - No recursion
+
+// Attributes:
+// - #[allow(http)], #[allow(sensor)]: Allow external calls
+// - #[async]: Mark async functions
+// - #[ffi]: Expose for FFI
+// - #[verify], #[contract]: Smart contract annotations
+
+// ----------------------
+// 🔐 Built-in Functions
+// ----------------------
+extern {
+    // Cryptographic Functions
+    fn sha3(input: string | array<u8, N>) -> array<u8, 32]; // SHA3-512 for Kapra Chain
+    fn bls_verify(message: array<u8, 32], pubkey: array<u8, 48], signature: array<u8, 96]) -> bool;
+    fn dil_verify(message: array<u8, 32], pubkey: array<u8, 1312], signature: array<u8, 2420]) -> bool;
+    fn kaprekar(input: array<u8, 4]) -> u16;
+    fn merkle_verify(leaf: array<u8, 32], proof: array<array<u8, 32>, N>, flags: array<bool, N>, root: array<u8, 32>) -> bool;
+    fn vrf_generate(seed: array<u8, 32], key: array<u8, 32]) -> array<u8, 32>;
+
+    // Web3 Functions
+    fn create_did(identity: array<u8, 32], credential: array<u8, 32]) -> array<u8, 32];
+    fn verify_did(did: array<u8, 32], credential: array<u8, 32]) -> bool;
+    fn fetch_oracle_data(url: string) -> array<u8, 32];
+    fn send_cross_chain(chain_id: u32, message: array<u8, 32]) -> bool;
+
+    // AI Functions
+    fn tensor_add(a: array<u64, N>, b: array<u64, N>) -> array<u64, N>;
+    fn tensor_multiply(a: array<u64, N>, b: array<u64, N>) -> array<u64, N>;
+    fn quantize_to_u8(weights: array<array<u64, N>, M>) -> array<array<u8, N>, M>;
+
+    // IoT Functions
+    fn publish(topic: array<u8, 32], message: array<u8, 32]) -> bool;
+    fn sleep(sleep_duration: u32) -> bool;
+    fn wake() -> bool;
+
+    // Gaming Functions
+    fn collides(obj1: array<u32, 4], obj2: array<u32, 4]) -> bool;
+    fn draw_sprite(sprite: array<u32, 3]) -> bool;
+    fn send_state(peer_id: u32, state: array<u8, 32]) -> bool;
+
+    // Developer Tools Functions
+    fn log(message: array<u8, 32]) -> bool;
+    fn breakpoint() -> bool;
+    fn measure(task: array<u8, 32]) -> array<u64, 3>;
+    fn generate_diagram(data: array<u64, 4]) -> bool;
+
+    // Networking Functions (Async)
+    #[async]
+    fn net.tcp_connect(host: string, port: u32) -> u32;
+    fn net.udp_send(host: string, port: u32, data: array<u8, 1024>) -> u32;
+    #[async]
+    fn http.get(url: string) -> string;
+    #[async]
+    fn http.post(url: string, data: string) -> string;
+
+    // Sharding Functions
+    fn shard_route(account: array<u8, 32]) -> u32;
+    #[async]
+    fn shard_send(shard_id: u32, message: array<u8, N>) -> bool;
+
+    // I/O Functions
+    #[async]
+    fn device.sensor(id: u32) -> f32;
+
+    // Math Functions
+    fn matrix.mul(a: array<array<f64, N>, N>, b: array<array<f64, N>, N>) -> array<array<f64, N>, N>;
+    fn math.sin(x: f64) -> f64;
+
+    // Control Functions
+    fn fail() -> !;
+}
+
+// ----------------------
+// 🧠 Example Use Case
+// ----------------------
+// A validator receives a block, verifies the signature, checks a Kaprekar condition,
+// and communicates with other validators via networking.
+
+// Validator logic with sharding, AI, IoT, gaming, Web3, and debugging
+fn validate_block(block: array<u8, 1024], pubkey: array<u8, 48], signature: array<u8, 96]) -> bool {
+    let msg: array<u8, 32> = sha3(block);
+    let ok: bool = bls_verify(msg, pubkey, signature);
+
+    debug(msg); // Log message for debugging
+    let metrics: array<u64, 3] = profile(msg); // Profile performance
+
+    if ok == false {
+        fail();
+    }
+
+    let kap: u16 = kaprekar(msg[0..4]);
+    if kap != 6174 {
+        fail();
+    }
+
+    // Web3 oracle data fetching
+    let price_feed: array<u8, 32] = oracle("https://price-feed");
+
+    // AI inference for fraud detection
+    let weights: array<array<u64, 4>, 2> = [[1, 2, 3, 4], [5, 6, 7, 8]];
+    let biases: array<u64, 4> = [1, 1, 1, 1];
+    let prediction: array<u64, 4> = model(weights, biases);
+    visualize(prediction); // Visualize AI prediction
+
+    // IoT sensor data
+    let sensor_data: array<u8, 8> = device.sensor(1);
+    device_comm(msg, sensor_data);
+    power_manage(1000);
+
+    // Game mechanics (e.g., NFT-based game on Kapra Chain)
+    let player: array<u32, 4> = [0, 0, 10, 10];
+    let enemy: array<u32, 4> = [5, 5, 10, 10];
+    let collided: bool = physics(player, enemy);
+    if collided {
+        let sprite: array<u32, 3> = [5, 5, 1];
+        render(sprite);
+    }
+    multiplayer(1, msg);
+
+    let shard_id: u32 = shard_route(pubkey);
+    shard_send(shard_id, msg);
+
+    true
+}
+
+// More complex control flow, arithmetic, loops, etc., are minimal or precompiled.
 // No recursion, no allocation, no classes or traits. Just fast, safe execution.
