@@ -1,0 +1,62 @@
+// KSL Syntax Spec (Kapra Systems Language)
+// Designed for speed, security, and total hardware portability
+
+// ----------------------
+// 🔧 Language Goals
+// ----------------------
+// - Fixed-size types only (no dynamic memory)
+// - No heap, no GC, no syscalls
+// - Stack and register-friendly
+// - Deterministic execution
+// - Crypto and Kaprekar primitives built in
+
+// ----------------------
+// 🧱 Base Syntax Format
+// ----------------------
+
+// KSL looks like a simplified, typed mix of Rust and WASM
+
+fn main() {
+    let msg: [u8; 32] = sha3("blockroot.epoch.validator");
+    let ok: bool = bls_verify(msg, pubkey, signature);
+
+    if ok == false {
+        fail();
+    }
+
+    let kap: u16 = kaprekar(msg[0..4]);
+    if kap != 6174 {
+        fail();
+    }
+
+    return;
+}
+
+// ----------------------
+// 📦 Supported Primitives
+// ----------------------
+// Types:
+// - u8, u16, u32, u64
+// - bool
+// - fixed-size arrays only: [u8; 32], [u64; 4], etc
+
+// ----------------------
+// 🔐 Built-in Functions
+// ----------------------
+extern {
+    fn sha3(input: string | [u8; N]) -> [u8; 32];
+    fn bls_verify(message: [u8; 32], pubkey: [u8; 48], signature: [u8; 96]) -> bool;
+    fn dil_verify(message: [u8; 32], pubkey: [u8; 1312], signature: [u8; 2420]) -> bool;
+    fn kaprekar(input: [u8; 4]) -> u16;
+    fn merkle_verify(leaf: [u8; 32], proof: [[u8; 32]; N], flags: [bool; N], root: [u8; 32]) -> bool;
+    fn fail() -> !;
+}
+
+// ----------------------
+// 🧠 Example Use Case
+// ----------------------
+// A validator receives a block, verifies the signature, checks a Kaprekar condition,
+// and halts execution if invalid. Otherwise, exits cleanly.
+
+// More complex control flow, arithmetic, loops, etc., will be minimal or precompiled.
+// No recursion, no allocation, no classes or traits. Just fast, safe execution.
