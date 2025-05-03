@@ -1,361 +1,442 @@
 // ksl_plugin.rs
 // Implements the KSL plugin system for extending the language with custom tools,
-// ensuring lightweight and secure execution with minimal runtime overhead.
+// combining lightweight execution, robust security, and flexible extensibility.
 
-use crate::ksl_bind::KslBind;
-use crate::ksl_parser::{KslParser, ParseError};
-use crate::ksl_sandbox::{KslSandbox, SandboxConfig};
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::path::Path;
-use std::sync::Arc;
+use crate::ksl_parser::{parse, AstNode, ParseError};
+use crate::ksl_sandbox::Sandbox;
+use crate::ksl_module::ModuleSystem;
+use crate::ksl_errors::{KslError, SourcePosition};
 use libloading::{Library, Symbol};
+use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
+use std::fs;
+use serde::{Deserialize, Serialize};
 
-// Plugin metadata stored in plugin configuration.
-#[derive(Serialize, Deserialize, Clone)]
+// Plugin metadata for discoverability
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct PluginMetadata {
-    name: String,
-    version: String,
-    description: String,
-    commands: Vec<String>,
-    hooks: Vec<String>,
+    pub name: String,
+    pub version: String,
+    pub description: String,
+    pub commands: Vec<String>,
+    pub hooks: Vec<String>,
 }
 
-// Plugin interface for command and hook registration.
-pub trait KslPlugin {
-    fn metadata(&self) -> PluginMetadata;
-    fn execute_command(&self, command: &str, args: Vec<String>) -> Result<String, PluginError>;
-    fn execute_hook(&self, hook: &str, context: PluginContext) -> Result<(), PluginError>;
+// Plugin context for hooks, providing access to KSL state
+#[derive(Clone)]
+pub struct PluginContext<'a> {
+    pub source_code: String,
+    pub ast: &'a [AstNode],
+    pub capabilities: HashSet<String>,
 }
 
-// Context passed to hooks, providing access to KSL state.
-#[derive(Serialize, Deserialize, Clone)]
-pub struct PluginContext {
-    source_code: String,
-    ast: Option<String>, // Serialized AST for analysis
-    capabilities: Vec<String>, // Allowed capabilities
-}
-
-// Errors for plugin operations.
+// Plugin error types
 #[derive(Debug)]
 pub enum PluginError {
-    LoadError(String),
-    SymbolError(String),
-    ExecutionError(String),
-    InvalidMetadata(String),
-    SandboxViolation(String),
+    LoadError(String, SourcePosition),
+    SymbolError(String, SourcePosition),
+    ExecutionError(String, SourcePosition),
+    InvalidMetadata(String, SourcePosition),
+    SandboxViolation(String, SourcePosition),
+    ParseError(ParseError),
 }
 
-// Manages plugin loading, registration, and execution.
-pub struct KslPluginManager {
-    plugins: HashMap<String, Arc<PluginInstance>>,
-    sandbox: KslSandbox,
-    libraries: Vec<Library>, // Keep libraries alive
+impl From<PluginError> for KslError {
+    fn from(err: PluginError) -> KslError {
+        match err {
+            PluginError::LoadError(msg, pos) => KslError::type_error(msg, pos),
+            PluginError::SymbolError(msg, pos) => KslError::type_error(msg, pos),
+            PluginError::ExecutionError(msg, pos) => KslError::type_error(msg, pos),
+            PluginError::InvalidMetadata(msg, pos) => KslError::type_error(msg, pos),
+            PluginError::SandboxViolation(msg, pos) => KslError::type_error(msg, pos),
+            PluginError::ParseError(e) => KslError::type_error(e.message, SourcePosition::new(e.position, e.position)),
+        }
+    }
 }
 
-struct PluginInstance {
-    metadata: PluginMetadata,
-    plugin: Box<dyn KslPlugin>,
+// Plugin interface for command and hook registration
+pub trait KslPlugin {
+    fn metadata(&self) -> PluginMetadata;
+    fn execute_command(&self, command: &str, ast: &[AstNode], args: &[String], module_system: &ModuleSystem) -> Result<String, PluginError>;
+    fn pre_compile_hook(&self, ast: &mut Vec<AstNode>, context: PluginContext, module_system: &ModuleSystem) -> Result<(), PluginError>;
+    fn post_compile_hook(&self, ast: &[AstNode], context: PluginContext, module_system: &ModuleSystem) -> Result<(), PluginError>;
 }
 
-impl KslPluginManager {
-    pub fn new(sandbox_config: SandboxConfig) -> Self {
-        KslPluginManager {
+// Plugin manager for loading, registering, and executing plugins
+pub struct PluginSystem {
+    plugins: HashMap<String, Box<dyn KslPlugin>>,
+    libraries: Vec<Library>,
+    module_system: ModuleSystem,
+}
+
+impl PluginSystem {
+    pub fn new() -> Self {
+        PluginSystem {
             plugins: HashMap::new(),
-            sandbox: KslSandbox::new(sandbox_config),
             libraries: Vec::new(),
+            module_system: ModuleSystem::new(),
         }
     }
 
-    // Loads a plugin from a shared library (.so or .dll).
-    pub fn load_plugin<P: AsRef<Path>>(
+    // Install a plugin from a shared library
+    pub fn install(&mut self, plugin_path: &PathBuf) -> Result<(), PluginError> {
+        let pos = SourcePosition::new(1, 1); // To be enhanced with precise positions
+        // Load shared library
+        let lib = unsafe {
+            Library::new(plugin_path).map_err(|e| PluginError::LoadError(
+                format!("Failed to load plugin {}: {}", plugin_path.display(), e),
+                pos,
+            ))?
+        };
+
+        // Get plugin factory
+        let factory: Symbol<unsafe extern "C" fn() -> *mut dyn KslPlugin> = unsafe {
+            lib.get(b"create_plugin").map_err(|e| PluginError::SymbolError(
+                format!("Failed to find create_plugin in {}: {}", plugin_path.display(), e),
+                pos,
+            ))?
+        };
+
+        // Create plugin instance
+        let plugin = unsafe {
+            let plugin_ptr = factory();
+            Box::from_raw(plugin_ptr)
+        };
+
+        let metadata = plugin.metadata();
+        if metadata.name.is_empty() || metadata.version.is_empty() {
+            return Err(PluginError::InvalidMetadata(
+                "Plugin name or version missing".to_string(),
+                pos,
+            ));
+        }
+
+        if self.plugins.contains_key(&metadata.name) {
+            return Err(PluginError::InvalidMetadata(
+                format!("Plugin {} already installed", metadata.name),
+                pos,
+            ));
+        }
+
+        // Register plugin
+        self.plugins.insert(metadata.name.clone(), plugin);
+        self.libraries.push(lib);
+        Ok(())
+    }
+
+    // Run a plugin command on a KSL file
+    pub fn run_plugin(
         &mut self,
-        path: P,
-        parser: &KslParser,
-    ) -> Result<(), PluginError> {
-        unsafe {
-            let library = Library::new(path.as_ref())
-                .map_err(|e| PluginError::LoadError(e.to_string()))?;
-            
-            // Get plugin entry point
-            let constructor: Symbol<unsafe extern "C" fn() -> *mut dyn KslPlugin> = library
-                .get(b"create_plugin")
-                .map_err(|e| PluginError::SymbolError(e.to_string()))?;
-            
-            let plugin_ptr = constructor();
-            let plugin = Box::from_raw(plugin_ptr);
-            let metadata = plugin.metadata();
-
-            // Validate metadata
-            if metadata.name.is_empty() || metadata.version.is_empty() {
-                return Err(PluginError::InvalidMetadata("Name or version missing".into()));
-            }
-
-            // Validate plugin code if source is provided
-            if let Some(source) = metadata.commands.iter().find(|c| c.contains("source")) {
-                let parse_result = parser.parse(source);
-                if let Err(ParseError { message, .. }) = parse_result {
-                    return Err(PluginError::InvalidMetadata(format!(
-                        "Plugin source parse error: {}",
-                        message
-                    )));
-                }
-            }
-
-            // Store plugin and keep library alive
-            self.plugins.insert(
-                metadata.name.clone(),
-                Arc::new(PluginInstance {
-                    metadata,
-                    plugin,
-                }),
-            );
-            self.libraries.push(library);
-            Ok(())
-        }
-    }
-
-    // Executes a plugin command with sandboxed restrictions.
-    pub fn execute_command(
-        &self,
         plugin_name: &str,
         command: &str,
-        args: Vec<String>,
+        file: &PathBuf,
+        args: &[String],
     ) -> Result<String, PluginError> {
-        let plugin_instance = self
-            .plugins
-            .get(plugin_name)
-            .ok_or_else(|| PluginError::LoadError(format!("Plugin {} not found", plugin_name)))?;
+        let pos = SourcePosition::new(1, 1); // To be enhanced
+        let plugin = self.plugins.get(plugin_name).ok_or_else(|| PluginError::LoadError(
+            format!("Plugin {} not found", plugin_name),
+            pos,
+        ))?;
 
-        if !plugin_instance.metadata.commands.contains(&command.to_string()) {
-            return Err(PluginError::ExecutionError(format!(
-                "Command {} not registered",
-                command
-            )));
+        let metadata = plugin.metadata();
+        if !metadata.commands.contains(&command.to_string()) {
+            return Err(PluginError::ExecutionError(
+                format!("Command {} not supported by plugin {}", command, plugin_name),
+                pos,
+            ));
         }
 
-        // Execute in sandbox
-        self.sandbox.execute(|| {
-            plugin_instance
-                .plugin
-                .execute_command(command, args)
-                .map_err(|e| PluginError::ExecutionError(format!("Command failed: {:?}", e)))
-        })
+        // Load and parse file
+        let source = fs::read_to_string(file)
+            .map_err(|e| PluginError::ExecutionError(
+                format!("Failed to read file {}: {}", file.display(), e),
+                pos,
+            ))?;
+        let mut ast = parse(&source)
+            .map_err(PluginError::ParseError)?;
+
+        // Load modules
+        let main_module_name = file.file_stem()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| PluginError::InvalidMetadata(
+                "Invalid main file name".to_string(),
+                pos,
+            ))?;
+        self.module_system.load_module(main_module_name, file)
+            .map_err(|e| PluginError::ExecutionError(e.to_string(), pos))?;
+
+        // Extract capabilities from AST
+        let capabilities = extract_capabilities(&ast);
+
+        // Run pre-compile hook
+        let context = PluginContext {
+            source_code: source.clone(),
+            ast: &ast,
+            capabilities: capabilities.clone(),
+        };
+        plugin.pre_compile_hook(&mut ast, context.clone(), &self.module_system)?;
+
+        // Run in sandbox
+        let mut sandbox = Sandbox::new();
+        if !capabilities.iter().all(|cap| matches!(cap.as_str(), "http" | "sensor")) {
+            return Err(PluginError::SandboxViolation(
+                "Invalid capabilities in AST".to_string(),
+                pos,
+            ));
+        }
+        sandbox.run_sandbox(file)
+            .map_err(|e| PluginError::SandboxViolation(
+                e.into_iter().map(|e| e.to_string()).collect::<Vec<_>>().join("\n"),
+                pos,
+            ))?;
+
+        // Execute command
+        let result = plugin.execute_command(command, &ast, args, &self.module_system)?;
+
+        // Run post-compile hook
+        plugin.post_compile_hook(&ast, context, &self.module_system)?;
+
+        Ok(result)
     }
 
-    // Executes a plugin hook with context, sandboxed for security.
-    pub fn execute_hook(
-        &self,
-        plugin_name: &str,
-        hook: &str,
-        context: PluginContext,
-    ) -> Result<(), PluginError> {
-        let plugin_instance = self
-            .plugins
-            .get(plugin_name)
-            .ok_or_else(|| PluginError::LoadError(format!("Plugin {} not found", plugin_name)))?;
-
-        if !plugin_instance.metadata.hooks.contains(&hook.to_string()) {
-            return Err(PluginError::ExecutionError(format!(
-                "Hook {} not registered",
-                hook
-            )));
-        }
-
-        // Validate capabilities in context
-        for cap in &context.capabilities {
-            if !self.sandbox.is_capability_allowed(cap) {
-                return Err(PluginError::SandboxViolation(format!(
-                    "Capability {} not allowed",
-                    cap
-                )));
-            }
-        }
-
-        // Execute in sandbox
-        self.sandbox.execute(|| {
-            plugin_instance
-                .plugin
-                .execute_hook(hook, context)
-                .map_err(|e| PluginError::ExecutionError(format!("Hook failed: {:?}", e)))
-        })
-    }
-
-    // Lists all loaded plugins and their metadata.
+    // List installed plugins and their metadata
     pub fn list_plugins(&self) -> Vec<PluginMetadata> {
-        self.plugins
-            .values()
-            .map(|instance| instance.metadata.clone())
-            .collect()
+        self.plugins.values().map(|plugin| plugin.metadata()).collect()
     }
 }
 
-// CLI integration for plugin commands.
-pub fn handle_plugin_command(
-    manager: &mut KslPluginManager,
-    parser: &KslParser,
-    args: Vec<String>,
+// Extract capabilities from AST (e.g., #[allow(http)])
+fn extract_capabilities(ast: &[AstNode]) -> HashSet<String> {
+    let mut capabilities = HashSet::new();
+    for node in ast {
+        if let AstNode::FnDecl { attributes, .. } = node {
+            for attr in attributes {
+                if attr.name.starts_with("allow(") && attr.name.ends_with(")") {
+                    let cap = attr.name[6..attr.name.len()-1].to_string();
+                    capabilities.insert(cap);
+                }
+            }
+        }
+    }
+    capabilities
+}
+
+// Public API for plugin management
+pub fn install_plugin(plugin_path: &PathBuf) -> Result<(), PluginError> {
+    let mut plugin_system = PluginSystem::new();
+    plugin_system.install(plugin_path)
+}
+
+pub fn run_plugin_command(
+    plugin_name: &str,
+    command: &str,
+    file: &PathBuf,
+    args: &[String],
 ) -> Result<String, PluginError> {
-    if args.is_empty() {
-        return Err(PluginError::ExecutionError("No plugin command provided".into()));
-    }
-
-    match args[0].as_str() {
-        "install" => {
-            if args.len() < 2 {
-                return Err(PluginError::ExecutionError("Plugin path required".into()));
-            }
-            manager
-                .load_plugin(&args[1], parser)
-                .map(|_| format!("Plugin {} installed", args[1]))
-        }
-        "list" => {
-            let plugins = manager.list_plugins();
-            let output = plugins
-                .into_iter()
-                .map(|meta| {
-                    format!(
-                        "{} (v{}): {}",
-                        meta.name, meta.version, meta.description
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            Ok(if output.is_empty() {
-                "No plugins installed".into()
-            } else {
-                output
-            })
-        }
-        "execute" => {
-            if args.len() < 4 {
-                return Err(PluginError::ExecutionError(
-                    "Usage: execute <plugin> <command> [args]".into(),
-                ));
-            }
-            manager.execute_command(&args[1], &args[2], args[3..].to_vec())
-        }
-        _ => Err(PluginError::ExecutionError(format!(
-            "Unknown plugin command: {}",
-            args[0]
-        ))),
-    }
+    let mut plugin_system = PluginSystem::new();
+    plugin_system.run_plugin(plugin_name, command, file, args)
 }
 
-// Example plugin implementation (for testing or as a template).
-pub struct ExamplePlugin;
+// Example plugin for testing
+#[cfg(test)]
+struct TestPlugin;
 
-impl KslPlugin for ExamplePlugin {
+#[cfg(test)]
+impl KslPlugin for TestPlugin {
     fn metadata(&self) -> PluginMetadata {
         PluginMetadata {
-            name: "example".into(),
-            version: "0.1.0".into(),
-            description: "Example KSL plugin".into(),
-            commands: vec!["analyze".into(), "format".into()],
-            hooks: vec!["pre_compile".into(), "post_compile".into()],
+            name: "test_plugin".to_string(),
+            version: "0.1.0".to_string(),
+            description: "Test plugin for KSL linting and formatting".to_string(),
+            commands: vec!["lint".to_string(), "format".to_string()],
+            hooks: vec!["pre_compile".to_string(), "post_compile".to_string()],
         }
     }
 
-    fn execute_command(&self, command: &str, args: Vec<String>) -> Result<String, PluginError> {
+    fn execute_command(&self, command: &str, ast: &[AstNode], args: &[String], _module_system: &ModuleSystem) -> Result<String, PluginError> {
+        let pos = SourcePosition::new(1, 1);
         match command {
-            "analyze" => Ok(format!("Analyzing code with args: {:?}", args)),
-            "format" => Ok(format!("Formatting code with args: {:?}", args)),
-            _ => Err(PluginError::ExecutionError(format!(
-                "Unknown command: {}",
-                command
-            ))),
+            "lint" => {
+                let mut warnings = vec![];
+                for node in ast {
+                    if let AstNode::VarDecl { name, .. } = node {
+                        if !name.chars().all(|c| c.is_lowercase() || c == '_') {
+                            warnings.push(format!("Variable {} should use snake_case at position {}", name, pos));
+                        }
+                    }
+                }
+                Ok(warnings.join("\n"))
+            }
+            "format" => Ok(format!("Formatted AST with args: {:?}", args)),
+            _ => Err(PluginError::ExecutionError(
+                format!("Unknown command: {}", command),
+                pos,
+            )),
         }
     }
 
-    fn execute_hook(&self, hook: &str, context: PluginContext) -> Result<(), PluginError> {
-        match hook {
-            "pre_compile" => {
-                println!("Pre-compile hook: Processing source {}", context.source_code);
-                Ok(())
-            }
-            "post_compile" => {
-                println!("Post-compile hook: AST {:?}", context.ast);
-                Ok(())
-            }
-            _ => Err(PluginError::ExecutionError(format!("Unknown hook: {}", hook))),
+    fn pre_compile_hook(&self, ast: &mut Vec<AstNode>, context: PluginContext, _module_system: &ModuleSystem) -> Result<(), PluginError> {
+        let pos = SourcePosition::new(1, 1);
+        if context.source_code.contains("unsafe") {
+            return Err(PluginError::ExecutionError(
+                "Unsafe code detected in pre-compile hook".to_string(),
+                pos,
+            ));
         }
+        Ok(())
     }
+
+    fn post_compile_hook(&self, _ast: &[AstNode], context: PluginContext, _module_system: &ModuleSystem) -> Result<(), PluginError> {
+        let pos = SourcePosition::new(1, 1);
+        if context.capabilities.contains("http") {
+            println!("Post-compile: HTTP capability detected");
+        }
+        Ok(())
+    }
+}
+
+// Assume ksl_parser.rs, ksl_sandbox.rs, ksl_module.rs, and ksl_errors.rs are in the same crate
+mod ksl_parser {
+    pub use super::{parse, AstNode, ParseError};
+}
+
+mod ksl_sandbox {
+    pub use super::Sandbox;
+}
+
+mod ksl_module {
+    pub use super::ModuleSystem;
+}
+
+mod ksl_errors {
+    pub use super::{KslError, SourcePosition};
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn create_test_manager() -> KslPluginManager {
-        let sandbox_config = SandboxConfig {
-            max_memory: 1024 * 1024, // 1 MB
-            max_instructions: 100_000,
-            allowed_capabilities: vec!["http".into()],
-        };
-        KslPluginManager::new(sandbox_config)
-    }
+    use std::io::Write;
+    use tempfile::NamedTempFile;
 
     #[test]
-    fn test_plugin_load_and_execute() {
-        let mut manager = create_test_manager();
-        let parser = KslParser::new();
-
-        // Simulate plugin loading (using ExamplePlugin directly)
-        let plugin = Box::new(ExamplePlugin);
-        let metadata = plugin.metadata();
-        manager.plugins.insert(
-            metadata.name.clone(),
-            Arc::new(PluginInstance {
-                metadata: metadata.clone(),
-                plugin,
-            }),
+    fn test_plugin_install_and_list() {
+        let mut plugin_system = PluginSystem::new();
+        plugin_system.plugins.insert(
+            "test_plugin".to_string(),
+            Box::new(TestPlugin),
         );
 
-        // Test command execution
-        let result = manager
-            .execute_command("example", "analyze", vec!["file.ksl".into()])
-            .unwrap();
-        assert!(result.contains("Analyzing code"));
-
-        // Test hook execution
-        let context = PluginContext {
-            source_code: "fn main() {}".into(),
-            ast: Some("serialized_ast".into()),
-            capabilities: vec!["http".into()],
-        };
-        manager
-            .execute_hook("example", "pre_compile", context)
-            .unwrap();
-
-        // Test invalid command
-        let err = manager
-            .execute_command("example", "invalid", vec![])
-            .unwrap_err();
-        assert!(matches!(err, PluginError::ExecutionError(_)));
-
-        // Test invalid plugin
-        let err = manager
-            .execute_command("nonexistent", "analyze", vec![])
-            .unwrap_err();
-        assert!(matches!(err, PluginError::LoadError(_)));
-    }
-
-    #[test]
-    fn test_plugin_list() {
-        let mut manager = create_test_manager();
-        let plugin = Box::new(ExamplePlugin);
-        let metadata = plugin.metadata();
-        manager.plugins.insert(
-            metadata.name.clone(),
-            Arc::new(PluginInstance {
-                metadata: metadata.clone(),
-                plugin,
-            }),
-        );
-
-        let plugins = manager.list_plugins();
+        let plugins = plugin_system.list_plugins();
         assert_eq!(plugins.len(), 1);
-        assert_eq!(plugins[0].name, "example");
+        assert_eq!(plugins[0].name, "test_plugin");
         assert_eq!(plugins[0].version, "0.1.0");
+        assert_eq!(plugins[0].commands, vec!["lint", "format"]);
+        assert_eq!(plugins[0].hooks, vec!["pre_compile", "post_compile"]);
+    }
+
+    #[test]
+    fn test_plugin_lint() {
+        let mut temp_file = NamedTempFile::new().unwrap();
+        writeln!(
+            temp_file,
+            "#[allow(http)]\nlet BadName: u32 = 42;\nfn main() { let good_name: u32 = 10; }"
+        ).unwrap();
+
+        let mut plugin_system = PluginSystem::new();
+        plugin_system.plugins.insert(
+            "test_plugin".to_string(),
+            Box::new(TestPlugin),
+        );
+
+        let result = plugin_system.run_plugin(
+            "test_plugin",
+            "lint",
+            &temp_file.path().to_path_buf(),
+            &[],
+        );
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        assert!(output.contains("Variable BadName should use snake_case"));
+        assert!(!output.contains("good_name"));
+    }
+
+    #[test]
+    fn test_plugin_format() {
+        let mut temp_file = NamedTempFile::new().unwrap();
+        writeln!(temp_file, "fn main() { let x: u32 = 42; }").unwrap();
+
+        let mut plugin_system = PluginSystem::new();
+        plugin_system.plugins.insert(
+            "test_plugin".to_string(),
+            Box::new(TestPlugin),
+        );
+
+        let result = plugin_system.run_plugin(
+            "test_plugin",
+            "format",
+            &temp_file.path().to_path_buf(),
+            &["--indent=2".to_string()],
+        );
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "Formatted AST with args: [\"--indent=2\"]");
+    }
+
+    #[test]
+    fn test_plugin_hooks() {
+        let mut temp_file = NamedTempFile::new().unwrap();
+        writeln!(
+            temp_file,
+            "#[allow(http)]\nfn main() { let x: u32 = 42; }"
+        ).unwrap();
+
+        let mut plugin_system = PluginSystem::new();
+        plugin_system.plugins.insert(
+            "test_plugin".to_string(),
+            Box::new(TestPlugin),
+        );
+
+        let result = plugin_system.run_plugin(
+            "test_plugin",
+            "lint",
+            &temp_file.path().to_path_buf(),
+            &[],
+        );
+        assert!(result.is_ok());
+        // Post-compile hook prints to stdout, manually verified
+    }
+
+    #[test]
+    fn test_plugin_unsafe_code() {
+        let mut temp_file = NamedTempFile::new().unwrap();
+        writeln!(temp_file, "fn main() { unsafe_operation(); }").unwrap();
+
+        let mut plugin_system = PluginSystem::new();
+        plugin_system.plugins.insert(
+            "test_plugin".to_string(),
+            Box::new(TestPlugin),
+        );
+
+        let result = plugin_system.run_plugin(
+            "test_plugin",
+            "lint",
+            &temp_file.path().to_path_buf(),
+            &[],
+        );
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), PluginError::ExecutionError(ref msg, _) if msg.contains("Unsafe code detected")));
+    }
+
+    #[test]
+    fn test_invalid_plugin() {
+        let temp_file = NamedTempFile::new().unwrap();
+        let mut plugin_system = PluginSystem::new();
+        let result = plugin_system.run_plugin(
+            "unknown_plugin",
+            "lint",
+            &temp_file.path().to_path_buf(),
+            &[],
+        );
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), PluginError::LoadError(ref msg, _) if msg.contains("Plugin unknown_plugin not found")));
     }
 }
