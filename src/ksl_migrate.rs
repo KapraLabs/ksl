@@ -3,54 +3,80 @@
 // features and updating code to the latest version with a migration report.
 
 use crate::ksl_parser::{parse, AstNode, ExprKind, ParseError};
+use crate::ksl_ast_transform::{AstTransformer, TransformError};
 use crate::ksl_checker::check;
 use crate::ksl_doc::{StdLibFunctionTrait};
 use crate::ksl_errors::{KslError, SourcePosition};
+use crate::ksl_async::{AsyncContext, AsyncCommand};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::PathBuf;
 use std::collections::VecDeque;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
-// Migration configuration
+/// Configuration for KSL code migration.
 #[derive(Debug)]
 pub struct MigrationConfig {
-    input_file: PathBuf, // Source file to migrate
-    output_file: Option<PathBuf>, // Optional output file (defaults to input_file)
-    target_version: String, // Target KSL version (e.g., "2.0")
-    report_path: Option<PathBuf>, // Optional path for migration report
+    /// Source file to migrate
+    input_file: PathBuf,
+    /// Optional output file (defaults to input_file)
+    output_file: Option<PathBuf>,
+    /// Target KSL version (e.g., "2.0")
+    target_version: String,
+    /// Optional path for migration report
+    report_path: Option<PathBuf>,
+    /// Whether to enable async processing
+    enable_async: bool,
 }
 
-// Migration report entry
+/// Represents a single change made during migration.
 #[derive(Debug)]
 struct MigrationChange {
-    description: String, // Description of the change
-    position: SourcePosition, // Location in source code
-    remediation: String, // Details of what was changed
+    /// Description of the change
+    description: String,
+    /// Location in source code
+    position: SourcePosition,
+    /// Details of what was changed
+    remediation: String,
+    /// Whether the change requires async processing
+    requires_async: bool,
 }
 
-// Migrator for KSL code
+/// Handles migration of KSL code between versions with async support.
 pub struct Migrator {
+    /// Migration configuration
     config: MigrationConfig,
+    /// List of changes made during migration
     changes: Vec<MigrationChange>,
+    /// Async context for processing
+    async_context: Arc<Mutex<AsyncContext>>,
+    /// AST transformer for code analysis
+    ast_transformer: Arc<Mutex<AstTransformer>>,
 }
 
 impl Migrator {
+    /// Creates a new migrator with the given configuration.
     pub fn new(config: MigrationConfig) -> Self {
         Migrator {
             config,
             changes: Vec::new(),
+            async_context: Arc::new(Mutex::new(AsyncContext::new())),
+            ast_transformer: Arc::new(Mutex::new(AstTransformer::new())),
         }
     }
 
-    // Migrate a KSL source file to the target version
-    pub fn migrate(&mut self) -> Result<Vec<MigrationChange>, KslError> {
+    /// Migrates a KSL source file to the target version asynchronously.
+    pub async fn migrate(&mut self) -> Result<Vec<MigrationChange>, KslError> {
         let pos = SourcePosition::new(1, 1);
+        
         // Read and parse source
         let source = fs::read_to_string(&self.config.input_file)
             .map_err(|e| KslError::type_error(
                 format!("Failed to read file {}: {}", self.config.input_file.display(), e),
                 pos,
             ))?;
+        
         let mut ast = parse(&source)
             .map_err(|e| KslError::type_error(
                 format!("Parse error at position {}: {}", e.position, e.message),
@@ -60,7 +86,7 @@ impl Migrator {
         // Apply migration transformations
         match self.config.target_version.as_str() {
             "2.0" => {
-                self.migrate_to_2_0(&mut ast)?;
+                self.migrate_to_2_0(&mut ast).await?;
             }
             _ => return Err(KslError::type_error(
                 format!("Unsupported target version: {}", self.config.target_version),
@@ -114,15 +140,27 @@ impl Migrator {
         Ok(self.changes.clone())
     }
 
-    // Migrate to KSL version 2.0
-    fn migrate_to_2_0(&mut self, ast: &mut Vec<AstNode>) -> Result<(), KslError> {
+    /// Migrates code to KSL version 2.0 with async support.
+    async fn migrate_to_2_0(&mut self, ast: &mut Vec<AstNode>) -> Result<(), KslError> {
         let pos = SourcePosition::new(1, 1);
         let mut new_ast = Vec::new();
+        
+        // Transform AST nodes
+        let mut transformer = self.ast_transformer.lock().await;
         for node in ast.iter() {
             match node {
                 AstNode::FnDecl { doc, name, params, return_type, body, attributes } => {
                     let mut new_body = Vec::new();
-                    self.transform_body(body, &mut new_body)?;
+                    self.transform_body(body, &mut new_body).await?;
+                    
+                    // Check for async functions
+                    let is_async = attributes.iter().any(|attr| attr == "async");
+                    if is_async && self.config.enable_async {
+                        let mut async_ctx = self.async_context.lock().await;
+                        let command = AsyncCommand::TransformFunction(name.clone());
+                        async_ctx.execute_command(command).await?;
+                    }
+                    
                     new_ast.push(AstNode::FnDecl {
                         doc: doc.clone(),
                         name: name.clone(),
@@ -136,7 +174,7 @@ impl Migrator {
                     let mut new_arms = Vec::new();
                     for arm in arms {
                         let mut new_body = Vec::new();
-                        self.transform_body(&arm.body, &mut new_body)?;
+                        self.transform_body(&arm.body, &mut new_body).await?;
                         new_arms.push(arm.clone_with_body(new_body));
                     }
                     new_ast.push(AstNode::Match {
@@ -146,11 +184,11 @@ impl Migrator {
                 }
                 AstNode::If { condition, then_branch, else_branch } => {
                     let mut new_then = Vec::new();
-                    self.transform_body(then_branch, &mut new_then)?;
+                    self.transform_body(then_branch, &mut new_then).await?;
                     let mut new_else = None;
                     if let Some(else_branch) = else_branch {
                         let mut new_else_branch = Vec::new();
-                        self.transform_body(else_branch, &mut new_else_branch)?;
+                        self.transform_body(else_branch, &mut new_else_branch).await?;
                         new_else = Some(new_else_branch);
                     }
                     new_ast.push(AstNode::If {
@@ -159,11 +197,19 @@ impl Migrator {
                         else_branch: new_else,
                     });
                 }
-                _ => new_ast.push(node.clone()),
+                _ => {
+                    // Apply AST transformations
+                    let transformed_node = transformer.transform(node.clone())
+                        .map_err(|e| KslError::type_error(
+                            format!("AST transformation failed: {}", e),
+                            pos,
+                        ))?;
+                    new_ast.push(transformed_node);
+                }
             }
         }
 
-        // Check for deprecated array syntax (placeholder: no change needed in this case)
+        // Check for deprecated features
         for node in ast.iter() {
             if let AstNode::VarDecl { type_annot, .. } = node {
                 if let Some(TypeAnnotation::Array { element, size }) = type_annot {
@@ -172,6 +218,7 @@ impl Migrator {
                             description: "Deprecated array syntax".to_string(),
                             position: pos,
                             remediation: "Update array syntax to array<element, size> format".to_string(),
+                            requires_async: false,
                         });
                     }
                 }
@@ -182,9 +229,11 @@ impl Migrator {
         Ok(())
     }
 
-    // Transform a block of statements
-    fn transform_body(&mut self, body: &[AstNode], new_body: &mut Vec<AstNode>) -> Result<(), KslError> {
+    /// Transforms a block of statements with async support.
+    async fn transform_body(&mut self, body: &[AstNode], new_body: &mut Vec<AstNode>) -> Result<(), KslError> {
         let pos = SourcePosition::new(1, 1);
+        let mut transformer = self.ast_transformer.lock().await;
+        
         for node in body {
             match node {
                 AstNode::Expr { kind: ExprKind::Call { name, .. } } if name == "time.now" => {
@@ -192,18 +241,26 @@ impl Migrator {
                         description: "Deprecated API: time.now".to_string(),
                         position: pos,
                         remediation: "time.now is removed in version 2.0; use a static timestamp or external time source".to_string(),
+                        requires_async: true,
                     });
+                    
+                    if self.config.enable_async {
+                        let mut async_ctx = self.async_context.lock().await;
+                        let command = AsyncCommand::TransformTimeNow;
+                        async_ctx.execute_command(command).await?;
+                    }
+                    
                     new_body.push(AstNode::Expr {
                         kind: ExprKind::Number("0".to_string()),
                     });
                 }
                 AstNode::If { condition, then_branch, else_branch } => {
                     let mut new_then = Vec::new();
-                    self.transform_body(then_branch, &mut new_then)?;
+                    self.transform_body(then_branch, &mut new_then).await?;
                     let mut new_else = None;
                     if let Some(else_branch) = else_branch {
                         let mut new_else_branch = Vec::new();
-                        self.transform_body(else_branch, &mut new_else_branch)?;
+                        self.transform_body(else_branch, &mut new_else_branch).await?;
                         new_else = Some(new_else_branch);
                     }
                     new_body.push(AstNode::If {
@@ -216,7 +273,7 @@ impl Migrator {
                     let mut new_arms = Vec::new();
                     for arm in arms {
                         let mut new_arm_body = Vec::new();
-                        self.transform_body(&arm.body, &mut new_arm_body)?;
+                        self.transform_body(&arm.body, &mut new_arm_body).await?;
                         new_arms.push(arm.clone_with_body(new_arm_body));
                     }
                     new_body.push(AstNode::Match {
@@ -224,13 +281,21 @@ impl Migrator {
                         arms: new_arms,
                     });
                 }
-                _ => new_body.push(node.clone()),
+                _ => {
+                    // Apply AST transformations
+                    let transformed_node = transformer.transform(node.clone())
+                        .map_err(|e| KslError::type_error(
+                            format!("AST transformation failed: {}", e),
+                            pos,
+                        ))?;
+                    new_body.push(transformed_node);
+                }
             }
         }
         Ok(())
     }
 
-    // Generate migration report
+    /// Generates a detailed migration report.
     fn generate_report(&self) -> String {
         let mut report = String::new();
         report.push_str(&format!("KSL Migration Report (to version {})\n=================\n\n", self.config.target_version));
@@ -240,11 +305,12 @@ impl Migrator {
             report.push_str(&format!("Applied {} changes:\n\n", self.changes.len()));
             for (i, change) in self.changes.iter().enumerate() {
                 report.push_str(&format!(
-                    "Change {}: {}\n  Position: {}\n  Remediation: {}\n\n",
+                    "Change {}: {}\n  Position: {}\n  Remediation: {}\n  Async: {}\n\n",
                     i + 1,
                     change.description,
                     change.position,
-                    change.remediation
+                    change.remediation,
+                    change.requires_async
                 ));
             }
             report.push_str("Note: Deprecated features are documented in the KSL API docs (see ksl_doc.rs).\n");
@@ -366,6 +432,7 @@ pub fn migrate(input_file: &PathBuf, output_file: Option<PathBuf>, target_versio
         output_file,
         target_version: target_version.to_string(),
         report_path,
+        enable_async: false,
     };
     let mut migrator = Migrator::new(config);
     migrator.migrate()

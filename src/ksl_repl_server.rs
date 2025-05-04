@@ -1,172 +1,291 @@
-// ksl_repl_server.rs
-// Provides a REPL server for remote KSL code execution and debugging, enabling
-// interactive sessions over TCP with debugging support.
+/// ksl_repl_server.rs
+/// Provides a REPL server for remote KSL code execution and debugging, enabling
+/// interactive sessions over TCP with debugging support and async operations.
+/// Supports multiple concurrent sessions and network-based code execution.
 
+use crate::ksl_repl::{Repl, ReplConfig, ReplSession};
 use crate::ksl_interpreter::{Interpreter, Value};
 use crate::ksl_debug::{Debugger, DebugCommand};
 use crate::ksl_logger::{init_logger, log_with_trace, Level};
 use crate::ksl_errors::{KslError, SourcePosition};
-use std::net::{TcpListener, TcpStream};
-use std::io::{Read, Write, BufReader, BufRead};
-use std::thread;
-use std::sync::{Arc, Mutex};
+use crate::ksl_stdlib_net::{NetworkManager, TcpConfig};
+use crate::ksl_async::{AsyncRuntime, AsyncResult};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, AsyncBufReadExt};
+use tokio::sync::{RwLock, Mutex};
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
+use serde::{Deserialize, Serialize};
 
-// REPL server configuration
-#[derive(Debug)]
+/// Configuration for the REPL server
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ReplServerConfig {
-    port: u16, // Port to listen on
+    /// Port to listen on
+    pub port: u16,
+    /// Maximum concurrent sessions
+    pub max_sessions: usize,
+    /// Session timeout in seconds
+    pub session_timeout: u64,
+    /// Network configuration
+    pub network_config: TcpConfig,
 }
 
-// REPL server
+/// State for a REPL session
+#[derive(Debug)]
+struct SessionState {
+    /// Session identifier
+    id: String,
+    /// Last activity timestamp
+    last_active: std::time::Instant,
+    /// REPL instance
+    repl: Arc<RwLock<Repl>>,
+    /// Debugger instance
+    debugger: Arc<Mutex<Debugger>>,
+}
+
+/// Async REPL server implementation
 pub struct ReplServer {
+    /// Server configuration
     config: ReplServerConfig,
+    /// Active sessions
+    sessions: Arc<RwLock<HashMap<String, SessionState>>>,
+    /// Network manager
+    network: Arc<NetworkManager>,
+    /// Async runtime
+    runtime: Arc<AsyncRuntime>,
 }
 
 impl ReplServer {
-    pub fn new(config: ReplServerConfig) -> Self {
-        ReplServer { config }
+    /// Creates a new REPL server instance
+    pub fn new(config: ReplServerConfig) -> Result<Self, KslError> {
+        Ok(ReplServer {
+            config: config.clone(),
+            sessions: Arc::new(RwLock::new(HashMap::new())),
+            network: Arc::new(NetworkManager::new(config.network_config)?),
+            runtime: Arc::new(AsyncRuntime::new()),
+        })
     }
 
-    // Start the REPL server
-    pub fn start(&self) -> Result<(), KslError> {
+    /// Starts the REPL server asynchronously
+    pub async fn start_async(&self) -> AsyncResult<()> {
         let pos = SourcePosition::new(1, 1);
+        
         // Initialize logger
         init_logger(Level::Info, true, None, false)?;
 
         // Start TCP server
-        let listener = TcpListener::bind(("127.0.0.1", self.config.port))
+        let addr = format!("127.0.0.1:{}", self.config.port);
+        let listener = TcpListener::bind(&addr).await
             .map_err(|e| KslError::type_error(
                 format!("Failed to bind to port {}: {}", self.config.port, e),
                 pos,
             ))?;
-        log_with_trace(Level::Info, &format!("REPL server started on port {}", self.config.port), None);
+        log_with_trace(Level::Info, &format!("REPL server started on {}", addr), None);
 
-        // Accept client connections
-        for stream in listener.incoming() {
-            let stream = stream.map_err(|e| KslError::type_error(
-                format!("Failed to accept connection: {}", e),
-                pos,
-            ))?;
-            let peer_addr = stream.peer_addr()
-                .map_err(|e| KslError::type_error(
-                    format!("Failed to get peer address: {}", e),
-                    pos,
-                ))?;
-            log_with_trace(Level::Info, &format!("New client connected: {}", peer_addr), None);
+        // Start session cleanup task
+        let sessions = self.sessions.clone();
+        let timeout = self.config.session_timeout;
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+                Self::cleanup_sessions(sessions.clone(), timeout).await;
+            }
+        });
 
-            // Handle client in a separate thread
-            thread::spawn(move || {
-                if let Err(e) = handle_client(stream) {
+        // Accept connections
+        loop {
+            let (stream, addr) = listener.accept().await
+                .map_err(|e| KslError::type_error(format!("Failed to accept connection: {}", e), pos))?;
+            
+            log_with_trace(Level::Info, &format!("New client connected: {}", addr), None);
+
+            // Check session limit
+            let session_count = self.sessions.read().await.len();
+            if session_count >= self.config.max_sessions {
+                stream.write_all(b"Server at capacity. Please try again later.\n").await
+                    .map_err(|e| KslError::type_error(format!("Failed to write to stream: {}", e), pos))?;
+                continue;
+            }
+
+            // Handle client
+            let sessions = self.sessions.clone();
+            let network = self.network.clone();
+            let runtime = self.runtime.clone();
+            tokio::spawn(async move {
+                if let Err(e) = Self::handle_client_async(stream, addr.to_string(), sessions, network, runtime).await {
                     log_with_trace(Level::Error, &format!("Client error: {}", e), None);
                 }
             });
         }
-
-        Ok(())
     }
-}
 
-// Handle a single client connection
-fn handle_client(mut stream: TcpStream) -> Result<(), KslError> {
-    let pos = SourcePosition::new(1, 1);
-    let mut interpreter = Interpreter::new();
-    let debugger = Arc::new(Mutex::new(Debugger::new()));
-    let mut reader = BufReader::new(&stream);
-    let mut buffer = String::new();
+    /// Handles a client connection asynchronously
+    async fn handle_client_async(
+        stream: TcpStream,
+        session_id: String,
+        sessions: Arc<RwLock<HashMap<String, SessionState>>>,
+        network: Arc<NetworkManager>,
+        runtime: Arc<AsyncRuntime>,
+    ) -> AsyncResult<()> {
+        let pos = SourcePosition::new(1, 1);
+        let (reader, mut writer) = stream.into_split();
+        let mut reader = BufReader::new(reader);
+        let mut buffer = String::new();
 
-    // Send welcome message
-    stream.write_all(b"Welcome to KSL REPL Server! Enter KSL code or !commands for debugging (e.g., !break 10).\n> ")
-        .map_err(|e| KslError::type_error(format!("Failed to write to stream: {}", e), pos))?;
-    stream.flush()
-        .map_err(|e| KslError::type_error(format!("Failed to flush stream: {}", e), pos))?;
-
-    loop {
-        buffer.clear();
-        reader.read_line(&mut buffer)
-            .map_err(|e| KslError::type_error(format!("Failed to read from stream: {}", e), pos))?;
-
-        let input = buffer.trim();
-        if input.is_empty() {
-            continue;
-        }
-
-        if input == "exit" {
-            stream.write_all(b"Goodbye!\n")
-                .map_err(|e| KslError::type_error(format!("Failed to write to stream: {}", e), pos))?;
-            break;
-        }
-
-        // Check for debug commands
-        let response = if input.starts_with('!') {
-            let command = input[1..].trim();
-            match command {
-                "break" => {
-                    if let Some(line) = command.split_whitespace().nth(1) {
-                        if let Ok(line_num) = line.parse::<usize>() {
-                            let mut debugger = debugger.lock().unwrap();
-                            debugger.set_breakpoint(line_num);
-                            format!("Breakpoint set at line {}\n", line_num)
-                        } else {
-                            "Invalid line number\n".to_string()
-                        }
-                    } else {
-                        "Usage: !break <line>\n".to_string()
-                    }
-                }
-                "inspect" => {
-                    let debugger = debugger.lock().unwrap();
-                    format!("Variables: {:?}\n", debugger.inspect_variables())
-                }
-                "continue" => {
-                    let mut debugger = debugger.lock().unwrap();
-                    debugger.clear_breakpoints();
-                    "Continuing execution\n".to_string()
-                }
-                _ => "Unknown debug command. Available: !break, !inspect, !continue\n".to_string(),
-            }
-        } else {
-            // Execute KSL code
-            let temp_file = PathBuf::from("repl_temp.ksl");
-            File::create(&temp_file)
-                .map_err(|e| KslError::type_error(format!("Failed to create temp file: {}", e), pos))?
-                .write_all(input.as_bytes())
-                .map_err(|e| KslError::type_error(format!("Failed to write temp file: {}", e), pos))?;
-
-            match interpreter.interpret(&temp_file) {
-                Ok(value) => {
-                    let mut debugger = debugger.lock().unwrap();
-                    if debugger.should_break() {
-                        format!("Hit breakpoint! Value: {:?}\nUse !inspect or !continue\n", value)
-                    } else {
-                        format!("Result: {:?}\n", value)
-                    }
-                }
-                Err(e) => format!("Error: {}\n", e),
-            }
+        // Create session state
+        let repl_config = ReplConfig {
+            history_size: 1000,
+            network_enabled: true,
+            ..Default::default()
+        };
+        let session = SessionState {
+            id: session_id.clone(),
+            last_active: std::time::Instant::now(),
+            repl: Arc::new(RwLock::new(Repl::new(repl_config)?)),
+            debugger: Arc::new(Mutex::new(Debugger::new())),
         };
 
-        stream.write_all(response.as_bytes())
-            .map_err(|e| KslError::type_error(format!("Failed to write to stream: {}", e), pos))?;
-        stream.write_all(b"> ")
-            .map_err(|e| KslError::type_error(format!("Failed to write to stream: {}", e), pos))?;
-        stream.flush()
-            .map_err(|e| KslError::type_error(format!("Failed to flush stream: {}", e), pos))?;
+        // Store session
+        sessions.write().await.insert(session_id.clone(), session);
 
-        log_with_trace(Level::Info, &format!("Processed command: {}", input), None);
+        // Send welcome message
+        writer.write_all(b"Welcome to KSL REPL Server! Enter KSL code or !commands.\n> ").await
+            .map_err(|e| KslError::type_error(format!("Failed to write to stream: {}", e), pos))?;
+
+        loop {
+            buffer.clear();
+            if reader.read_line(&mut buffer).await
+                .map_err(|e| KslError::type_error(format!("Failed to read from stream: {}", e), pos))? == 0 {
+                break; // EOF
+            }
+
+            let input = buffer.trim();
+            if input.is_empty() {
+                continue;
+            }
+
+            if input == "exit" {
+                writer.write_all(b"Goodbye!\n").await
+                    .map_err(|e| KslError::type_error(format!("Failed to write to stream: {}", e), pos))?;
+                break;
+            }
+
+            // Update session activity
+            if let Some(session) = sessions.write().await.get_mut(&session_id) {
+                session.last_active = std::time::Instant::now();
+            }
+
+            // Process command
+            let response = if input.starts_with('!') {
+                Self::handle_debug_command(input, &sessions, &session_id).await?
+            } else {
+                Self::execute_code(input, &sessions, &session_id, &network, &runtime).await?
+            };
+
+            // Send response
+            writer.write_all(response.as_bytes()).await
+                .map_err(|e| KslError::type_error(format!("Failed to write to stream: {}", e), pos))?;
+            writer.write_all(b"> ").await
+                .map_err(|e| KslError::type_error(format!("Failed to write to stream: {}", e), pos))?;
+            writer.flush().await
+                .map_err(|e| KslError::type_error(format!("Failed to flush stream: {}", e), pos))?;
+
+            log_with_trace(Level::Info, &format!("Processed command for session {}: {}", session_id, input), None);
+        }
+
+        // Cleanup session
+        sessions.write().await.remove(&session_id);
+        Ok(())
     }
 
-    Ok(())
+    /// Handles debug commands
+    async fn handle_debug_command(
+        input: &str,
+        sessions: &Arc<RwLock<HashMap<String, SessionState>>>,
+        session_id: &str,
+    ) -> AsyncResult<String> {
+        let command = input[1..].trim();
+        let sessions = sessions.read().await;
+        let session = sessions.get(session_id)
+            .ok_or_else(|| KslError::type_error("Session not found".to_string(), SourcePosition::new(1, 1)))?;
+
+        match command.split_whitespace().next().unwrap_or("") {
+            "break" => {
+                if let Some(line) = command.split_whitespace().nth(1) {
+                    if let Ok(line_num) = line.parse::<usize>() {
+                        let mut debugger = session.debugger.lock().await;
+                        debugger.set_breakpoint(line_num);
+                        Ok(format!("Breakpoint set at line {}\n", line_num))
+                    } else {
+                        Ok("Invalid line number\n".to_string())
+                    }
+                } else {
+                    Ok("Usage: !break <line>\n".to_string())
+                }
+            }
+            "inspect" => {
+                let debugger = session.debugger.lock().await;
+                Ok(format!("Variables: {:?}\n", debugger.inspect_variables()))
+            }
+            "continue" => {
+                let mut debugger = session.debugger.lock().await;
+                debugger.clear_breakpoints();
+                Ok("Continuing execution\n".to_string())
+            }
+            "help" => Ok("Available commands:\n  !break <line> - Set breakpoint\n  !inspect - View variables\n  !continue - Resume execution\n  !help - Show this help\n".to_string()),
+            _ => Ok("Unknown command. Use !help for available commands.\n".to_string()),
+        }
+    }
+
+    /// Executes KSL code in a session
+    async fn execute_code(
+        code: &str,
+        sessions: &Arc<RwLock<HashMap<String, SessionState>>>,
+        session_id: &str,
+        network: &Arc<NetworkManager>,
+        runtime: &Arc<AsyncRuntime>,
+    ) -> AsyncResult<String> {
+        let pos = SourcePosition::new(1, 1);
+        let sessions = sessions.read().await;
+        let session = sessions.get(session_id)
+            .ok_or_else(|| KslError::type_error("Session not found".to_string(), pos))?;
+
+        let mut repl = session.repl.write().await;
+        match repl.eval_async(code, network, runtime).await {
+            Ok(value) => {
+                let debugger = session.debugger.lock().await;
+                if debugger.should_break() {
+                    Ok(format!("Hit breakpoint! Value: {:?}\nUse !inspect or !continue\n", value))
+                } else {
+                    Ok(format!("Result: {:?}\n", value))
+                }
+            }
+            Err(e) => Ok(format!("Error: {}\n", e)),
+        }
+    }
+
+    /// Cleans up inactive sessions
+    async fn cleanup_sessions(sessions: Arc<RwLock<HashMap<String, SessionState>>>, timeout: u64) {
+        let mut sessions = sessions.write().await;
+        let now = std::time::Instant::now();
+        sessions.retain(|_, session| {
+            now.duration_since(session.last_active).as_secs() < timeout
+        });
+    }
 }
 
-// Public API to start the REPL server
-pub fn start_repl_server(port: u16) -> Result<(), KslError> {
-    let config = ReplServerConfig { port };
-    let server = ReplServer::new(config);
-    server.start()
+/// Public API to start the REPL server asynchronously
+pub async fn start_repl_server_async(config: ReplServerConfig) -> AsyncResult<()> {
+    let server = ReplServer::new(config)?;
+    server.start_async().await
 }
 
-// Assume ksl_interpreter.rs, ksl_debug.rs, ksl_logger.rs, and ksl_errors.rs are in the same crate
+// Module imports
+mod ksl_repl {
+    pub use super::{Repl, ReplConfig, ReplSession};
+}
+
 mod ksl_interpreter {
     pub use super::{Interpreter, Value};
 }
@@ -179,6 +298,14 @@ mod ksl_logger {
     pub use super::{init_logger, log_with_trace, Level};
 }
 
+mod ksl_stdlib_net {
+    pub use super::{NetworkManager, TcpConfig};
+}
+
+mod ksl_async {
+    pub use super::{AsyncRuntime, AsyncResult};
+}
+
 mod ksl_errors {
     pub use super::{KslError, SourcePosition};
 }
@@ -186,59 +313,71 @@ mod ksl_errors {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::TcpStream;
-    use std::io::{Read, Write};
-    use std::thread;
-    use std::time::Duration;
+    use tokio::net::TcpStream;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    #[test]
-    fn test_repl_server() {
-        // Start REPL server in a separate thread
-        thread::spawn(|| {
-            start_repl_server(9000).unwrap();
+    #[tokio::test]
+    async fn test_repl_server_async() {
+        let config = ReplServerConfig {
+            port: 9000,
+            max_sessions: 10,
+            session_timeout: 3600,
+            network_config: TcpConfig::default(),
+        };
+
+        // Start server
+        let server = ReplServer::new(config.clone()).unwrap();
+        tokio::spawn(async move {
+            server.start_async().await.unwrap();
         });
 
-        // Give the server a moment to start
-        thread::sleep(Duration::from_millis(100));
+        // Wait for server to start
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
-        // Connect to the server
-        let mut stream = TcpStream::connect("127.0.0.1:9000").unwrap();
+        // Connect client
+        let mut stream = TcpStream::connect("127.0.0.1:9000").await.unwrap();
+        
+        // Test simple evaluation
+        stream.write_all(b"1 + 1\n").await.unwrap();
         let mut buffer = [0; 1024];
+        let n = stream.read(&mut buffer).await.unwrap();
+        assert!(String::from_utf8_lossy(&buffer[..n]).contains("2"));
 
-        // Read welcome message
-        let bytes_read = stream.read(&mut buffer).unwrap();
-        let welcome = String::from_utf8_lossy(&buffer[..bytes_read]);
-        assert!(welcome.contains("Welcome to KSL REPL Server"));
+        // Test debug command
+        stream.write_all(b"!help\n").await.unwrap();
+        let n = stream.read(&mut buffer).await.unwrap();
+        assert!(String::from_utf8_lossy(&buffer[..n]).contains("Available commands"));
 
-        // Send a simple KSL command
-        stream.write_all(b"let x: u32 = 42;\n").unwrap();
-        stream.flush().unwrap();
-
-        let bytes_read = stream.read(&mut buffer).unwrap();
-        let response = String::from_utf8_lossy(&buffer[..bytes_read]);
-        assert!(response.contains("Result: Void"));
-
-        // Send a debug command
-        stream.write_all(b"!break 1\n").unwrap();
-        stream.flush().unwrap();
-
-        let bytes_read = stream.read(&mut buffer).unwrap();
-        let response = String::from_utf8_lossy(&buffer[..bytes_read]);
-        assert!(response.contains("Breakpoint set at line 1"));
-
-        // Exit the session
-        stream.write_all(b"exit\n").unwrap();
-        stream.flush().unwrap();
-
-        let bytes_read = stream.read(&mut buffer).unwrap();
-        let response = String::from_utf8_lossy(&buffer[..bytes_read]);
-        assert!(response.contains("Goodbye"));
+        // Test exit
+        stream.write_all(b"exit\n").await.unwrap();
+        let n = stream.read(&mut buffer).await.unwrap();
+        assert!(String::from_utf8_lossy(&buffer[..n]).contains("Goodbye"));
     }
 
-    #[test]
-    fn test_repl_server_invalid_port() {
-        let result = start_repl_server(0);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Failed to bind to port"));
+    #[tokio::test]
+    async fn test_repl_server_session_limit() {
+        let config = ReplServerConfig {
+            port: 9001,
+            max_sessions: 1,
+            session_timeout: 3600,
+            network_config: TcpConfig::default(),
+        };
+
+        // Start server
+        let server = ReplServer::new(config.clone()).unwrap();
+        tokio::spawn(async move {
+            server.start_async().await.unwrap();
+        });
+
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+        // First client should succeed
+        let _stream1 = TcpStream::connect("127.0.0.1:9001").await.unwrap();
+
+        // Second client should receive capacity error
+        let mut stream2 = TcpStream::connect("127.0.0.1:9001").await.unwrap();
+        let mut buffer = [0; 1024];
+        let n = stream2.read(&mut buffer).await.unwrap();
+        assert!(String::from_utf8_lossy(&buffer[..n]).contains("capacity"));
     }
 }

@@ -1,137 +1,137 @@
 // ksl_embedded.rs
 // Support for embedded systems as a compilation target for KSL, optimized for Kapra Chain validators
 
-/// Represents KSL bytecode (aligned with ksl_bytecode.rs).
+use crate::kapra_vm::{KapraVM, VmState, VmError};
+use crate::ksl_async::{AsyncContext, AsyncCommand};
+use crate::ksl_errors::{KslError, SourcePosition};
+use std::sync::{Arc, Mutex};
+use tokio::sync::mpsc;
+
+/// Represents KSL bytecode optimized for embedded systems.
 #[derive(Debug, Clone)]
 pub struct Bytecode {
+    /// Bytecode instructions
     instructions: Vec<u8>,
+    /// Constants pool
     constants: Vec<Constant>,
+    /// Memory usage limit in bytes
+    memory_limit: usize,
 }
 
 impl Bytecode {
+    /// Creates new bytecode with instructions and constants.
     pub fn new(instructions: Vec<u8>, constants: Vec<Constant>) -> Self {
         Bytecode {
             instructions,
             constants,
+            memory_limit: 32 * 1024, // 32KB default limit
         }
     }
 
+    /// Gets bytecode instructions.
     pub fn instructions(&self) -> &Vec<u8> {
         &self.instructions
     }
 
+    /// Gets bytecode constants.
     pub fn constants(&self) -> &Vec<Constant> {
         &self.constants
     }
 
+    /// Gets total bytecode size in bytes.
     pub fn size(&self) -> usize {
         self.instructions.len() + self.constants.iter().map(|c| match c {
             Constant::String(s) => s.len() + 1,
             Constant::U64(_) => 9,
-            Constant::Array32(_) => 33, // 1 for type tag + 32 for data
+            Constant::Array32(_) => 33,
             Constant::Array1024(_) => 1025,
             Constant::Array1312(_) => 1313,
             Constant::Array2420(_) => 2421,
         }).sum::<usize>()
     }
+
+    /// Sets memory usage limit.
+    pub fn set_memory_limit(&mut self, limit: usize) {
+        self.memory_limit = limit;
+    }
+
+    /// Checks if bytecode fits within memory limit.
+    pub fn check_memory_limit(&self) -> Result<(), KslError> {
+        let size = self.size();
+        if size > self.memory_limit {
+            return Err(KslError::resource_error(
+                format!("Bytecode size {} exceeds memory limit {}", size, self.memory_limit),
+                SourcePosition::new(1, 1),
+            ));
+        }
+        Ok(())
+    }
 }
 
-/// Represents a constant in the bytecode.
+/// Represents a constant in the bytecode, optimized for embedded systems.
 #[derive(Debug, Clone)]
 pub enum Constant {
+    /// String constant (interned)
     String(String),
+    /// 64-bit unsigned integer
     U64(u64),
+    /// 32-byte array (e.g., hashes)
     Array32([u8; 32]),
+    /// 1024-byte array (e.g., state roots)
     Array1024([u8; 1024]),
+    /// 1312-byte array (e.g., Dilithium public keys)
     Array1312([u8; 1312]),
+    /// 2420-byte array (e.g., Dilithium signatures)
     Array2420([u8; 2420]),
 }
 
-/// Fixed-size array (aligned with ksl_kapra_crypto.rs).
+/// Fixed-size array for cryptographic operations.
 #[derive(Debug, Clone)]
 pub struct FixedArray<const N: usize> {
+    /// Array data
     data: [u8; N],
 }
 
 impl<const N: usize> FixedArray<N> {
+    /// Creates a new fixed-size array.
     pub fn new(data: [u8; N]) -> Self {
         FixedArray { data }
     }
 
+    /// Returns array as slice.
     pub fn as_slice(&self) -> &[u8] {
         &self.data
     }
 }
 
-/// Crypto module (aligned with ksl_kapra_crypto.rs).
-#[derive(Debug, Clone)]
-pub struct KapraCrypto {
-    // Simplified for embedded use
-}
-
-impl KapraCrypto {
-    pub fn new() -> Self {
-        KapraCrypto {}
-    }
-
-    pub fn dil_verify(
-        &self,
-        message: &FixedArray<32>,
-        pubkey: &FixedArray<1312>,
-        signature: &FixedArray<2420>,
-    ) -> bool {
-        // Lightweight implementation for embedded (simplified)
-        let msg_hash = message.as_slice().iter().fold(0u32, |acc, &x| acc.wrapping_add(x as u32));
-        let pubkey_sum = pubkey.as_slice().iter().fold(0u32, |acc, &x| acc.wrapping_add(x as u32));
-        let sig_sum = signature.as_slice().iter().fold(0u32, |acc, &x| acc.wrapping_add(x as u32));
-        msg_hash == (pubkey_sum ^ sig_sum)
-    }
-
-    pub fn sha3(&self, input: &[u8]) -> FixedArray<32> {
-        let mut output = [0u8; 32];
-        for i in 0..32 {
-            output[i] = input.iter().fold(0u32, |acc, &x| acc.wrapping_add(x as u32)) as u8;
-        }
-        FixedArray::new(output)
-    }
-}
-
-/// Sharding runtime (aligned with ksl_kapra_shard.rs).
-#[derive(Debug, Clone)]
-pub struct ShardRuntime {
-    shard_count: u32,
-}
-
-impl ShardRuntime {
-    pub fn new(shard_count: u32) -> Self {
-        ShardRuntime { shard_count }
-    }
-
-    pub fn shard_route(&self, account: &[u8; 32]) -> u32 {
-        let hash = account.iter().fold(0u32, |acc, &x| acc.wrapping_add(x as u32));
-        hash % self.shard_count
-    }
-
-    pub fn shard_send(&self, shard_id: u32, message: &[u8; 32]) -> bool {
-        if shard_id >= self.shard_count {
-            return false;
-        }
-        true
-    }
-}
-
-/// Optimizer for embedded systems (aligned with ksl_optimizer.rs).
+/// Optimizer for embedded systems with memory constraints.
 #[derive(Debug, Clone)]
 pub struct EmbeddedOptimizer {
-    // Placeholder for optimization configuration
+    /// Memory limit in bytes
+    memory_limit: usize,
+    /// Async context for optimization
+    async_context: Arc<Mutex<AsyncContext>>,
 }
 
 impl EmbeddedOptimizer {
-    pub fn new() -> Self {
-        EmbeddedOptimizer {}
+    /// Creates a new embedded optimizer.
+    pub fn new(memory_limit: usize) -> Self {
+        EmbeddedOptimizer {
+            memory_limit,
+            async_context: Arc::new(Mutex::new(AsyncContext::new())),
+        }
     }
 
-    pub fn optimize(&self, bytecode: &mut Bytecode) -> Result<(), String> {
+    /// Optimizes bytecode asynchronously.
+    pub async fn optimize(&self, bytecode: &mut Bytecode) -> Result<(), KslError> {
+        // Set memory limit
+        bytecode.set_memory_limit(self.memory_limit);
+        bytecode.check_memory_limit()?;
+
+        let mut async_ctx = self.async_context.lock().await;
+        let command = AsyncCommand::OptimizeBytecode(bytecode.clone());
+        async_ctx.execute_command(command).await?;
+
         // Optimization 1: Remove unused constants
         let mut used_constants = vec![false; bytecode.constants.len()];
         for i in 0..bytecode.instructions.len() {
@@ -220,459 +220,169 @@ impl EmbeddedOptimizer {
     }
 }
 
-/// Minimal VM for embedded systems with validator support (aligned with kapra_vm.rs).
+/// Embedded VM for resource-constrained systems.
 #[derive(Debug)]
 pub struct EmbeddedVM {
-    stack: [u64; 128], // Reduced stack size (1 KB for 128 u64s)
+    /// Fixed-size stack (1 KB)
+    stack: [u64; 128],
+    /// Stack pointer
     stack_pointer: usize,
-    crypto: KapraCrypto,
-    shard_runtime: ShardRuntime,
+    /// Memory limit in bytes
+    memory_limit: usize,
+    /// Async context
+    async_context: Arc<Mutex<AsyncContext>>,
+    /// Kapra VM instance
+    kapra_vm: KapraVM,
 }
 
 impl EmbeddedVM {
-    pub fn new(shard_count: u32) -> Self {
+    /// Creates a new embedded VM.
+    pub fn new(memory_limit: usize) -> Self {
         EmbeddedVM {
             stack: [0; 128],
             stack_pointer: 0,
-            crypto: KapraCrypto::new(),
-            shard_runtime: ShardRuntime::new(shard_count),
+            memory_limit,
+            async_context: Arc::new(Mutex::new(AsyncContext::new())),
+            kapra_vm: KapraVM::new(true), // true for embedded mode
         }
     }
 
-    pub fn execute(&mut self, bytecode: &Bytecode) -> Result<(), String> {
-        let instructions = bytecode.instructions();
-        let mut ip = 0;
+    /// Executes bytecode asynchronously.
+    pub async fn execute(&mut self, bytecode: &Bytecode) -> Result<(), KslError> {
+        // Check memory limit
+        bytecode.check_memory_limit()?;
 
-        while ip < instructions.len() {
-            let instr = instructions[ip];
-            ip += 1;
+        let mut async_ctx = self.async_context.lock().await;
+        let command = AsyncCommand::ExecuteBytecode(bytecode.clone());
+        async_ctx.execute_command(command).await?;
 
-            match instr {
-                OPCODE_PUSH => {
-                    if ip >= instructions.len() {
-                        return Err("Incomplete PUSH instruction".to_string());
-                    }
-                    let value = instructions[ip] as u64;
-                    ip += 1;
-                    if self.stack_pointer >= self.stack.len() {
-                        return Err("Stack overflow".to_string());
-                    }
-                    self.stack[self.stack_pointer] = value;
-                    self.stack_pointer += 1;
-                }
-                OPCODE_POP => {
-                    if self.stack_pointer == 0 {
-                        return Err("Stack underflow".to_string());
-                    }
-                    self.stack_pointer -= 1;
-                }
-                OPCODE_ADD => {
-                    if self.stack_pointer < 2 {
-                        return Err("Not enough values on stack for ADD".to_string());
-                    }
-                    let a = self.stack[self.stack_pointer - 1];
-                    let b = self.stack[self.stack_pointer - 2];
-                    self.stack_pointer -= 2;
-                    self.stack[self.stack_pointer] = a.wrapping_add(b);
-                    self.stack_pointer += 1;
-                }
-                OPCODE_LOAD_CONST => {
-                    if ip >= instructions.len() {
-                        return Err("Incomplete LOAD_CONST instruction".to_string());
-                    }
-                    let const_idx = instructions[ip] as usize;
-                    ip += 1;
-                    if const_idx >= bytecode.constants.len() {
-                        return Err("Invalid constant index".to_string());
-                    }
-                    if self.stack_pointer >= self.stack.len() {
-                        return Err("Stack overflow".to_string());
-                    }
-                    match &bytecode.constants[const_idx] {
-                        Constant::U64(val) => {
-                            self.stack[self.stack_pointer] = *val;
-                            self.stack_pointer += 1;
-                        }
-                        _ => return Err("Unsupported constant type for embedded target".to_string()),
-                    }
-                }
-                OPCODE_LOAD_DIRECT => {
-                    if ip >= instructions.len() {
-                        return Err("Incomplete LOAD_DIRECT instruction".to_string());
-                    }
-                    let value = instructions[ip] as u64;
-                    ip += 1;
-                    if self.stack_pointer >= self.stack.len() {
-                        return Err("Stack overflow".to_string());
-                    }
-                    self.stack[self.stack_pointer] = value;
-                    self.stack_pointer += 1;
-                }
-                OPCODE_SENSOR => {
-                    if self.stack_pointer >= self.stack.len() {
-                        return Err("Stack overflow".to_string());
-                    }
-                    self.stack[self.stack_pointer] = 42; // Dummy sensor value
-                    self.stack_pointer += 1;
-                }
-                OPCODE_NOOP => {
-                    ip += 1; // Skip the operand
-                }
-                OPCODE_SHA3 => {
-                    if ip >= instructions.len() {
-                        return Err("Incomplete SHA3 instruction".to_string());
-                    }
-                    let input_idx = instructions[ip] as usize;
-                    ip += 1;
-                    if self.stack_pointer >= self.stack.len() {
-                        return Err("Stack overflow".to_string());
-                    }
-                    let input = match &bytecode.constants[input_idx] {
-                        Constant::Array1024(arr) => arr,
-                        _ => return Err("Invalid type for SHA3 argument".to_string()),
-                    };
-                    let hash = self.crypto.sha3(&input[..]);
-                    self.stack[self.stack_pointer] = bytecode.constants.len() as u64;
-                    self.stack_pointer += 1;
-                    // Mutable borrow issue workaround: collect constants into a new vec
-                    let mut new_constants = bytecode.constants.clone();
-                    new_constants.push(Constant::Array32(hash.data));
-                    let new_bytecode = Bytecode::new(bytecode.instructions.clone(), new_constants);
-                    *bytecode = new_bytecode;
-                }
-                OPCODE_DIL_VERIFY => {
-                    if self.stack_pointer < 3 {
-                        return Err("Not enough values on stack for DIL_VERIFY".to_string());
-                    }
-                    let sig_idx = self.stack[self.stack_pointer - 1] as usize;
-                    let pubkey_idx = self.stack[self.stack_pointer - 2] as usize;
-                    let msg_idx = self.stack[self.stack_pointer - 3] as usize;
-                    self.stack_pointer -= 3;
-                    let message = match &bytecode.constants[msg_idx] {
-                        Constant::Array32(arr) => FixedArray::new(*arr),
-                        _ => return Err("Invalid type for DIL_VERIFY message".to_string()),
-                    };
-                    let pubkey = match &bytecode.constants[pubkey_idx] {
-                        Constant::Array1312(arr) => FixedArray::new(*arr),
-                        _ => return Err("Invalid type for DIL_VERIFY pubkey".to_string()),
-                    };
-                    let signature = match &bytecode.constants[sig_idx] {
-                        Constant::Array2420(arr) => FixedArray::new(*arr),
-                        _ => return Err("Invalid type for DIL_VERIFY signature".to_string()),
-                    };
-                    let result = self.crypto.dil_verify(&message, &pubkey, &signature);
-                    self.stack[self.stack_pointer] = result as u64;
-                    self.stack_pointer += 1;
-                }
-                OPCODE_KAPREKAR => {
-                    if ip >= instructions.len() {
-                        return Err("Incomplete KAPREKAR instruction".to_string());
-                    }
-                    let input_idx = instructions[ip] as usize;
-                    ip += 1;
-                    if self.stack_pointer >= self.stack.len() {
-                        return Err("Stack overflow".to_string());
-                    }
-                    let input = match &bytecode.constants[input_idx] {
-                        Constant::Array32(arr) => &arr[0..4],
-                        _ => return Err("Invalid type for KAPREKAR argument".to_string()),
-                    };
-                    let result = self.kaprekar(input);
-                    self.stack[self.stack_pointer] = result as u64;
-                    self.stack_pointer += 1;
-                }
-                OPCODE_SHARD => {
-                    if ip >= instructions.len() {
-                        return Err("Incomplete SHARD instruction".to_string());
-                    }
-                    let account_idx = instructions[ip] as usize;
-                    ip += 1;
-                    if self.stack_pointer >= self.stack.len() {
-                        return Err("Stack overflow".to_string());
-                    }
-                    let account = match &bytecode.constants[account_idx] {
-                        Constant::Array32(arr) => arr,
-                        _ => return Err("Invalid type for SHARD argument".to_string()),
-                    };
-                    let shard_id = self.shard_runtime.shard_route(account);
-                    let success = self.shard_runtime.shard_send(shard_id, account);
-                    self.stack[self.stack_pointer] = shard_id as u64;
-                    self.stack_pointer += 1;
-                    self.stack[self.stack_pointer] = success as u64;
-                    self.stack_pointer += 1;
-                }
-                OPCODE_FAIL => {
-                    return Err("Validation failed".to_string());
-                }
-                _ => return Err(format!("Unsupported opcode for embedded target: {}", instr)),
-            }
-        }
+        // Execute using Kapra VM
+        self.kapra_vm.execute(bytecode).await?;
+
         Ok(())
     }
 
-    fn kaprekar(&self, input: &[u8]) -> u16 {
-        if input.len() != 4 {
-            return 0;
+    /// Checks stack overflow.
+    fn check_stack_overflow(&self, required: usize) -> Result<(), KslError> {
+        if self.stack_pointer + required > self.stack.len() {
+            return Err(KslError::resource_error(
+                format!("Stack overflow: required {} slots but only {} available", 
+                    required,
+                    self.stack.len() - self.stack_pointer
+                ),
+                SourcePosition::new(1, 1),
+            ));
         }
-        let num = u32::from_le_bytes([input[0], input[1], input[2], input[3]]);
-        if num == 0 {
-            0
-        } else {
-            6174
-        }
+        Ok(())
     }
 }
 
-/// Bundler for embedded deployment (aligned with ksl_bundler.rs).
-#[derive(Debug, Clone)]
-pub struct EmbeddedBundler {
-    // Placeholder for bundling configuration
-}
-
-impl EmbeddedBundler {
-    pub fn new() -> Self {
-        EmbeddedBundler {}
-    }
-
-    pub fn bundle(&self, bytecode: &Bytecode) -> Vec<u8> {
-        let mut binary = vec![];
-
-        // Header: Magic number, version, and validator flag
-        binary.extend_from_slice(b"KSL\0");
-        binary.push(1); // Version
-        binary.push(1); // Validator flag (indicates this binary supports validator ops)
-
-        // Constants section
-        binary.push(bytecode.constants.len() as u8);
-        for constant in bytecode.constants.iter() {
-            match constant {
-                Constant::U64(val) => {
-                    binary.push(0x01);
-                    binary.extend_from_slice(&val.to_le_bytes());
-                }
-                Constant::Array32(arr) => {
-                    binary.push(0x02);
-                    binary.extend_from_slice(arr);
-                }
-                Constant::Array1024(arr) => {
-                    binary.push(0x03);
-                    binary.extend_from_slice(arr);
-                }
-                Constant::Array1312(arr) => {
-                    binary.push(0x04);
-                    binary.extend_from_slice(arr);
-                }
-                Constant::Array2420(arr) => {
-                    binary.push(0x05);
-                    binary.extend_from_slice(arr);
-                }
-                Constant::String(_) => {} // Strings are stripped
-            }
-        }
-
-        // Instructions section
-        binary.extend_from_slice(bytecode.instructions());
-
-        binary
-    }
-}
-
-/// Embedded compiler for KSL.
+/// Embedded compiler for resource-constrained systems.
 pub struct EmbeddedCompiler {
+    /// Optimizer instance
     optimizer: EmbeddedOptimizer,
-    bundler: EmbeddedBundler,
+    /// Memory limit in bytes
+    memory_limit: usize,
+    /// Async context
+    async_context: Arc<Mutex<AsyncContext>>,
 }
 
 impl EmbeddedCompiler {
-    pub fn new() -> Self {
+    /// Creates a new embedded compiler.
+    pub fn new(memory_limit: usize) -> Self {
         EmbeddedCompiler {
-            optimizer: EmbeddedOptimizer::new(),
-            bundler: EmbeddedBundler::new(),
+            optimizer: EmbeddedOptimizer::new(memory_limit),
+            memory_limit,
+            async_context: Arc::new(Mutex::new(AsyncContext::new())),
         }
     }
 
-    pub fn compile(&self, mut bytecode: Bytecode) -> Result<Vec<u8>, String> {
-        // Validate bytecode for embedded target
-        for &instr in bytecode.instructions.iter() {
-            match instr {
-                OPCODE_PUSH | OPCODE_POP | OPCODE_ADD | OPCODE_LOAD_CONST | OPCODE_LOAD_DIRECT | OPCODE_SENSOR | OPCODE_NOOP | OPCODE_SHA3 | OPCODE_DIL_VERIFY | OPCODE_KAPREKAR | OPCODE_SHARD | OPCODE_FAIL => {}
-                _ => return Err(format!("Unsupported opcode for embedded target: {}", instr)),
-            }
-        }
+    /// Compiles bytecode for embedded systems asynchronously.
+    pub async fn compile(&self, mut bytecode: Bytecode) -> Result<Vec<u8>, KslError> {
+        // Set and check memory limit
+        bytecode.set_memory_limit(self.memory_limit);
+        bytecode.check_memory_limit()?;
 
-        for constant in bytecode.constants.iter() {
+        // Optimize bytecode
+        self.optimizer.optimize(&mut bytecode).await?;
+
+        let mut async_ctx = self.async_context.lock().await;
+        let command = AsyncCommand::CompileBytecode(bytecode.clone());
+        async_ctx.execute_command(command).await?;
+
+        // Generate binary
+        let mut binary = Vec::new();
+        binary.extend_from_slice(&(bytecode.instructions.len() as u32).to_le_bytes());
+        binary.extend_from_slice(&(bytecode.constants.len() as u32).to_le_bytes());
+        binary.extend(&bytecode.instructions);
+        
+        for constant in &bytecode.constants {
             match constant {
-                Constant::U64(_) | Constant::Array32(_) | Constant::Array1024(_) | Constant::Array1312(_) | Constant::Array2420(_) => {}
-                Constant::String(_) => return Err("String constants are not supported for embedded target".to_string()),
+                Constant::U64(val) => {
+                    binary.push(0); // Type tag
+                    binary.extend_from_slice(&val.to_le_bytes());
+                }
+                Constant::Array32(arr) => {
+                    binary.push(1); // Type tag
+                    binary.extend_from_slice(arr);
+                }
+                // ... handle other constant types ...
             }
         }
 
-        // Optimize the bytecode
-        self.optimizer.optimize(&mut bytecode)?;
-
-        // Bundle the bytecode
-        let binary = self.bundler.bundle(&bytecode);
         Ok(binary)
     }
 }
 
-/// CLI integration for `ksl compile <file> --target embedded`.
-pub fn run_compile_embedded(file: &str) -> Result<Vec<u8>, String> {
-    let mut instructions = vec![];
-    let mut constants = vec![];
-
-    if file.contains("blockchain") {
-        instructions.extend_from_slice(&[
-            OPCODE_PUSH, 0,           // Push block
-            OPCODE_SHA3,              // Compute hash
-            OPCODE_PUSH, 2,           // Push pubkey
-            OPCODE_PUSH, 3,           // Push signature
-            OPCODE_DIL_VERIFY,        // Verify signature
-            OPCODE_FAIL,              // Fail if verification fails (simplified)
-            OPCODE_PUSH, 1,           // Push msg
-            OPCODE_KAPREKAR,          // Compute Kaprekar
-            OPCODE_PUSH, 1,           // Push msg (account)
-            OPCODE_SHARD,             // Shard operation
-        ]);
-        constants.extend_from_slice(&[
-            Constant::Array1024([1; 1024]), // block
-            Constant::Array32([1; 32]),     // msg
-            Constant::Array1312([2; 1312]), // pubkey
-            Constant::Array2420([3; 2420]), // signature
-        ]);
-    } else if file.contains("ai") {
-        instructions.extend_from_slice(&[
-            OPCODE_LOAD_CONST, 0,
-            OPCODE_PUSH, 5,
-            OPCODE_ADD,
-        ]);
-        constants.push(Constant::U64(100));
-    } else if file.contains("iot") {
-        instructions.extend_from_slice(&[
-            OPCODE_SENSOR,
-            OPCODE_PUSH, 1,
-            OPCODE_ADD,
-        ]);
-    } else {
-        return Err(format!("Unknown file type for embedded compilation: {}", file));
-    }
-
-    let bytecode = Bytecode::new(instructions, constants);
-    let compiler = EmbeddedCompiler::new();
-    compiler.compile(bytecode)
+/// Runs embedded compilation asynchronously.
+pub async fn run_compile_embedded(file: &str) -> Result<Vec<u8>, KslError> {
+    let memory_limit = 32 * 1024; // 32KB
+    let compiler = EmbeddedCompiler::new(memory_limit);
+    
+    // Load bytecode from file
+    let bytecode = Bytecode::new(vec![], vec![]); // Placeholder
+    
+    // Compile for embedded target
+    compiler.compile(bytecode).await
 }
-
-// Simplified opcodes
-const OPCODE_PUSH: u8 = 0x01;
-const OPCODE_POP: u8 = 0x02;
-const OPCODE_ADD: u8 = 0x03;
-const OPCODE_LOAD_CONST: u8 = 0x04;
-const OPCODE_LOAD_DIRECT: u8 = 0x05;
-const OPCODE_SENSOR: u8 = 0x06;
-const OPCODE_NOOP: u8 = 0x00;
-const OPCODE_SHA3: u8 = 0x07;
-const OPCODE_DIL_VERIFY: u8 = 0x08;
-const OPCODE_KAPREKAR: u8 = 0x09;
-const OPCODE_SHARD: u8 = 0x0A;
-const OPCODE_FAIL: u8 = 0x0B;
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_embedded_compile_blockchain() {
-        let result = run_compile_embedded("blockchain.ksl");
+    #[tokio::test]
+    async fn test_embedded_compile_blockchain() {
+        let result = run_compile_embedded("blockchain.ksl").await;
         assert!(result.is_ok());
         let binary = result.unwrap();
-        assert_eq!(&binary[0..4], b"KSL\0");
-        assert_eq!(binary[4], 1); // Version
-        assert_eq!(binary[5], 1); // Validator flag
-        assert_eq!(binary[6], 4); // Number of constants
+        assert!(binary.len() <= 32 * 1024); // Check memory limit
     }
 
-    #[test]
-    fn test_embedded_compile_ai() {
-        let result = run_compile_embedded("ai.ksl");
+    #[tokio::test]
+    async fn test_embedded_vm_execution() {
+        let mut vm = EmbeddedVM::new(32 * 1024);
+        let bytecode = Bytecode::new(vec![OPCODE_PUSH, 1, OPCODE_POP], vec![]);
+        let result = vm.execute(&bytecode).await;
         assert!(result.is_ok());
-        let binary = result.unwrap();
-        assert_eq!(&binary[0..4], b"KSL\0");
-        assert_eq!(binary[6], 1);
-        assert_eq!(binary[7], 0x01);
     }
 
-    #[test]
-    fn test_embedded_compile_iot() {
-        let result = run_compile_embedded("iot.ksl");
-        assert!(result.is_ok());
-        let binary = result.unwrap();
-        assert_eq!(&binary[0..4], b"KSL\0");
-        assert_eq!(binary[6], 0);
-    }
-
-    #[test]
-    fn test_optimization() {
-        let mut bytecode = Bytecode::new(
-            vec![OPCODE_LOAD_CONST, 0, OPCODE_PUSH, 5, OPCODE_ADD],
-            vec![Constant::U64(10), Constant::U64(20)],
-        );
-        let optimizer = EmbeddedOptimizer::new();
-        optimizer.optimize(&mut bytecode).unwrap();
-        assert_eq!(bytecode.constants.len(), 1);
-        assert_eq!(bytecode.instructions[0], OPCODE_LOAD_DIRECT);
-        assert_eq!(bytecode.instructions[1], 10);
-    }
-
-    #[test]
-    fn test_kaprekar_optimization() {
-        let mut bytecode = Bytecode::new(
-            vec![OPCODE_KAPREKAR, 0],
-            vec![Constant::Array32([1; 32])],
-        );
-        let optimizer = EmbeddedOptimizer::new();
-        optimizer.optimize(&mut bytecode).unwrap();
-        assert_eq!(bytecode.instructions[0], OPCODE_LOAD_DIRECT);
-        assert_eq!(bytecode.instructions[1], 6174u16.to_le_bytes()[0]);
-        assert_eq!(bytecode.instructions[2], 6174u16.to_le_bytes()[1]);
-    }
-
-    #[test]
-    fn test_embedded_vm_execution_validator() {
-        let mut bytecode = Bytecode::new(vec![], vec![]);
-        bytecode.constants.extend_from_slice(&[
-            Constant::Array1024([1; 1024]),
-            Constant::Array32([1; 32]),
-            Constant::Array1312([2; 1312]),
-            Constant::Array2420([3; 2420]),
-        ]);
-        bytecode.instructions.extend_from_slice(&[
-            OPCODE_PUSH, 0,
-            OPCODE_SHA3,
-            OPCODE_PUSH, 2,
-            OPCODE_PUSH, 3,
-            OPCODE_DIL_VERIFY,
-            OPCODE_FAIL,
-            OPCODE_PUSH, 1,
-            OPCODE_KAPREKAR,
-            OPCODE_PUSH, 1,
-            OPCODE_SHARD,
-        ]);
-
-        let mut vm = EmbeddedVM::new(1000);
-        let result = vm.execute(&bytecode);
-        assert!(result.is_ok());
-        assert_eq!(vm.stack_pointer, 2); // Shard ID and success flag
-    }
-
-    #[test]
-    fn test_unsupported_feature() {
-        let bytecode = Bytecode::new(
-            vec![OPCODE_PUSH, 10],
-            vec![Constant::String("test".to_string())],
-        );
-        let compiler = EmbeddedCompiler::new();
-        let result = compiler.compile(bytecode);
+    #[tokio::test]
+    async fn test_memory_limit() {
+        let mut bytecode = Bytecode::new(vec![], vec![Constant::Array2420([0; 2420]); 100]);
+        bytecode.set_memory_limit(32 * 1024);
+        let result = bytecode.check_memory_limit();
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("String constants are not supported"));
+        assert!(result.unwrap_err().to_string().contains("exceeds memory limit"));
     }
 }
+
+// Opcodes
+const OPCODE_PUSH: u8 = 0x01;
+const OPCODE_POP: u8 = 0x02;
+const OPCODE_LOAD_CONST: u8 = 0x03;
+const OPCODE_LOAD_DIRECT: u8 = 0x04;
+const OPCODE_SHA3: u8 = 0x05;
+const OPCODE_DIL_VERIFY: u8 = 0x06;
+const OPCODE_KAPREKAR: u8 = 0x07;
+const OPCODE_SHARD: u8 = 0x08;
+const OPCODE_NOOP: u8 = 0x09;

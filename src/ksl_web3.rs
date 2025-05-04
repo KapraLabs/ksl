@@ -1,175 +1,275 @@
 // ksl_web3.rs
 // Web3-specific primitives for Kapra Chain
 
-/// Represents KSL bytecode (aligned with ksl_bytecode.rs).
+use crate::ksl_contract::{Contract, ContractState, ContractEvent};
+use crate::ksl_stdlib_net::{Networking, HttpRequest, HttpResponse};
+use crate::ksl_async::{AsyncContext, AsyncCommand};
+use crate::ksl_errors::{KslError, SourcePosition};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use tokio::sync::mpsc;
+
+/// Represents KSL bytecode with Web3 support (aligned with ksl_bytecode.rs).
 #[derive(Debug, Clone)]
 pub struct Bytecode {
+    /// Bytecode instructions
     instructions: Vec<u8>,
+    /// Constants pool
     constants: Vec<Constant>,
+    /// Contract state
+    contract_state: Option<ContractState>,
 }
 
 impl Bytecode {
+    /// Creates new bytecode with instructions and constants.
     pub fn new(instructions: Vec<u8>, constants: Vec<Constant>) -> Self {
         Bytecode {
             instructions,
             constants,
+            contract_state: None,
         }
     }
 
+    /// Extends bytecode with additional instructions and constants.
     pub fn extend(&mut self, other: Bytecode) {
         self.instructions.extend(other.instructions);
         self.constants.extend(other.constants);
+    }
+
+    /// Sets the contract state for the bytecode.
+    pub fn set_contract_state(&mut self, state: ContractState) {
+        self.contract_state = Some(state);
     }
 }
 
 /// Represents a constant in the bytecode.
 #[derive(Debug, Clone)]
 pub enum Constant {
+    /// String constant
     String(String),
+    /// 32-byte array constant
     Array32([u8; 32]),
+    /// Contract event constant
+    ContractEvent(ContractEvent),
 }
 
-/// Represents an AST node (aligned with ksl_parser.rs).
+/// Represents an AST node with Web3 support (aligned with ksl_parser.rs).
 #[derive(Debug, Clone)]
 pub enum AstNode {
+    /// DID block for decentralized identity
     DidBlock {
-        params: Vec<(String, Type)>, // Parameters (e.g., identity, credential)
-        return_type: Type,           // Return type (array<u8, 32])
-        body: Vec<AstNode>,          // Body of the DID block
+        /// Parameters (e.g., identity, credential)
+        params: Vec<(String, Type)>,
+        /// Return type (array<u8, 32])
+        return_type: Type,
+        /// Body of the DID block
+        body: Vec<AstNode>,
     },
+    /// Oracle block for off-chain data
     OracleBlock {
-        params: Vec<(String, Type)>, // Parameters (e.g., url)
-        return_type: Type,           // Return type (array<u8, 32])
-        body: Vec<AstNode>,          // Body of the oracle block
+        /// Parameters (e.g., url)
+        params: Vec<(String, Type)>,
+        /// Return type (array<u8, 32])
+        return_type: Type,
+        /// Body of the oracle block
+        body: Vec<AstNode>,
     },
+    /// Cross-chain block for interoperability
     CrossChainBlock {
-        params: Vec<(String, Type)>, // Parameters (e.g., chain_id, message)
-        return_type: Type,           // Return type (bool)
-        body: Vec<AstNode>,          // Body of the cross-chain block
+        /// Parameters (e.g., chain_id, message)
+        params: Vec<(String, Type)>,
+        /// Return type (bool)
+        return_type: Type,
+        /// Body of the cross-chain block
+        body: Vec<AstNode>,
     },
-    Call {
+    /// Contract block for smart contract functionality
+    ContractBlock {
+        /// Contract name
         name: String,
+        /// Contract state
+        state: ContractState,
+        /// Contract events
+        events: Vec<ContractEvent>,
+        /// Contract methods
+        methods: Vec<AstNode>,
+    },
+    /// Call expression
+    Call {
+        /// Function name
+        name: String,
+        /// Arguments
         args: Vec<AstNode>,
     },
+    /// Variable declaration
     Let {
+        /// Variable name
         name: String,
+        /// Variable type
         ty: Type,
+        /// Variable value
         value: Box<AstNode>,
     },
+    /// String literal
     LiteralString(String),
+    /// 32-byte array literal
     LiteralArray32([u8; 32]),
+    /// 32-bit unsigned integer literal
     LiteralU32(u32),
+    /// Contract event literal
+    LiteralContractEvent(ContractEvent),
 }
 
-/// Represents a type (aligned with ksl_types.rs).
+/// Represents a type with Web3 support (aligned with ksl_types.rs).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Type {
+    /// Boolean type
     Bool,
+    /// 32-bit unsigned integer type
     U32,
-    ArrayU8(usize), // e.g., array<u8, 32>
+    /// Fixed-size array of u8
+    ArrayU8(usize),
+    /// Contract type
+    Contract(String),
+    /// Event type
+    Event(String),
 }
 
-/// Fixed-size array (aligned with ksl_kapra_crypto.rs).
+/// Fixed-size array for cryptographic operations (aligned with ksl_kapra_crypto.rs).
 #[derive(Debug, Clone)]
 pub struct FixedArray<const N: usize> {
+    /// Array data
     data: [u8; N],
 }
 
 impl<const N: usize> FixedArray<N> {
+    /// Creates a new fixed-size array.
     pub fn new(data: [u8; N]) -> Self {
         FixedArray { data }
     }
 
+    /// Returns the array as a slice.
     pub fn as_slice(&self) -> &[u8] {
         &self.data
     }
 }
 
-/// Crypto module (aligned with ksl_kapra_crypto.rs).
-#[derive(Debug, Clone)]
-pub struct KapraCrypto {
-    is_embedded: bool,
-}
-
-impl KapraCrypto {
-    pub fn new(is_embedded: bool) -> Self {
-        KapraCrypto { is_embedded }
-    }
-
-    pub fn sha3(&self, input: &[u8]) -> FixedArray<32> {
-        let mut output = [0u8; 32];
-        for i in 0..32 {
-            output[i] = input.iter().fold(0u32, |acc, &x| acc.wrapping_add(x as u32)) as u8;
-        }
-        FixedArray::new(output)
-    }
-}
-
-/// Web3 runtime for Kapra Chain.
+/// Web3 runtime for Kapra Chain with async support.
 #[derive(Debug, Clone)]
 pub struct Web3Runtime {
+    /// Whether running in embedded mode
     is_embedded: bool,
+    /// Async context for Web3 operations
+    async_context: Arc<Mutex<AsyncContext>>,
+    /// Networking module for Web3 operations
+    networking: Networking,
 }
 
 impl Web3Runtime {
+    /// Creates a new Web3 runtime.
     pub fn new(is_embedded: bool) -> Self {
-        Web3Runtime { is_embedded }
+        Web3Runtime {
+            is_embedded,
+            async_context: Arc::new(Mutex::new(AsyncContext::new())),
+            networking: Networking::new(),
+        }
     }
 
-    /// Create a decentralized identity.
-    pub fn create_did(&self, identity: &FixedArray<32>, credential: &FixedArray<32>) -> FixedArray<32> {
+    /// Creates a decentralized identity asynchronously.
+    pub async fn create_did(&self, identity: &FixedArray<32>, credential: &FixedArray<32>) -> Result<FixedArray<32>, KslError> {
+        let mut async_ctx = self.async_context.lock().await;
+        let command = AsyncCommand::CreateDid(identity.clone(), credential.clone());
+        if let Err(e) = async_ctx.execute_command(command).await {
+            return Err(KslError::web3_error(
+                format!("Failed to create DID: {}", e),
+                SourcePosition::new(1, 1),
+            ));
+        }
+
         let mut did = [0u8; 32];
         for i in 0..32 {
             did[i] = identity.as_slice()[i] ^ credential.as_slice()[i];
         }
-        FixedArray::new(did)
+        Ok(FixedArray::new(did))
     }
 
-    /// Verify a decentralized identity.
-    pub fn verify_did(&self, did: &FixedArray<32>, credential: &FixedArray<32>) -> bool {
+    /// Verifies a decentralized identity asynchronously.
+    pub async fn verify_did(&self, did: &FixedArray<32>, credential: &FixedArray<32>) -> Result<bool, KslError> {
+        let mut async_ctx = self.async_context.lock().await;
+        let command = AsyncCommand::VerifyDid(did.clone(), credential.clone());
+        if let Err(e) = async_ctx.execute_command(command).await {
+            return Err(KslError::web3_error(
+                format!("Failed to verify DID: {}", e),
+                SourcePosition::new(1, 1),
+            ));
+        }
+
         let expected = credential.as_slice().iter().fold(0u32, |acc, &x| acc.wrapping_add(x as u32));
         let did_sum = did.as_slice().iter().fold(0u32, |acc, &x| acc.wrapping_add(x as u32));
-        expected == did_sum
+        Ok(expected == did_sum)
     }
 
-    /// Fetch off-chain data via an oracle (simplified for demo).
-    pub fn fetch_oracle_data(&self, url: &str) -> FixedArray<32> {
-        // Simulated oracle data (in reality, this would use http.get from ksl_stdlib_net.rs)
+    /// Fetches off-chain data via an oracle asynchronously.
+    pub async fn fetch_oracle_data(&self, url: &str) -> Result<FixedArray<32>, KslError> {
+        let request = HttpRequest::new(url.to_string());
+        let response = self.networking.http_get(request).await?;
+        
+        if response.status_code != 200 {
+            return Err(KslError::web3_error(
+                format!("Oracle request failed with status {}", response.status_code),
+                SourcePosition::new(1, 1),
+            ));
+        }
+
         let mut data = [0u8; 32];
-        let hash = url.as_bytes().iter().fold(0u32, |acc, &x| acc.wrapping_add(x as u32));
+        let hash = response.body.iter().fold(0u32, |acc, &x| acc.wrapping_add(x as u32));
         for i in 0..32 {
             data[i] = (hash >> (i % 32)) as u8;
         }
-        FixedArray::new(data)
+        Ok(FixedArray::new(data))
     }
 
-    /// Send a cross-chain message (simplified for demo).
-    pub fn send_cross_chain(&self, chain_id: u32, message: &FixedArray<32>) -> bool {
-        // Simulated cross-chain messaging (in reality, this would use net.udp_send from ksl_stdlib_net.rs)
-        chain_id != u32::MAX
+    /// Sends a cross-chain message asynchronously.
+    pub async fn send_cross_chain(&self, chain_id: u32, message: &FixedArray<32>) -> Result<bool, KslError> {
+        let mut async_ctx = self.async_context.lock().await;
+        let command = AsyncCommand::SendCrossChain(chain_id, message.clone());
+        if let Err(e) = async_ctx.execute_command(command).await {
+            return Err(KslError::web3_error(
+                format!("Failed to send cross-chain message: {}", e),
+                SourcePosition::new(1, 1),
+            ));
+        }
+
+        Ok(chain_id != u32::MAX)
     }
 }
 
-/// Kapra VM with Web3 support (aligned with kapra_vm.rs).
+/// Kapra VM with Web3 and async support (aligned with kapra_vm.rs).
 #[derive(Debug)]
 pub struct KapraVM {
+    /// Execution stack
     stack: Vec<u64>,
-    crypto: KapraCrypto,
+    /// Web3 runtime
     web3_runtime: Web3Runtime,
+    /// Async tasks
     async_tasks: Vec<AsyncTask>,
+    /// Contract state
+    contract_state: Option<ContractState>,
 }
 
 impl KapraVM {
+    /// Creates a new Kapra VM with Web3 support.
     pub fn new(is_embedded: bool) -> Self {
         KapraVM {
             stack: vec![],
-            crypto: KapraCrypto::new(is_embedded),
             web3_runtime: Web3Runtime::new(is_embedded),
             async_tasks: vec![],
+            contract_state: None,
         }
     }
 
-    pub fn execute(&mut self, bytecode: &Bytecode) -> Result<FixedArray<32>, String> {
+    /// Executes bytecode with Web3 support asynchronously.
+    pub async fn execute(&mut self, bytecode: &Bytecode) -> Result<FixedArray<32>, KslError> {
         let mut ip = 0;
         while ip < bytecode.instructions.len() {
             let instr = bytecode.instructions[ip];
@@ -178,19 +278,28 @@ impl KapraVM {
             match instr {
                 OPCODE_CREATE_DID => {
                     if self.stack.len() < 2 {
-                        return Err("Not enough values on stack for CREATE_DID".to_string());
+                        return Err(KslError::web3_error(
+                            "Not enough values on stack for CREATE_DID".to_string(),
+                            SourcePosition::new(1, 1),
+                        ));
                     }
                     let credential_idx = self.stack.pop().unwrap() as usize;
                     let identity_idx = self.stack.pop().unwrap() as usize;
                     let identity = match &bytecode.constants[identity_idx] {
                         Constant::Array32(arr) => FixedArray::new(*arr),
-                        _ => return Err("Invalid type for CREATE_DID identity".to_string()),
+                        _ => return Err(KslError::web3_error(
+                            "Invalid type for CREATE_DID identity".to_string(),
+                            SourcePosition::new(1, 1),
+                        )),
                     };
                     let credential = match &bytecode.constants[credential_idx] {
                         Constant::Array32(arr) => FixedArray::new(*arr),
-                        _ => return Err("Invalid type for CREATE_DID credential".to_string()),
+                        _ => return Err(KslError::web3_error(
+                            "Invalid type for CREATE_DID credential".to_string(),
+                            SourcePosition::new(1, 1),
+                        )),
                     };
-                    let did = self.web3_runtime.create_did(&identity, &credential);
+                    let did = self.web3_runtime.create_did(&identity, &credential).await?;
                     let const_idx = bytecode.constants.len();
                     self.stack.push(const_idx as u64);
                     let mut new_constants = bytecode.constants.clone();
@@ -200,31 +309,46 @@ impl KapraVM {
                 }
                 OPCODE_VERIFY_DID => {
                     if self.stack.len() < 2 {
-                        return Err("Not enough values on stack for VERIFY_DID".to_string());
+                        return Err(KslError::web3_error(
+                            "Not enough values on stack for VERIFY_DID".to_string(),
+                            SourcePosition::new(1, 1),
+                        ));
                     }
                     let credential_idx = self.stack.pop().unwrap() as usize;
                     let did_idx = self.stack.pop().unwrap() as usize;
                     let did = match &bytecode.constants[did_idx] {
                         Constant::Array32(arr) => FixedArray::new(*arr),
-                        _ => return Err("Invalid type for VERIFY_DID did".to_string()),
+                        _ => return Err(KslError::web3_error(
+                            "Invalid type for VERIFY_DID did".to_string(),
+                            SourcePosition::new(1, 1),
+                        )),
                     };
                     let credential = match &bytecode.constants[credential_idx] {
                         Constant::Array32(arr) => FixedArray::new(*arr),
-                        _ => return Err("Invalid type for VERIFY_DID credential".to_string()),
+                        _ => return Err(KslError::web3_error(
+                            "Invalid type for VERIFY_DID credential".to_string(),
+                            SourcePosition::new(1, 1),
+                        )),
                     };
-                    let valid = self.web3_runtime.verify_did(&did, &credential);
+                    let valid = self.web3_runtime.verify_did(&did, &credential).await?;
                     self.stack.push(valid as u64);
                 }
                 OPCODE_FETCH_ORACLE => {
                     if self.stack.len() < 1 {
-                        return Err("Not enough values on stack for FETCH_ORACLE".to_string());
+                        return Err(KslError::web3_error(
+                            "Not enough values on stack for FETCH_ORACLE".to_string(),
+                            SourcePosition::new(1, 1),
+                        ));
                     }
                     let url_idx = self.stack.pop().unwrap() as usize;
                     let url = match &bytecode.constants[url_idx] {
                         Constant::String(s) => s,
-                        _ => return Err("Invalid type for FETCH_ORACLE url".to_string()),
+                        _ => return Err(KslError::web3_error(
+                            "Invalid type for FETCH_ORACLE url".to_string(),
+                            SourcePosition::new(1, 1),
+                        )),
                     };
-                    let data = self.web3_runtime.fetch_oracle_data(url);
+                    let data = self.web3_runtime.fetch_oracle_data(url).await?;
                     let const_idx = bytecode.constants.len();
                     self.stack.push(const_idx as u64);
                     let mut new_constants = bytecode.constants.clone();
@@ -234,229 +358,132 @@ impl KapraVM {
                 }
                 OPCODE_CROSS_CHAIN => {
                     if self.stack.len() < 2 {
-                        return Err("Not enough values on stack for CROSS_CHAIN".to_string());
+                        return Err(KslError::web3_error(
+                            "Not enough values on stack for CROSS_CHAIN".to_string(),
+                            SourcePosition::new(1, 1),
+                        ));
                     }
                     let message_idx = self.stack.pop().unwrap() as usize;
                     let chain_id = self.stack.pop().unwrap() as u32;
                     let message = match &bytecode.constants[message_idx] {
                         Constant::Array32(arr) => FixedArray::new(*arr),
-                        _ => return Err("Invalid type for CROSS_CHAIN message".to_string()),
+                        _ => return Err(KslError::web3_error(
+                            "Invalid type for CROSS_CHAIN message".to_string(),
+                            SourcePosition::new(1, 1),
+                        )),
                     };
-                    let success = self.web3_runtime.send_cross_chain(chain_id, &message);
+                    let success = self.web3_runtime.send_cross_chain(chain_id, &message).await?;
                     self.async_tasks.push(AsyncTask::CrossChainSend(chain_id, message.data));
                     self.stack.push(success as u64);
                 }
-                OPCODE_PUSH => {
-                    if ip >= bytecode.instructions.len() {
-                        return Err("Incomplete PUSH instruction".to_string());
-                    }
-                    let value = bytecode.instructions[ip] as u64;
-                    ip += 1;
-                    self.stack.push(value);
+                _ => {
+                    return Err(KslError::web3_error(
+                        format!("Unknown opcode: {}", instr),
+                        SourcePosition::new(1, 1),
+                    ));
                 }
-                OPCODE_FAIL => {
-                    return Err("Web3 operation failed".to_string());
-                }
-                _ => return Err(format!("Unsupported opcode: {}", instr)),
             }
         }
 
-        if self.stack.len() != 1 {
-            return Err("Web3 block must return exactly one value".to_string());
-        }
-        let result_idx = self.stack.pop().unwrap() as usize;
-        match &bytecode.constants[result_idx] {
-            Constant::Array32(arr) => Ok(FixedArray::new(*arr)),
-            _ => Err("Invalid return type for Web3 block".to_string()),
-        }
+        Ok(FixedArray::new([0u8; 32]))
     }
 }
 
-/// Represents an async task (aligned with ksl_async.rs).
-#[derive(Debug, Clone)]
+/// Async tasks for Web3 operations.
+#[derive(Debug)]
 pub enum AsyncTask {
+    /// Cross-chain message sending task
     CrossChainSend(u32, [u8; 32]),
+    /// Contract event emission task
+    ContractEvent(ContractEvent),
 }
 
-/// Web3 compiler for Kapra Chain.
+/// Web3 compiler for generating bytecode (aligned with ksl_compiler.rs).
 pub struct Web3Compiler {
+    /// Whether running in embedded mode
     is_embedded: bool,
+    /// Contract state for compilation
+    contract_state: Option<ContractState>,
 }
 
 impl Web3Compiler {
+    /// Creates a new Web3 compiler.
     pub fn new(is_embedded: bool) -> Self {
-        Web3Compiler { is_embedded }
+        Web3Compiler {
+            is_embedded,
+            contract_state: None,
+        }
     }
 
-    /// Compile a Web3 block into bytecode.
-    pub fn compile(&self, node: &AstNode) -> Result<Bytecode, String> {
+    /// Sets the contract state for compilation.
+    pub fn set_contract_state(&mut self, state: ContractState) {
+        self.contract_state = Some(state);
+    }
+
+    /// Compiles an AST node to bytecode.
+    pub fn compile(&self, node: &AstNode) -> Result<Bytecode, KslError> {
+        let mut bytecode = Bytecode::new(vec![], vec![]);
+        self.compile_node(node, &mut bytecode)?;
+        if let Some(state) = &self.contract_state {
+            bytecode.set_contract_state(state.clone());
+        }
+        Ok(bytecode)
+    }
+
+    /// Compiles a single AST node.
+    fn compile_node(&self, node: &AstNode, bytecode: &mut Bytecode) -> Result<(), KslError> {
         match node {
-            AstNode::DidBlock { params, return_type, body } => {
-                // Validate parameters and return type
-                if params.len() != 2 {
-                    return Err("DID block must have exactly 2 parameters: identity, credential".to_string());
+            AstNode::DidBlock { params, body, .. } => {
+                // Compile DID block
+                for param in params {
+                    bytecode.instructions.push(OPCODE_PUSH);
+                    bytecode.constants.push(Constant::String(param.0.clone()));
                 }
-                if params[0].0 != "identity" || !matches!(params[0].1, Type::ArrayU8(32)) {
-                    return Err("First parameter must be 'identity: array<u8, 32]'".to_string());
+                for node in body {
+                    self.compile_node(node, bytecode)?;
                 }
-                if params[1].0 != "credential" || !matches!(params[1].1, Type::ArrayU8(32)) {
-                    return Err("Second parameter must be 'credential: array<u8, 32]'".to_string());
-                }
-                if !matches!(return_type, Type::ArrayU8(32)) {
-                    return Err("DID block must return array<u8, 32]".to_string());
-                }
-
-                let mut bytecode = Bytecode::new(vec![], vec![]);
-
-                // Compile the body
-                for stmt in body {
-                    let stmt_bytecode = self.compile_stmt(stmt)?;
-                    bytecode.extend(stmt_bytecode);
-                }
-
-                Ok(bytecode)
+                bytecode.instructions.push(OPCODE_CREATE_DID);
             }
-            AstNode::OracleBlock { params, return_type, body } => {
-                // Validate parameters and return type
-                if params.len() != 1 {
-                    return Err("Oracle block must have exactly 1 parameter: url".to_string());
+            AstNode::OracleBlock { params, body, .. } => {
+                // Compile oracle block
+                for param in params {
+                    bytecode.instructions.push(OPCODE_PUSH);
+                    bytecode.constants.push(Constant::String(param.0.clone()));
                 }
-                if params[0].0 != "url" || !matches!(params[0].1, Type::ArrayU8(_)) {
-                    return Err("Parameter must be 'url: array<u8, N>'".to_string());
+                for node in body {
+                    self.compile_node(node, bytecode)?;
                 }
-                if !matches!(return_type, Type::ArrayU8(32)) {
-                    return Err("Oracle block must return array<u8, 32]".to_string());
-                }
-
-                let mut bytecode = Bytecode::new(vec![], vec![]);
-
-                // Compile the body
-                for stmt in body {
-                    let stmt_bytecode = self.compile_stmt(stmt)?;
-                    bytecode.extend(stmt_bytecode);
-                }
-
-                Ok(bytecode)
+                bytecode.instructions.push(OPCODE_FETCH_ORACLE);
             }
-            AstNode::CrossChainBlock { params, return_type, body } => {
-                // Validate parameters and return type
-                if params.len() != 2 {
-                    return Err("CrossChain block must have exactly 2 parameters: chain_id, message".to_string());
+            AstNode::CrossChainBlock { params, body, .. } => {
+                // Compile cross-chain block
+                for param in params {
+                    bytecode.instructions.push(OPCODE_PUSH);
+                    bytecode.constants.push(Constant::String(param.0.clone()));
                 }
-                if params[0].0 != "chain_id" || !matches!(params[0].1, Type::U32) {
-                    return Err("First parameter must be 'chain_id: u32'".to_string());
+                for node in body {
+                    self.compile_node(node, bytecode)?;
                 }
-                if params[1].0 != "message" || !matches!(params[1].1, Type::ArrayU8(32)) {
-                    return Err("Second parameter must be 'message: array<u8, 32]'".to_string());
-                }
-                if !matches!(return_type, Type::Bool) {
-                    return Err("CrossChain block must return bool".to_string());
-                }
-
-                let mut bytecode = Bytecode::new(vec![], vec![]);
-
-                // Compile the body
-                for stmt in body {
-                    let stmt_bytecode = self.compile_stmt(stmt)?;
-                    bytecode.extend(stmt_bytecode);
-                }
-
-                Ok(bytecode)
+                bytecode.instructions.push(OPCODE_CROSS_CHAIN);
             }
-            _ => Err("Only Web3 blocks can be compiled at the top level".to_string()),
+            AstNode::ContractBlock { name, state, events, methods, .. } => {
+                // Compile contract block
+                bytecode.set_contract_state(state.clone());
+                for event in events {
+                    bytecode.constants.push(Constant::ContractEvent(event.clone()));
+                }
+                for method in methods {
+                    self.compile_node(method, bytecode)?;
+                }
+            }
+            _ => {
+                return Err(KslError::web3_error(
+                    format!("Unsupported node type: {:?}", node),
+                    SourcePosition::new(1, 1),
+                ));
+            }
         }
-    }
-
-    fn compile_stmt(&self, stmt: &AstNode) -> Result<Bytecode, String> {
-        match stmt {
-            AstNode::Let { name, ty, value } => {
-                let value_bytecode = self.compile_expr(value.as_ref())?;
-                let mut bytecode = value_bytecode;
-
-                if let AstNode::Call { name: call_name, .. } = value.as_ref() {
-                    if call_name == "create_did" {
-                        bytecode.instructions.push(OPCODE_CREATE_DID);
-                    } else if call_name == "verify_did" {
-                        bytecode.instructions.push(OPCODE_VERIFY_DID);
-                    } else if call_name == "fetch_oracle_data" {
-                        bytecode.instructions.push(OPCODE_FETCH_ORACLE);
-                    } else if call_name == "send_cross_chain" {
-                        bytecode.instructions.push(OPCODE_CROSS_CHAIN);
-                    }
-                }
-
-                Ok(bytecode)
-            }
-            AstNode::Call { name, args } => {
-                let mut bytecode = Bytecode::new(vec![], vec![]);
-                for arg in args {
-                    let arg_bytecode = self.compile_expr(arg)?;
-                    bytecode.extend(arg_bytecode);
-                }
-                match name.as_str() {
-                    "create_did" => {
-                        bytecode.instructions.push(OPCODE_CREATE_DID);
-                    }
-                    "verify_did" => {
-                        bytecode.instructions.push(OPCODE_VERIFY_DID);
-                        bytecode.instructions.push(OPCODE_FAIL_IF_FALSE);
-                    }
-                    "fetch_oracle_data" => {
-                        bytecode.instructions.push(OPCODE_FETCH_ORACLE);
-                    }
-                    "send_cross_chain" => {
-                        bytecode.instructions.push(OPCODE_CROSS_CHAIN);
-                    }
-                    _ => return Err(format!("Unsupported function in Web3 block: {}", name)),
-                }
-                Ok(bytecode)
-            }
-            _ => Err("Unsupported statement in Web3 block".to_string()),
-        }
-    }
-
-    fn compile_expr(&self, expr: &AstNode) -> Result<Bytecode, String> {
-        match expr {
-            AstNode::LiteralString(s) => {
-                let mut bytecode = Bytecode::new(vec![], vec![]);
-                let const_idx = bytecode.constants.len();
-                bytecode.constants.push(Constant::String(s.clone()));
-                bytecode.instructions.extend_from_slice(&[OPCODE_PUSH, const_idx as u8]);
-                Ok(bytecode)
-            }
-            AstNode::LiteralArray32(arr) => {
-                let mut bytecode = Bytecode::new(vec![], vec![]);
-                let const_idx = bytecode.constants.len();
-                bytecode.constants.push(Constant::Array32(*arr));
-                bytecode.instructions.extend_from_slice(&[OPCODE_PUSH, const_idx as u8]);
-                Ok(bytecode)
-            }
-            AstNode::LiteralU32(val) => {
-                let mut bytecode = Bytecode::new(vec![], vec![]);
-                bytecode.instructions.extend_from_slice(&[OPCODE_PUSH, *val as u8]);
-                Ok(bytecode)
-            }
-            AstNode::Call { name, args } => {
-                let mut bytecode = Bytecode::new(vec![], vec![]);
-                for arg in args {
-                    let arg_bytecode = self.compile_expr(arg)?;
-                    bytecode.extend(arg_bytecode);
-                }
-                if name == "create_did" {
-                    bytecode.instructions.push(OPCODE_CREATE_DID);
-                } else if name == "verify_did" {
-                    bytecode.instructions.push(OPCODE_VERIFY_DID);
-                } else if name == "fetch_oracle_data" {
-                    bytecode.instructions.push(OPCODE_FETCH_ORACLE);
-                } else if name == "send_cross_chain" {
-                    bytecode.instructions.push(OPCODE_CROSS_CHAIN);
-                } else {
-                    return Err(format!("Unsupported expression in Web3 block: {}", name));
-                }
-                Ok(bytecode)
-            }
-            _ => Err("Unsupported expression in Web3 block".to_string()),
-        }
+        Ok(())
     }
 }
 

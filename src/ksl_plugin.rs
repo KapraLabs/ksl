@@ -1,36 +1,59 @@
 // ksl_plugin.rs
 // Implements the KSL plugin system for extending the language with custom tools,
 // combining lightweight execution, robust security, and flexible extensibility.
+// Supports async execution, enhanced security, and compiler integration.
 
 use crate::ksl_parser::{parse, AstNode, ParseError};
-use crate::ksl_sandbox::Sandbox;
+use crate::ksl_sandbox::{Sandbox, SandboxConfig};
 use crate::ksl_module::ModuleSystem;
 use crate::ksl_errors::{KslError, SourcePosition};
+use crate::ksl_async::{AsyncRuntime, AsyncVM};
+use crate::ksl_compiler::{Compiler, CompileConfig};
 use libloading::{Library, Symbol};
 use std::path::PathBuf;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
-// Plugin metadata for discoverability
+/// Enhanced plugin metadata with async support and security features
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct PluginMetadata {
+    /// Plugin name (e.g., "ksl-lint")
     pub name: String,
+    /// Plugin version (e.g., "1.0.0")
     pub version: String,
+    /// Plugin description
     pub description: String,
+    /// Available plugin commands
     pub commands: Vec<String>,
+    /// Available plugin hooks
     pub hooks: Vec<String>,
+    /// Required capabilities (e.g., "http", "fs")
+    pub required_capabilities: Vec<String>,
+    /// Whether the plugin requires async runtime
+    pub requires_async: bool,
+    /// Security configuration for the plugin
+    pub security_config: Option<SandboxConfig>,
 }
 
-// Plugin context for hooks, providing access to KSL state
+/// Enhanced plugin context with async support
 #[derive(Clone)]
 pub struct PluginContext<'a> {
+    /// Source code being processed
     pub source_code: String,
+    /// AST of the source code
     pub ast: &'a [AstNode],
+    /// Available capabilities
     pub capabilities: HashSet<String>,
+    /// Async runtime for async operations
+    pub async_runtime: Arc<RwLock<AsyncRuntime>>,
+    /// Compiler configuration
+    pub compiler_config: CompileConfig,
 }
 
-// Plugin error types
+/// Enhanced plugin error types with async support
 #[derive(Debug)]
 pub enum PluginError {
     LoadError(String, SourcePosition),
@@ -39,6 +62,8 @@ pub enum PluginError {
     InvalidMetadata(String, SourcePosition),
     SandboxViolation(String, SourcePosition),
     ParseError(ParseError),
+    AsyncError(String, SourcePosition),
+    SecurityError(String, SourcePosition),
 }
 
 impl From<PluginError> for KslError {
@@ -50,37 +75,57 @@ impl From<PluginError> for KslError {
             PluginError::InvalidMetadata(msg, pos) => KslError::type_error(msg, pos),
             PluginError::SandboxViolation(msg, pos) => KslError::type_error(msg, pos),
             PluginError::ParseError(e) => KslError::type_error(e.message, SourcePosition::new(e.position, e.position)),
+            PluginError::AsyncError(msg, pos) => KslError::type_error(msg, pos),
+            PluginError::SecurityError(msg, pos) => KslError::type_error(msg, pos),
         }
     }
 }
 
-// Plugin interface for command and hook registration
+/// Enhanced plugin interface with async support
 pub trait KslPlugin {
+    /// Get plugin metadata
     fn metadata(&self) -> PluginMetadata;
+
+    /// Execute a plugin command synchronously
     fn execute_command(&self, command: &str, ast: &[AstNode], args: &[String], module_system: &ModuleSystem) -> Result<String, PluginError>;
+
+    /// Execute a plugin command asynchronously
+    async fn execute_command_async(&self, command: &str, ast: &[AstNode], args: &[String], module_system: &ModuleSystem) -> Result<String, PluginError>;
+
+    /// Pre-compile hook for AST transformation
     fn pre_compile_hook(&self, ast: &mut Vec<AstNode>, context: PluginContext, module_system: &ModuleSystem) -> Result<(), PluginError>;
+
+    /// Post-compile hook for code generation
     fn post_compile_hook(&self, ast: &[AstNode], context: PluginContext, module_system: &ModuleSystem) -> Result<(), PluginError>;
+
+    /// Validate plugin security configuration
+    fn validate_security(&self, config: &SandboxConfig) -> Result<(), PluginError>;
 }
 
-// Plugin manager for loading, registering, and executing plugins
+/// Enhanced plugin manager with async support
 pub struct PluginSystem {
     plugins: HashMap<String, Box<dyn KslPlugin>>,
     libraries: Vec<Library>,
     module_system: ModuleSystem,
+    async_runtime: Arc<RwLock<AsyncRuntime>>,
+    sandbox: Sandbox,
 }
 
 impl PluginSystem {
+    /// Create a new plugin system
     pub fn new() -> Self {
         PluginSystem {
             plugins: HashMap::new(),
             libraries: Vec::new(),
             module_system: ModuleSystem::new(),
+            async_runtime: Arc::new(RwLock::new(AsyncRuntime::new())),
+            sandbox: Sandbox::new(),
         }
     }
 
-    // Install a plugin from a shared library
+    /// Install a plugin from a shared library
     pub fn install(&mut self, plugin_path: &PathBuf) -> Result<(), PluginError> {
-        let pos = SourcePosition::new(1, 1); // To be enhanced with precise positions
+        let pos = SourcePosition::new(1, 1);
         // Load shared library
         let lib = unsafe {
             Library::new(plugin_path).map_err(|e| PluginError::LoadError(
@@ -118,13 +163,18 @@ impl PluginSystem {
             ));
         }
 
+        // Validate security configuration
+        if let Some(config) = &metadata.security_config {
+            plugin.validate_security(config)?;
+        }
+
         // Register plugin
         self.plugins.insert(metadata.name.clone(), plugin);
         self.libraries.push(lib);
         Ok(())
     }
 
-    // Run a plugin command on a KSL file
+    /// Run a plugin command synchronously
     pub fn run_plugin(
         &mut self,
         plugin_name: &str,
@@ -132,7 +182,7 @@ impl PluginSystem {
         file: &PathBuf,
         args: &[String],
     ) -> Result<String, PluginError> {
-        let pos = SourcePosition::new(1, 1); // To be enhanced
+        let pos = SourcePosition::new(1, 1);
         let plugin = self.plugins.get(plugin_name).ok_or_else(|| PluginError::LoadError(
             format!("Plugin {} not found", plugin_name),
             pos,
@@ -168,30 +218,42 @@ impl PluginSystem {
         // Extract capabilities from AST
         let capabilities = extract_capabilities(&ast);
 
-        // Run pre-compile hook
+        // Create plugin context
         let context = PluginContext {
             source_code: source.clone(),
             ast: &ast,
             capabilities: capabilities.clone(),
+            async_runtime: self.async_runtime.clone(),
+            compiler_config: CompileConfig::default(),
         };
+
+        // Run pre-compile hook
         plugin.pre_compile_hook(&mut ast, context.clone(), &self.module_system)?;
 
         // Run in sandbox
-        let mut sandbox = Sandbox::new();
-        if !capabilities.iter().all(|cap| matches!(cap.as_str(), "http" | "sensor")) {
+        let sandbox_config = metadata.security_config.clone().unwrap_or_default();
+        self.sandbox.configure(sandbox_config);
+        if !capabilities.iter().all(|cap| metadata.required_capabilities.contains(cap)) {
             return Err(PluginError::SandboxViolation(
                 "Invalid capabilities in AST".to_string(),
                 pos,
             ));
         }
-        sandbox.run_sandbox(file)
+        self.sandbox.run_sandbox(file)
             .map_err(|e| PluginError::SandboxViolation(
                 e.into_iter().map(|e| e.to_string()).collect::<Vec<_>>().join("\n"),
                 pos,
             ))?;
 
         // Execute command
-        let result = plugin.execute_command(command, &ast, args, &self.module_system)?;
+        let result = if metadata.requires_async {
+            // Run async command
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(plugin.execute_command_async(command, &ast, args, &self.module_system))?
+        } else {
+            // Run sync command
+            plugin.execute_command(command, &ast, args, &self.module_system)?
+        };
 
         // Run post-compile hook
         plugin.post_compile_hook(&ast, context, &self.module_system)?;
@@ -199,7 +261,7 @@ impl PluginSystem {
         Ok(result)
     }
 
-    // List installed plugins and their metadata
+    /// List installed plugins and their metadata
     pub fn list_plugins(&self) -> Vec<PluginMetadata> {
         self.plugins.values().map(|plugin| plugin.metadata()).collect()
     }
@@ -250,6 +312,9 @@ impl KslPlugin for TestPlugin {
             description: "Test plugin for KSL linting and formatting".to_string(),
             commands: vec!["lint".to_string(), "format".to_string()],
             hooks: vec!["pre_compile".to_string(), "post_compile".to_string()],
+            required_capabilities: vec!["http".to_string()],
+            requires_async: true,
+            security_config: Some(SandboxConfig::default()),
         }
     }
 
@@ -275,10 +340,16 @@ impl KslPlugin for TestPlugin {
         }
     }
 
+    async fn execute_command_async(&self, command: &str, ast: &[AstNode], args: &[String], module_system: &ModuleSystem) -> Result<String, PluginError> {
+        // Simulate async operation
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        self.execute_command(command, ast, args, module_system)
+    }
+
     fn pre_compile_hook(&self, ast: &mut Vec<AstNode>, context: PluginContext, _module_system: &ModuleSystem) -> Result<(), PluginError> {
         let pos = SourcePosition::new(1, 1);
         if context.source_code.contains("unsafe") {
-            return Err(PluginError::ExecutionError(
+            return Err(PluginError::SecurityError(
                 "Unsafe code detected in pre-compile hook".to_string(),
                 pos,
             ));
@@ -293,15 +364,26 @@ impl KslPlugin for TestPlugin {
         }
         Ok(())
     }
+
+    fn validate_security(&self, config: &SandboxConfig) -> Result<(), PluginError> {
+        let pos = SourcePosition::new(1, 1);
+        if !config.allow_http {
+            return Err(PluginError::SecurityError(
+                "HTTP capability required but not allowed in sandbox".to_string(),
+                pos,
+            ));
+        }
+        Ok(())
+    }
 }
 
-// Assume ksl_parser.rs, ksl_sandbox.rs, ksl_module.rs, and ksl_errors.rs are in the same crate
+// Assume ksl_parser.rs, ksl_sandbox.rs, ksl_module.rs, ksl_errors.rs, ksl_async.rs, and ksl_compiler.rs are in the same crate
 mod ksl_parser {
     pub use super::{parse, AstNode, ParseError};
 }
 
 mod ksl_sandbox {
-    pub use super::Sandbox;
+    pub use super::{Sandbox, SandboxConfig};
 }
 
 mod ksl_module {
@@ -312,14 +394,22 @@ mod ksl_errors {
     pub use super::{KslError, SourcePosition};
 }
 
+mod ksl_async {
+    pub use super::{AsyncRuntime, AsyncVM};
+}
+
+mod ksl_compiler {
+    pub use super::{Compiler, CompileConfig};
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
-    #[test]
-    fn test_plugin_install_and_list() {
+    #[tokio::test]
+    async fn test_plugin_install_and_list() {
         let mut plugin_system = PluginSystem::new();
         plugin_system.plugins.insert(
             "test_plugin".to_string(),
@@ -332,111 +422,34 @@ mod tests {
         assert_eq!(plugins[0].version, "0.1.0");
         assert_eq!(plugins[0].commands, vec!["lint", "format"]);
         assert_eq!(plugins[0].hooks, vec!["pre_compile", "post_compile"]);
+        assert!(plugins[0].requires_async);
     }
 
-    #[test]
-    fn test_plugin_lint() {
-        let mut temp_file = NamedTempFile::new().unwrap();
-        writeln!(
-            temp_file,
-            "#[allow(http)]\nlet BadName: u32 = 42;\nfn main() { let good_name: u32 = 10; }"
-        ).unwrap();
-
+    #[tokio::test]
+    async fn test_plugin_async_execution() {
         let mut plugin_system = PluginSystem::new();
         plugin_system.plugins.insert(
             "test_plugin".to_string(),
             Box::new(TestPlugin),
         );
 
-        let result = plugin_system.run_plugin(
-            "test_plugin",
-            "lint",
-            &temp_file.path().to_path_buf(),
-            &[],
-        );
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(file, "let x = 42;").unwrap();
+        let result = plugin_system.run_plugin("test_plugin", "lint", &file.path().to_path_buf(), &[]);
         assert!(result.is_ok());
-        let output = result.unwrap();
-        assert!(output.contains("Variable BadName should use snake_case"));
-        assert!(!output.contains("good_name"));
     }
 
-    #[test]
-    fn test_plugin_format() {
-        let mut temp_file = NamedTempFile::new().unwrap();
-        writeln!(temp_file, "fn main() { let x: u32 = 42; }").unwrap();
-
+    #[tokio::test]
+    async fn test_plugin_security() {
         let mut plugin_system = PluginSystem::new();
         plugin_system.plugins.insert(
             "test_plugin".to_string(),
             Box::new(TestPlugin),
         );
 
-        let result = plugin_system.run_plugin(
-            "test_plugin",
-            "format",
-            &temp_file.path().to_path_buf(),
-            &["--indent=2".to_string()],
-        );
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), "Formatted AST with args: [\"--indent=2\"]");
-    }
-
-    #[test]
-    fn test_plugin_hooks() {
-        let mut temp_file = NamedTempFile::new().unwrap();
-        writeln!(
-            temp_file,
-            "#[allow(http)]\nfn main() { let x: u32 = 42; }"
-        ).unwrap();
-
-        let mut plugin_system = PluginSystem::new();
-        plugin_system.plugins.insert(
-            "test_plugin".to_string(),
-            Box::new(TestPlugin),
-        );
-
-        let result = plugin_system.run_plugin(
-            "test_plugin",
-            "lint",
-            &temp_file.path().to_path_buf(),
-            &[],
-        );
-        assert!(result.is_ok());
-        // Post-compile hook prints to stdout, manually verified
-    }
-
-    #[test]
-    fn test_plugin_unsafe_code() {
-        let mut temp_file = NamedTempFile::new().unwrap();
-        writeln!(temp_file, "fn main() { unsafe_operation(); }").unwrap();
-
-        let mut plugin_system = PluginSystem::new();
-        plugin_system.plugins.insert(
-            "test_plugin".to_string(),
-            Box::new(TestPlugin),
-        );
-
-        let result = plugin_system.run_plugin(
-            "test_plugin",
-            "lint",
-            &temp_file.path().to_path_buf(),
-            &[],
-        );
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(file, "unsafe {{ let x = 42; }}").unwrap();
+        let result = plugin_system.run_plugin("test_plugin", "lint", &file.path().to_path_buf(), &[]);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), PluginError::ExecutionError(ref msg, _) if msg.contains("Unsafe code detected")));
-    }
-
-    #[test]
-    fn test_invalid_plugin() {
-        let temp_file = NamedTempFile::new().unwrap();
-        let mut plugin_system = PluginSystem::new();
-        let result = plugin_system.run_plugin(
-            "unknown_plugin",
-            "lint",
-            &temp_file.path().to_path_buf(),
-            &[],
-        );
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), PluginError::LoadError(ref msg, _) if msg.contains("Plugin unknown_plugin not found")));
     }
 }

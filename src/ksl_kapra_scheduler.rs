@@ -222,30 +222,107 @@ impl ResourceLimits {
     }
 }
 
-/// Scheduler for Kapra Chain tasks.
+/// Scheduler for Kapra Chain tasks with async support.
 #[derive(Debug, Clone)]
 pub struct Scheduler {
-    tasks: Vec<(u32, Bytecode)>, // (priority, task bytecode)
+    tasks: Vec<(u32, Bytecode, TaskMetadata)>, // (priority, task bytecode, metadata)
     limits: ResourceLimits,
+    async_runtime: AsyncRuntime,
+    consensus_runtime: Option<ConsensusRuntime>,
 }
 
 impl Scheduler {
-    pub fn new(limits: ResourceLimits) -> Self {
+    pub fn new(limits: ResourceLimits, async_runtime: AsyncRuntime) -> Self {
         Scheduler {
             tasks: vec![],
             limits,
+            async_runtime,
+            consensus_runtime: None,
         }
     }
 
-    pub fn add_task(&mut self, priority: u32, task: Bytecode) {
-        self.tasks.push((priority, task));
+    pub fn set_consensus_runtime(&mut self, consensus: ConsensusRuntime) {
+        self.consensus_runtime = Some(consensus);
     }
 
-    pub fn schedule(&mut self) -> Vec<Bytecode> {
+    pub fn add_task(&mut self, priority: u32, task: Bytecode, contract_id: Option<[u8; 32]>) {
+        let metadata = TaskMetadata::new(priority, contract_id);
+        self.tasks.push((priority, task, metadata));
+    }
+
+    pub async fn schedule(&mut self) -> AsyncResult<Vec<Bytecode>> {
         // Sort tasks by priority (higher priority first)
         self.tasks.sort_by(|a, b| b.0.cmp(&a.0));
-        self.tasks.iter().map(|(_, task)| task.clone()).collect()
+        
+        let mut results = Vec::new();
+        for (_, task, metadata) in &self.tasks {
+            // Check resource limits
+            if let Some(error) = self.limits.check(&metadata.resource_usage) {
+                return Err(KslError::scheduler_error(error, SourcePosition::new(1, 1)));
+            }
+
+            // Execute contract if present
+            if let Some(contract_id) = metadata.contract_id {
+                let result = self.execute_contract(contract_id, task).await?;
+                if !result {
+                    continue;
+                }
+            }
+
+            // Execute consensus tasks if needed
+            if let Some(consensus) = &self.consensus_runtime {
+                let result = self.execute_consensus(consensus, task).await?;
+                if !result {
+                    continue;
+                }
+            }
+
+            results.push(task.clone());
+        }
+
+        Ok(results)
     }
+
+    async fn execute_contract(&self, contract_id: [u8; 32], task: &Bytecode) -> AsyncResult<bool> {
+        // Execute contract with async runtime
+        let result = self.async_runtime.execute_contract(contract_id, task).await?;
+        Ok(result)
+    }
+
+    async fn execute_consensus(&self, consensus: &ConsensusRuntime, task: &Bytecode) -> AsyncResult<bool> {
+        // Execute consensus tasks
+        let result = consensus.validate_block(&[0; 32], 0).await?;
+        Ok(result)
+    }
+}
+
+/// Task metadata for scheduling
+#[derive(Debug, Clone)]
+pub struct TaskMetadata {
+    pub priority: u32,
+    pub contract_id: Option<[u8; 32]>,
+    pub resource_usage: RuntimeMetrics,
+    pub state: TaskState,
+}
+
+impl TaskMetadata {
+    pub fn new(priority: u32, contract_id: Option<[u8; 32]>) -> Self {
+        TaskMetadata {
+            priority,
+            contract_id,
+            resource_usage: RuntimeMetrics::new(),
+            state: TaskState::Pending,
+        }
+    }
+}
+
+/// Task state
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TaskState {
+    Pending,
+    Running,
+    Completed,
+    Failed(String),
 }
 
 /// Kapra VM with scheduling support (aligned with kapra_vm.rs).
@@ -301,9 +378,9 @@ impl KapraVM {
                         _ => return Err("Invalid type for SCHEDULE task".to_string()),
                     };
 
-                    let mut scheduler = Scheduler::new(self.limits.clone());
-                    scheduler.add_task(priority, task_bytecode);
-                    let scheduled_tasks = scheduler.schedule();
+                    let mut scheduler = Scheduler::new(self.limits.clone(), AsyncRuntime::new());
+                    scheduler.add_task(priority, task_bytecode, None);
+                    let scheduled_tasks = scheduler.schedule().await?;
 
                     // Execute scheduled tasks
                     for task in scheduled_tasks {
@@ -577,6 +654,7 @@ const OPCODE_FAIL_IF_FALSE: u8 = 0x08;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     #[test]
     fn test_schedule_block_compilation() {
@@ -673,5 +751,67 @@ mod tests {
         let result = compiler.compile(&schedule_node);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("must have exactly 1 parameter"));
+    }
+
+    #[tokio::test]
+    async fn test_scheduler_async() {
+        let limits = ResourceLimits::new();
+        let async_runtime = AsyncRuntime::new();
+        let mut scheduler = Scheduler::new(limits, async_runtime);
+
+        // Add a task
+        let task = Bytecode::new(vec![], vec![]);
+        scheduler.add_task(100, task, None);
+
+        // Schedule tasks
+        let result = scheduler.schedule().await;
+        assert!(result.is_ok());
+        assert!(!result.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_scheduler_contract() {
+        let limits = ResourceLimits::new();
+        let async_runtime = AsyncRuntime::new();
+        let mut scheduler = Scheduler::new(limits, async_runtime);
+
+        // Add a contract task
+        let task = Bytecode::new(vec![], vec![]);
+        let contract_id = [1; 32];
+        scheduler.add_task(100, task, Some(contract_id));
+
+        // Schedule tasks
+        let result = scheduler.schedule().await;
+        assert!(result.is_ok());
+        assert!(!result.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_scheduler_consensus() {
+        let limits = ResourceLimits::new();
+        let async_runtime = AsyncRuntime::new();
+        let mut scheduler = Scheduler::new(limits, async_runtime);
+
+        // Set up consensus runtime
+        let consensus = ConsensusRuntime::new(
+            ConsensusConfig {
+                algorithm: ConsensusAlgorithm::ProofOfStake,
+                shard_count: 4,
+                threshold: 1000,
+                validators: HashMap::new(),
+                is_embedded: false,
+            },
+            KeyPair::new(),
+        );
+        scheduler.set_consensus_runtime(consensus);
+
+        // Add a task
+        let task = Bytecode::new(vec![], vec![]);
+        scheduler.add_task(100, task, None);
+
+        // Schedule tasks
+        let result = scheduler.schedule().await;
+        assert!(result.is_ok());
+        assert!(!result.unwrap().is_empty());
     }
 }

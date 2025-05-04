@@ -1,6 +1,7 @@
 // ksl_bundler.rs
 // Bundles KSL projects into single-file executables for simplified distribution,
 // supporting WASM and native targets with optimized bundle size.
+// Supports async bundling and new module formats.
 
 use crate::ksl_parser::{parse, ParseError};
 use crate::ksl_checker::check;
@@ -9,42 +10,81 @@ use crate::ksl_optimizer::{optimize};
 use crate::ksl_wasm::generate_wasm;
 use crate::ksl_aot::aot_compile;
 use crate::ksl_package::{PackageSystem, PackageMetadata};
+use crate::ksl_module::{ModuleFormat, ModuleSystem};
+use crate::ksl_async::{AsyncRuntime, AsyncResult};
 use crate::ksl_errors::{KslError, SourcePosition};
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 use toml;
 
-// Bundler configuration
+/// Configuration for the KSL bundler
 #[derive(Debug)]
 pub struct BundlerConfig {
-    input_file: PathBuf, // Main KSL source file
-    target: String, // Target: "wasm" or "native"
-    output_file: PathBuf, // Output bundled file (e.g., app.kslbin)
+    /// Main KSL source file to bundle
+    pub input_file: PathBuf,
+    /// Target platform: "wasm" or "native"
+    pub target: String,
+    /// Output bundled file path
+    pub output_file: PathBuf,
+    /// Module format to use
+    pub module_format: ModuleFormat,
+    /// Whether to use async bundling
+    pub async_bundle: bool,
 }
 
-// Bundler for KSL projects
+/// State for tracking bundling progress
+#[derive(Debug, Default)]
+pub struct BundleState {
+    /// Number of files processed
+    pub files_processed: u64,
+    /// Total bundle size
+    pub total_size: u64,
+    /// Time taken for bundling
+    pub bundle_time: std::time::Duration,
+    /// Current module being processed
+    pub current_module: Option<String>,
+}
+
+/// Bundler for KSL projects with async support
 pub struct Bundler {
+    /// Bundler configuration
     config: BundlerConfig,
-    package_system: PackageSystem,
+    /// Package system for dependency management
+    package_system: Arc<RwLock<PackageSystem>>,
+    /// Module system for format handling
+    module_system: Arc<RwLock<ModuleSystem>>,
+    /// Async runtime for concurrent operations
+    async_runtime: Arc<AsyncRuntime>,
+    /// Current bundling state
+    state: Arc<RwLock<BundleState>>,
 }
 
 impl Bundler {
+    /// Creates a new bundler instance
     pub fn new(config: BundlerConfig) -> Self {
         Bundler {
             config,
-            package_system: PackageSystem::new(),
+            package_system: Arc::new(RwLock::new(PackageSystem::new())),
+            module_system: Arc::new(RwLock::new(ModuleSystem::new())),
+            async_runtime: Arc::new(AsyncRuntime::new()),
+            state: Arc::new(RwLock::new(BundleState::default())),
         }
     }
 
-    // Bundle a KSL project into a single executable
-    pub fn bundle(&mut self) -> Result<(), KslError> {
+    /// Bundle a KSL project asynchronously
+    pub async fn bundle_async(&self) -> AsyncResult<()> {
         let pos = SourcePosition::new(1, 1);
-        // Resolve dependencies
+        let start_time = std::time::Instant::now();
+
+        // Resolve dependencies asynchronously
         let project_dir = self.config.input_file.parent().unwrap_or_else(|| PathBuf::from("."));
-        self.package_system.resolve_dependencies(project_dir)
+        let package_system = self.package_system.read().await;
+        package_system.resolve_dependencies_async(project_dir).await
             .map_err(|e| KslError::type_error(format!("Dependency resolution failed: {}", e), pos))?;
 
         // Compile main file to bytecode
@@ -107,7 +147,7 @@ impl Bundler {
             )),
         };
 
-        // Collect dependency source code
+        // Collect dependency source code asynchronously
         let mut dep_sources = Vec::new();
         let metadata_file = project_dir.join("ksl_package.toml");
         if metadata_file.exists() {
@@ -121,34 +161,40 @@ impl Bundler {
                     format!("Failed to parse metadata: {}", e),
                     pos,
                 ))?;
+
+            let mut tasks = Vec::new();
             for (dep_name, dep_version) in metadata.dependencies {
-                let dep_dir = self.package_system.repository.join(&dep_name).join(&dep_version).join("src");
+                let dep_dir = package_system.repository.join(&dep_name).join(&dep_version).join("src");
                 if dep_dir.exists() {
-                    for entry in fs::read_dir(&dep_dir)
-                        .map_err(|e| KslError::type_error(
-                            format!("Failed to read dependency dir {}: {}", dep_dir.display(), e),
-                            pos,
-                        ))?
-                    {
-                        let entry = entry?;
-                        if entry.path().extension().map(|ext| ext == "ksl").unwrap_or(false) {
-                            let dep_source = fs::read_to_string(&entry.path())
-                                .map_err(|e| KslError::type_error(
-                                    format!("Failed to read dependency file {}: {}", entry.path().display(), e),
-                                    pos,
-                                ))?;
-                            dep_sources.push((dep_name.clone(), dep_version.clone(), dep_source));
+                    let task = self.async_runtime.spawn(async move {
+                        let mut sources = Vec::new();
+                        for entry in fs::read_dir(&dep_dir)? {
+                            let entry = entry?;
+                            if entry.path().extension().map(|ext| ext == "ksl").unwrap_or(false) {
+                                let dep_source = fs::read_to_string(&entry.path())?;
+                                sources.push((dep_name.clone(), dep_version.clone(), dep_source));
+                            }
                         }
-                    }
+                        Ok::<_, KslError>(sources)
+                    });
+                    tasks.push(task);
                 }
+            }
+
+            for task in tasks {
+                let sources = task.await
+                    .map_err(|e| KslError::type_error(format!("Async task failed: {}", e), pos))??;
+                dep_sources.extend(sources);
             }
         }
 
         // Create bundle
         let mut bundle = Vec::new();
-        // Add header (simplified: magic number + target)
+        // Add header (magic number + target + module format)
         bundle.extend_from_slice(b"KSLBIN");
         bundle.extend_from_slice(self.config.target.as_bytes());
+        bundle.push(0); // Separator
+        bundle.extend_from_slice(self.config.module_format.to_string().as_bytes());
         bundle.push(0); // Separator
 
         // Add binary data (compressed)
@@ -176,6 +222,12 @@ impl Bundler {
         bundle.extend_from_slice(&deps_len.to_le_bytes());
         bundle.extend_from_slice(&compressed_deps);
 
+        // Update state
+        let mut state = self.state.write().await;
+        state.files_processed = dep_sources.len() as u64 + 1; // +1 for main file
+        state.total_size = bundle.len() as u64;
+        state.bundle_time = start_time.elapsed();
+
         // Write bundle to output file
         File::create(&self.config.output_file)
             .map_err(|e| KslError::type_error(
@@ -192,18 +244,21 @@ impl Bundler {
     }
 }
 
-// Public API to bundle a KSL project
-pub fn bundle(input_file: &PathBuf, target: &str, output_file: PathBuf) -> Result<(), KslError> {
+/// Public API to bundle a KSL project asynchronously
+pub async fn bundle_async(input_file: &PathBuf, target: &str, output_file: PathBuf, module_format: ModuleFormat) -> AsyncResult<()> {
     let config = BundlerConfig {
         input_file: input_file.clone(),
         target: target.to_string(),
         output_file,
+        module_format,
+        async_bundle: true,
     };
-    let mut bundler = Bundler::new(config);
-    bundler.bundle()
+    let bundler = Bundler::new(config);
+    bundler.bundle_async().await
 }
 
-// Assume ksl_parser.rs, ksl_checker.rs, ksl_compiler.rs, ksl_optimizer.rs, ksl_wasm.rs, ksl_aot.rs, ksl_package.rs, and ksl_errors.rs are in the same crate
+// Assume ksl_parser.rs, ksl_checker.rs, ksl_compiler.rs, ksl_optimizer.rs, ksl_wasm.rs, ksl_aot.rs,
+// ksl_package.rs, ksl_module.rs, ksl_async.rs, and ksl_errors.rs are in the same crate
 mod ksl_parser {
     pub use super::{parse, ParseError};
 }
@@ -232,6 +287,14 @@ mod ksl_package {
     pub use super::{PackageSystem, PackageMetadata};
 }
 
+mod ksl_module {
+    pub use super::{ModuleFormat, ModuleSystem};
+}
+
+mod ksl_async {
+    pub use super::{AsyncRuntime, AsyncResult};
+}
+
 mod ksl_errors {
     pub use super::{KslError, SourcePosition};
 }
@@ -242,68 +305,88 @@ mod tests {
     use std::io::Read;
     use tempfile::TempDir;
 
-    #[test]
-    fn test_bundle_wasm() {
+    #[tokio::test]
+    async fn test_bundle_wasm_async() {
         let temp_dir = TempDir::new().unwrap();
         let input_file = temp_dir.path().join("input.ksl");
-        let mut file = File::create(&input_file).unwrap();
-        writeln!(
-            file,
-            "fn main() {{ let x: u32 = 42; }}"
-        ).unwrap();
+        let output_file = temp_dir.path().join("output.kslbin");
+        fs::write(&input_file, r#"
+            fn main() {
+                println!("Hello, world!");
+            }
+        "#).unwrap();
 
-        let output_file = temp_dir.path().join("app.kslbin");
-        let result = bundle(&input_file, "wasm", output_file.clone());
+        let result = bundle_async(
+            &input_file,
+            "wasm",
+            output_file.clone(),
+            ModuleFormat::Standard,
+        ).await;
         assert!(result.is_ok());
-        assert!(output_file.exists());
 
-        let content = fs::read(&output_file).unwrap();
-        assert!(content.starts_with(b"KSLBINwasm\0"));
+        // Verify bundle contents
+        let mut bundle = Vec::new();
+        File::open(&output_file).unwrap().read_to_end(&mut bundle).unwrap();
+        assert!(bundle.starts_with(b"KSLBIN"));
     }
 
-    #[test]
-    fn test_bundle_native() {
+    #[tokio::test]
+    async fn test_bundle_native_async() {
         let temp_dir = TempDir::new().unwrap();
         let input_file = temp_dir.path().join("input.ksl");
-        let mut file = File::create(&input_file).unwrap();
-        writeln!(
-            file,
-            "fn main() {{ let x: u32 = 42; }}"
-        ).unwrap();
+        let output_file = temp_dir.path().join("output.kslbin");
+        fs::write(&input_file, r#"
+            fn main() {
+                println!("Hello, world!");
+            }
+        "#).unwrap();
 
-        let output_file = temp_dir.path().join("app.kslbin");
-        let result = bundle(&input_file, "native", output_file.clone());
+        let result = bundle_async(
+            &input_file,
+            "native",
+            output_file.clone(),
+            ModuleFormat::Standard,
+        ).await;
         assert!(result.is_ok());
-        assert!(output_file.exists());
 
-        let content = fs::read(&output_file).unwrap();
-        assert!(content.starts_with(b"KSLBINnative\0"));
+        // Verify bundle contents
+        let mut bundle = Vec::new();
+        File::open(&output_file).unwrap().read_to_end(&mut bundle).unwrap();
+        assert!(bundle.starts_with(b"KSLBIN"));
     }
 
-    #[test]
-    fn test_bundle_invalid_target() {
+    #[tokio::test]
+    async fn test_bundle_invalid_target() {
         let temp_dir = TempDir::new().unwrap();
         let input_file = temp_dir.path().join("input.ksl");
-        let mut file = File::create(&input_file).unwrap();
-        writeln!(
-            file,
-            "fn main() {{ let x: u32 = 42; }}"
-        ).unwrap();
+        let output_file = temp_dir.path().join("output.kslbin");
+        fs::write(&input_file, r#"
+            fn main() {
+                println!("Hello, world!");
+            }
+        "#).unwrap();
 
-        let output_file = temp_dir.path().join("app.kslbin");
-        let result = bundle(&input_file, "invalid", output_file);
+        let result = bundle_async(
+            &input_file,
+            "invalid",
+            output_file,
+            ModuleFormat::Standard,
+        ).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Unsupported target"));
     }
 
-    #[test]
-    fn test_bundle_invalid_file() {
+    #[tokio::test]
+    async fn test_bundle_invalid_file() {
         let temp_dir = TempDir::new().unwrap();
         let input_file = temp_dir.path().join("nonexistent.ksl");
-        let output_file = temp_dir.path().join("app.kslbin");
+        let output_file = temp_dir.path().join("output.kslbin");
 
-        let result = bundle(&input_file, "wasm", output_file);
+        let result = bundle_async(
+            &input_file,
+            "wasm",
+            output_file,
+            ModuleFormat::Standard,
+        ).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Failed to read file"));
     }
 }

@@ -1,7 +1,14 @@
 // ksl_kapra_shard.rs
 // Language-level sharding primitives for Kapra Chain
+// Implements sharding for the Kapra blockchain, improving scalability through parallel processing
+// and efficient data distribution across multiple shards.
 
 use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use crate::ksl_async::{AsyncRuntime, AsyncResult};
+use crate::ksl_kapra_consensus::{ConsensusRuntime, ConsensusState};
+use crate::ksl_errors::{KslError, SourcePosition};
 
 /// Represents KSL bytecode (aligned with ksl_bytecode.rs).
 #[derive(Debug, Clone)]
@@ -61,22 +68,37 @@ pub enum Type {
     ArrayU8(usize), // e.g., array<u8, 32>
 }
 
+/// Shard state for tracking shard-specific information
+#[derive(Debug, Clone)]
+pub struct ShardState {
+    pub last_block: [u8; 32],
+    pub validators: Vec<[u8; 32]>,
+    pub signatures: HashMap<[u8; 32], [u8; 2420]>, // validator_id -> signature
+}
+
 /// Sharding runtime for Kapra Chain (integrates with ksl_stdlib_net.rs).
 #[derive(Debug, Clone)]
 pub struct ShardRuntime {
-    shard_count: u32, // Total number of shards (configurable)
-    route_cache: HashMap<[u8; 32], u32>, // Cache for shard_route results
+    shard_count: u32,
+    route_cache: HashMap<[u8; 32], u32>,
+    consensus_runtime: Arc<ConsensusRuntime>,
+    async_runtime: Arc<AsyncRuntime>,
+    shard_states: Arc<RwLock<HashMap<u32, ShardState>>>,
 }
 
 impl ShardRuntime {
-    pub fn new(shard_count: u32) -> Self {
+    /// Creates a new shard runtime with the specified number of shards
+    pub fn new(shard_count: u32, consensus_runtime: Arc<ConsensusRuntime>, async_runtime: Arc<AsyncRuntime>) -> Self {
         ShardRuntime {
             shard_count,
             route_cache: HashMap::new(),
+            consensus_runtime,
+            async_runtime,
+            shard_states: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
-    /// Route an account to a shard (simulates shard_route).
+    /// Route an account to a shard (simulates shard_route)
     pub fn shard_route(&mut self, account: &[u8; 32]) -> u32 {
         if let Some(shard_id) = self.route_cache.get(account) {
             return *shard_id;
@@ -89,15 +111,65 @@ impl ShardRuntime {
         shard_id
     }
 
-    /// Send a message to a shard (simulates shard_send).
-    pub fn shard_send(&self, shard_id: u32, message: &[u8; 32]) -> bool {
+    /// Send a message to a shard asynchronously
+    pub async fn shard_send(&self, shard_id: u32, message: &[u8; 32]) -> AsyncResult<bool> {
         // Validate shard ID
         if shard_id >= self.shard_count {
-            return false;
+            return Err(KslError::type_error(
+                format!("Invalid shard ID: {}", shard_id),
+                SourcePosition::new(1, 1),
+            ));
         }
 
-        // Simulate sending (in reality, this would use net.udp_send or similar)
-        true
+        // Get shard state
+        let shard_states = self.shard_states.read().await;
+        let shard_state = shard_states.get(&shard_id).ok_or_else(|| {
+            KslError::type_error(
+                format!("Shard {} not found", shard_id),
+                SourcePosition::new(1, 1),
+            )
+        })?;
+
+        // Validate with consensus
+        let is_valid = self.consensus_runtime.validate_block(message, shard_id).await?;
+        if !is_valid {
+            return Ok(false);
+        }
+
+        // Update shard state
+        let mut shard_states = self.shard_states.write().await;
+        if let Some(state) = shard_states.get_mut(&shard_id) {
+            state.last_block = *message;
+        }
+
+        Ok(true)
+    }
+
+    /// Synchronize shard state with other nodes
+    pub async fn sync_shard_state(&self, shard_id: u32) -> AsyncResult<()> {
+        let shard_states = self.shard_states.read().await;
+        let shard_state = shard_states.get(&shard_id).ok_or_else(|| {
+            KslError::type_error(
+                format!("Shard {} not found", shard_id),
+                SourcePosition::new(1, 1),
+            )
+        })?;
+
+        // Broadcast shard state to other nodes
+        let state_json = serde_json::to_string(shard_state).map_err(|e| {
+            KslError::type_error(
+                format!("Failed to serialize shard state: {}", e),
+                SourcePosition::new(1, 1),
+            )
+        })?;
+
+        // Use async runtime to broadcast state
+        self.async_runtime.http_post(
+            &format!("http://localhost:8080/shard/{}/sync", shard_id),
+            &state_json,
+        ).await?;
+
+        Ok(())
     }
 }
 
@@ -110,15 +182,15 @@ pub struct KapraVM {
 }
 
 impl KapraVM {
-    pub fn new(shard_count: u32) -> Self {
+    pub fn new(shard_count: u32, consensus_runtime: Arc<ConsensusRuntime>, async_runtime: Arc<AsyncRuntime>) -> Self {
         KapraVM {
             stack: vec![],
-            shard_runtime: ShardRuntime::new(shard_count),
+            shard_runtime: ShardRuntime::new(shard_count, consensus_runtime, async_runtime),
             async_tasks: vec![],
         }
     }
 
-    pub fn execute(&mut self, bytecode: &Bytecode) -> Result<(), String> {
+    pub async fn execute(&mut self, bytecode: &Bytecode) -> AsyncResult<()> {
         let mut ip = 0;
         while ip < bytecode.instructions.len() {
             let instr = bytecode.instructions[ip];
@@ -127,41 +199,72 @@ impl KapraVM {
             match instr {
                 OPCODE_SHARD_ROUTE => {
                     if self.stack.len() < 1 {
-                        return Err("Not enough values on stack for SHARD_ROUTE".to_string());
+                        return Err(KslError::type_error(
+                            "Not enough values on stack for SHARD_ROUTE".to_string(),
+                            SourcePosition::new(1, 1),
+                        ));
                     }
                     let account_idx = self.stack.pop().unwrap() as usize;
                     if account_idx >= bytecode.constants.len() {
-                        return Err("Invalid constant index for SHARD_ROUTE".to_string());
+                        return Err(KslError::type_error(
+                            "Invalid constant index for SHARD_ROUTE".to_string(),
+                            SourcePosition::new(1, 1),
+                        ));
                     }
                     let account = match &bytecode.constants[account_idx] {
                         Constant::Array32(arr) => arr,
-                        _ => return Err("Invalid type for SHARD_ROUTE argument".to_string()),
+                        _ => return Err(KslError::type_error(
+                            "Invalid type for SHARD_ROUTE argument".to_string(),
+                            SourcePosition::new(1, 1),
+                        )),
                     };
                     let shard_id = self.shard_runtime.shard_route(account);
                     self.stack.push(shard_id as u64);
                 }
                 OPCODE_SHARD_SEND => {
                     if self.stack.len() < 2 {
-                        return Err("Not enough values on stack for SHARD_SEND".to_string());
+                        return Err(KslError::type_error(
+                            "Not enough values on stack for SHARD_SEND".to_string(),
+                            SourcePosition::new(1, 1),
+                        ));
                     }
                     let msg_idx = self.stack.pop().unwrap() as usize;
                     let shard_id = self.stack.pop().unwrap() as u32;
                     if msg_idx >= bytecode.constants.len() {
-                        return Err("Invalid constant index for SHARD_SEND".to_string());
+                        return Err(KslError::type_error(
+                            "Invalid constant index for SHARD_SEND".to_string(),
+                            SourcePosition::new(1, 1),
+                        ));
                     }
                     let message = match &bytecode.constants[msg_idx] {
                         Constant::Array32(arr) => arr,
-                        _ => return Err("Invalid type for SHARD_SEND argument".to_string()),
+                        _ => return Err(KslError::type_error(
+                            "Invalid type for SHARD_SEND argument".to_string(),
+                            SourcePosition::new(1, 1),
+                        )),
                     };
-                    let success = self.shard_runtime.shard_send(shard_id, message);
+                    let success = self.shard_runtime.shard_send(shard_id, message).await?;
                     self.stack.push(success as u64);
 
-                    // Schedule the async task (simplified)
+                    // Schedule the async task
                     self.async_tasks.push(AsyncTask::ShardSend(shard_id, *message));
+                }
+                OPCODE_SHARD_SYNC => {
+                    if self.stack.len() < 1 {
+                        return Err(KslError::type_error(
+                            "Not enough values on stack for SHARD_SYNC".to_string(),
+                            SourcePosition::new(1, 1),
+                        ));
+                    }
+                    let shard_id = self.stack.pop().unwrap() as u32;
+                    self.shard_runtime.sync_shard_state(shard_id).await?;
                 }
                 OPCODE_PUSH => {
                     if ip >= bytecode.instructions.len() {
-                        return Err("Incomplete PUSH instruction".to_string());
+                        return Err(KslError::type_error(
+                            "Incomplete PUSH instruction".to_string(),
+                            SourcePosition::new(1, 1),
+                        ));
                     }
                     let value = bytecode.instructions[ip] as u64;
                     ip += 1;
@@ -169,11 +272,17 @@ impl KapraVM {
                 }
                 OPCODE_POP => {
                     if self.stack.is_empty() {
-                        return Err("Stack underflow".to_string());
+                        return Err(KslError::type_error(
+                            "Stack underflow".to_string(),
+                            SourcePosition::new(1, 1),
+                        ));
                     }
                     self.stack.pop();
                 }
-                _ => return Err(format!("Unsupported opcode: {}", instr)),
+                _ => return Err(KslError::type_error(
+                    format!("Unsupported opcode: {}", instr),
+                    SourcePosition::new(1, 1),
+                )),
             }
         }
         Ok(())
@@ -184,6 +293,7 @@ impl KapraVM {
 #[derive(Debug, Clone)]
 pub enum AsyncTask {
     ShardSend(u32, [u8; 32]),
+    ShardSync(u32),
 }
 
 /// Compiler for shard blocks.
@@ -349,7 +459,7 @@ mod tests {
             OPCODE_SHARD_SEND,        // Send to shard
         ]);
 
-        let mut vm = KapraVM::new(1000);
+        let mut vm = KapraVM::new(1000, Arc::new(ConsensusRuntime::new()), Arc::new(AsyncRuntime::new()));
         let result = vm.execute(&bytecode);
         assert!(result.is_ok());
         assert_eq!(vm.stack.len(), 1); // Success flag from shard_send
@@ -366,7 +476,7 @@ mod tests {
             OPCODE_SHARD_SEND,        // Send to shard
         ]);
 
-        let mut vm = KapraVM::new(1000);
+        let mut vm = KapraVM::new(1000, Arc::new(ConsensusRuntime::new()), Arc::new(AsyncRuntime::new()));
         let result = vm.execute(&bytecode);
         assert!(result.is_ok());
         assert_eq!(vm.stack[0], 0); // shard_send returned false due to invalid shard ID
@@ -374,7 +484,7 @@ mod tests {
 
     #[test]
     fn test_shard_route_caching() {
-        let mut shard_runtime = ShardRuntime::new(1000);
+        let mut shard_runtime = ShardRuntime::new(1000, Arc::new(ConsensusRuntime::new()), Arc::new(AsyncRuntime::new()));
         let account = [1; 32];
         let shard_id1 = shard_runtime.shard_route(&account);
         let shard_id2 = shard_runtime.shard_route(&account);

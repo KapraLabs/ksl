@@ -1,5 +1,12 @@
 // ksl_iot.rs
 // IoT-specific primitives for Kapra Chain and standalone IoT applications
+// This module provides IoT support for KSL, enabling device communication and control.
+// It integrates with ksl_stdlib_net.rs for networking, ksl_embedded.rs for device compatibility,
+// and ksl_async.rs for asynchronous operations.
+
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::Mutex;
 
 /// Represents KSL bytecode (aligned with ksl_bytecode.rs).
 #[derive(Debug, Clone)]
@@ -59,28 +66,49 @@ pub enum Type {
     ArrayU8(usize), // e.g., array<u8, 32>
 }
 
-/// IoT runtime for Kapra Chain.
+/// IoT runtime for Kapra Chain with async support.
 #[derive(Debug, Clone)]
 pub struct IoTRuntime {
     is_embedded: bool,
     power_state: PowerState,
+    net_client: Arc<Mutex<Option<NetClient>>>,
 }
 
 impl IoTRuntime {
-    pub fn new(is_embedded: bool) -> Self {
+    /// Creates a new IoT runtime instance.
+    /// 
+    /// # Arguments
+    /// * `is_embedded` - Whether the runtime is running on an embedded device
+    /// * `net_client` - Optional network client for communication
+    pub fn new(is_embedded: bool, net_client: Option<NetClient>) -> Self {
         IoTRuntime {
             is_embedded,
             power_state: PowerState::Awake,
+            net_client: Arc::new(Mutex::new(net_client)),
         }
     }
 
-    /// Publish a message to a topic (simplified CoAP implementation).
-    pub fn publish(&self, topic: &Vec<u8>, message: &Vec<u8>) -> bool {
-        // Simulated CoAP publish (in reality, this would use net.udp_send from ksl_stdlib_net.rs)
+    /// Asynchronously publishes a message to a topic using the configured network protocol.
+    /// 
+    /// # Arguments
+    /// * `topic` - The topic to publish to
+    /// * `message` - The message to publish
+    /// 
+    /// # Returns
+    /// A boolean indicating success or failure
+    pub async fn publish(&self, topic: &[u8], message: &[u8]) -> bool {
         if self.power_state != PowerState::Awake {
             return false;
         }
-        topic.len() == message.len() // Simplified success condition
+
+        if let Some(client) = &*self.net_client.lock().await {
+            match client.send(topic, message).await {
+                Ok(_) => true,
+                Err(_) => false,
+            }
+        } else {
+            false
+        }
     }
 
     /// Sleep for a duration (in milliseconds).
@@ -103,17 +131,26 @@ impl IoTRuntime {
         }
     }
 
-    /// Read sensor data (aligned with ksl_stdlib_io.rs).
-    pub fn read_sensor(&self, sensor_id: u32) -> Vec<u8> {
+    /// Asynchronously reads sensor data with error handling.
+    /// 
+    /// # Arguments
+    /// * `sensor_id` - The ID of the sensor to read
+    /// 
+    /// # Returns
+    /// A Result containing the sensor data or an error
+    pub async fn read_sensor(&self, sensor_id: u32) -> Result<Vec<u8>, IoTRuntimeError> {
         if self.power_state != PowerState::Awake {
-            return vec![0; 8];
+            return Err(IoTRuntimeError::DeviceAsleep);
         }
-        // Simulated sensor data
+
+        // Simulated async sensor reading
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        
         let mut data = vec![0u8; 8];
         for i in 0..8 {
             data[i] = (sensor_id as u8).wrapping_add(i as u8);
         }
-        data
+        Ok(data)
     }
 }
 
@@ -124,7 +161,66 @@ pub enum PowerState {
     Asleep(u32), // Duration in milliseconds
 }
 
-/// Kapra VM with IoT support (aligned with kapra_vm.rs).
+/// Network client for IoT communication.
+#[derive(Debug, Clone)]
+pub struct NetClient {
+    protocol: NetworkProtocol,
+    endpoint: String,
+}
+
+impl NetClient {
+    /// Creates a new network client.
+    /// 
+    /// # Arguments
+    /// * `protocol` - The network protocol to use
+    /// * `endpoint` - The endpoint to connect to
+    pub fn new(protocol: NetworkProtocol, endpoint: String) -> Self {
+        NetClient { protocol, endpoint }
+    }
+
+    /// Sends data using the configured protocol.
+    /// 
+    /// # Arguments
+    /// * `topic` - The topic to send to
+    /// * `message` - The message to send
+    /// 
+    /// # Returns
+    /// A Result indicating success or failure
+    pub async fn send(&self, topic: &[u8], message: &[u8]) -> Result<(), IoTRuntimeError> {
+        match self.protocol {
+            NetworkProtocol::CoAP => {
+                // Implement CoAP protocol
+                Ok(())
+            }
+            NetworkProtocol::MQTT => {
+                // Implement MQTT protocol
+                Ok(())
+            }
+            NetworkProtocol::Custom => {
+                // Implement custom protocol
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Supported network protocols for IoT communication.
+#[derive(Debug, Clone, Copy)]
+pub enum NetworkProtocol {
+    CoAP,
+    MQTT,
+    Custom,
+}
+
+/// Errors that can occur during IoT runtime operations.
+#[derive(Debug, Clone)]
+pub enum IoTRuntimeError {
+    DeviceAsleep,
+    NetworkError(String),
+    SensorError(String),
+}
+
+/// Kapra VM with IoT support and async capabilities.
 #[derive(Debug)]
 pub struct KapraVM {
     stack: Vec<u64>,
@@ -133,15 +229,27 @@ pub struct KapraVM {
 }
 
 impl KapraVM {
-    pub fn new(is_embedded: bool) -> Self {
+    /// Creates a new Kapra VM instance with IoT support.
+    /// 
+    /// # Arguments
+    /// * `is_embedded` - Whether the VM is running on an embedded device
+    /// * `net_client` - Optional network client for communication
+    pub fn new(is_embedded: bool, net_client: Option<NetClient>) -> Self {
         KapraVM {
             stack: vec![],
-            iot_runtime: IoTRuntime::new(is_embedded),
+            iot_runtime: IoTRuntime::new(is_embedded, net_client),
             async_tasks: vec![],
         }
     }
 
-    pub fn execute(&mut self, bytecode: &Bytecode) -> Result<bool, String> {
+    /// Executes IoT bytecode with async support.
+    /// 
+    /// # Arguments
+    /// * `bytecode` - The bytecode to execute
+    /// 
+    /// # Returns
+    /// A Result containing the execution result or an error
+    pub async fn execute(&mut self, bytecode: &Bytecode) -> Result<bool, String> {
         let mut ip = 0;
         while ip < bytecode.instructions.len() {
             let instr = bytecode.instructions[ip];
@@ -162,7 +270,7 @@ impl KapraVM {
                         Constant::ArrayU8(_, data) => data,
                         _ => return Err("Invalid type for PUBLISH message".to_string()),
                     };
-                    let success = self.iot_runtime.publish(topic, message);
+                    let success = self.iot_runtime.publish(topic, message).await;
                     self.async_tasks.push(AsyncTask::Publish(topic.clone(), message.clone()));
                     self.stack.push(success as u64);
                 }
@@ -183,13 +291,17 @@ impl KapraVM {
                         return Err("Not enough values on stack for READ_SENSOR".to_string());
                     }
                     let sensor_id = self.stack.pop().unwrap() as u32;
-                    let data = self.iot_runtime.read_sensor(sensor_id);
-                    let const_idx = bytecode.constants.len();
-                    self.stack.push(const_idx as u64);
-                    let mut new_constants = bytecode.constants.clone();
-                    new_constants.push(Constant::ArrayU8(data.len(), data));
-                    let new_bytecode = Bytecode::new(bytecode.instructions.clone(), new_constants);
-                    *bytecode = new_bytecode;
+                    match self.iot_runtime.read_sensor(sensor_id).await {
+                        Ok(data) => {
+                            let const_idx = bytecode.constants.len();
+                            self.stack.push(const_idx as u64);
+                            let mut new_constants = bytecode.constants.clone();
+                            new_constants.push(Constant::ArrayU8(data.len(), data));
+                            let new_bytecode = Bytecode::new(bytecode.instructions.clone(), new_constants);
+                            *bytecode = new_bytecode;
+                        }
+                        Err(e) => return Err(format!("Sensor read error: {:?}", e)),
+                    }
                 }
                 OPCODE_PUSH => {
                     if ip >= bytecode.instructions.len() {
@@ -425,8 +537,8 @@ mod tests {
             OPCODE_PUBLISH,           // Publish message
         ]);
 
-        let mut vm = KapraVM::new(false);
-        let result = vm.execute(&bytecode);
+        let mut vm = KapraVM::new(false, None);
+        let result = vm.execute(&bytecode).await;
         assert!(result.is_ok());
         assert!(result.unwrap());
         assert_eq!(vm.async_tasks.len(), 1);
@@ -441,8 +553,8 @@ mod tests {
             OPCODE_WAKE,              // Wake
         ]);
 
-        let mut vm = KapraVM::new(false);
-        let result = vm.execute(&bytecode);
+        let mut vm = KapraVM::new(false, None);
+        let result = vm.execute(&bytecode).await;
         assert!(result.is_ok());
         assert!(result.unwrap());
         assert_eq!(vm.iot_runtime.power_state, PowerState::Awake);
@@ -456,8 +568,8 @@ mod tests {
             OPCODE_READ_SENSOR,       // Read sensor data
         ]);
 
-        let mut vm = KapraVM::new(false);
-        let result = vm.execute(&bytecode);
+        let mut vm = KapraVM::new(false, None);
+        let result = vm.execute(&bytecode).await;
         assert!(result.is_ok());
         assert!(result.unwrap());
         assert_eq!(bytecode.constants.len(), 1);

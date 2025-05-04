@@ -510,3 +510,348 @@ mod tests {
         assert!(result.unwrap_err().contains("must have exactly 2 parameters"));
     }
 }
+
+//! Consensus mechanisms for the Kapra blockchain, enabling distributed agreement.
+//! 
+//! This module provides consensus primitives for the Kapra blockchain, supporting:
+//! - Leader election using VRF (Verifiable Random Function)
+//! - Sharded consensus with multiple validators
+//! - Async consensus operations
+//! - Cryptographic security with Dilithium signatures
+//! - Multiple consensus algorithms (PoS, PoA, BFT)
+//! 
+//! # Consensus Protocols
+//! 
+//! ```ksl
+//! // Example consensus block with multiple algorithms
+//! #[consensus(algorithm = "pos", shards = 4)]
+//! consensus block(validator_id: array<u8, 32>, seed: array<u8, 32>) -> bool {
+//!     // VRF-based leader election
+//!     let vrf_output = vrf_generate(seed, validator_id);
+//!     if !is_leader(vrf_output) {
+//!         return false;
+//!     }
+//! 
+//!     // Shard routing
+//!     let shard_id = shard_route(validator_id);
+//!     if !propose_block(shard_id) {
+//!         return false;
+//!     }
+//! 
+//!     // Async validation
+//!     let valid = await validate_block(block);
+//!     if !valid {
+//!         return false;
+//!     }
+//! 
+//!     // Cryptographic signing
+//!     let signature = sign_dilithium(block, validator_id);
+//!     return verify_dilithium(block, validator_id, signature);
+//! }
+//! ```
+
+use crate::ksl_kapra_crypto::{sign_dilithium, verify_dilithium, KeyPair};
+use crate::ksl_async::{AsyncRuntime, AsyncResult};
+use crate::ksl_errors::{KslError, SourcePosition};
+use std::collections::HashMap;
+use async_trait::async_trait;
+use tokio::sync::RwLock;
+
+/// Consensus algorithm type
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConsensusAlgorithm {
+    ProofOfStake,    // PoS with VRF-based leader election
+    ProofOfAuthority, // PoA with fixed validators
+    ByzantineFaultTolerant, // BFT with 2/3 majority
+}
+
+/// Consensus configuration
+#[derive(Debug, Clone)]
+pub struct ConsensusConfig {
+    algorithm: ConsensusAlgorithm,
+    shard_count: u32,
+    threshold: u64,
+    validators: HashMap<[u8; 32], u64>, // validator_id -> stake/weight
+    is_embedded: bool,
+}
+
+/// Consensus state
+#[derive(Debug, Clone)]
+pub struct ConsensusState {
+    current_leader: Option<[u8; 32]>,
+    last_block_hash: [u8; 32],
+    validator_set: HashMap<[u8; 32], u64>,
+    shard_states: HashMap<u32, ShardState>,
+}
+
+/// Shard state
+#[derive(Debug, Clone)]
+pub struct ShardState {
+    last_block: [u8; 32],
+    validators: Vec<[u8; 32]>,
+    signatures: HashMap<[u8; 32], [u8; 2420]>, // validator_id -> signature
+}
+
+/// Consensus runtime
+pub struct ConsensusRuntime {
+    config: ConsensusConfig,
+    state: RwLock<ConsensusState>,
+    crypto: KeyPair,
+    async_runtime: AsyncRuntime,
+}
+
+impl ConsensusRuntime {
+    /// Creates a new ConsensusRuntime instance
+    pub fn new(config: ConsensusConfig, crypto: KeyPair) -> Self {
+        ConsensusRuntime {
+            config,
+            state: RwLock::new(ConsensusState {
+                current_leader: None,
+                last_block_hash: [0; 32],
+                validator_set: HashMap::new(),
+                shard_states: HashMap::new(),
+            }),
+            crypto,
+            async_runtime: AsyncRuntime::new(),
+        }
+    }
+
+    /// Elects a leader using VRF
+    pub async fn elect_leader(&self, validator_id: &[u8; 32], seed: &[u8; 32]) -> AsyncResult<bool> {
+        let vrf_output = self.crypto.vrf_generate(seed, validator_id);
+        let is_leader = self.is_leader(&vrf_output).await;
+        if is_leader {
+            let mut state = self.state.write().await;
+            state.current_leader = Some(*validator_id);
+        }
+        Ok(is_leader)
+    }
+
+    /// Checks if a validator is the leader
+    async fn is_leader(&self, vrf_output: &[u8; 32]) -> bool {
+        let value = vrf_output.iter().fold(0u64, |acc, &x| acc.wrapping_add(x as u64));
+        value < self.config.threshold
+    }
+
+    /// Proposes a block for a shard
+    pub async fn propose_block(&self, shard_id: u32, block: &[u8; 32]) -> AsyncResult<bool> {
+        if shard_id >= self.config.shard_count {
+            return Ok(false);
+        }
+
+        let mut state = self.state.write().await;
+        let shard_state = state.shard_states.entry(shard_id).or_insert(ShardState {
+            last_block: [0; 32],
+            validators: Vec::new(),
+            signatures: HashMap::new(),
+        });
+
+        // Sign the block
+        let signature = sign_dilithium(block, &self.crypto)?;
+        shard_state.signatures.insert(self.crypto.public_key(), signature);
+
+        // Update shard state
+        shard_state.last_block = *block;
+        state.last_block_hash = *block;
+
+        Ok(true)
+    }
+
+    /// Validates a block asynchronously
+    pub async fn validate_block(&self, block: &[u8; 32], shard_id: u32) -> AsyncResult<bool> {
+        let state = self.state.read().await;
+        let shard_state = state.shard_states.get(&shard_id).ok_or_else(|| {
+            KslError::consensus_error("Shard not found".to_string(), SourcePosition::new(1, 1))
+        })?;
+
+        // Verify signatures
+        for (validator_id, signature) in &shard_state.signatures {
+            if !verify_dilithium(block, validator_id, signature)? {
+                return Ok(false);
+            }
+        }
+
+        // Check consensus requirements
+        match self.config.algorithm {
+            ConsensusAlgorithm::ProofOfStake => {
+                let total_stake: u64 = shard_state.validators.iter()
+                    .filter_map(|id| state.validator_set.get(id))
+                    .sum();
+                let required_stake = total_stake * 2 / 3;
+                let current_stake: u64 = shard_state.signatures.keys()
+                    .filter_map(|id| state.validator_set.get(id))
+                    .sum();
+                Ok(current_stake >= required_stake)
+            }
+            ConsensusAlgorithm::ProofOfAuthority => {
+                Ok(shard_state.signatures.len() >= shard_state.validators.len() / 2 + 1)
+            }
+            ConsensusAlgorithm::ByzantineFaultTolerant => {
+                Ok(shard_state.signatures.len() >= shard_state.validators.len() * 2 / 3)
+            }
+        }
+    }
+
+    /// Routes a validator to a shard
+    pub fn route_to_shard(&self, validator_id: &[u8; 32]) -> u32 {
+        let hash = validator_id.iter().fold(0u32, |acc, &x| acc.wrapping_add(x as u32));
+        hash % self.config.shard_count
+    }
+}
+
+#[async_trait]
+pub trait AsyncConsensus {
+    async fn elect_leader(&self, validator_id: &[u8; 32], seed: &[u8; 32]) -> AsyncResult<bool>;
+    async fn propose_block(&self, shard_id: u32, block: &[u8; 32]) -> AsyncResult<bool>;
+    async fn validate_block(&self, block: &[u8; 32], shard_id: u32) -> AsyncResult<bool>;
+}
+
+#[async_trait]
+impl AsyncConsensus for ConsensusRuntime {
+    async fn elect_leader(&self, validator_id: &[u8; 32], seed: &[u8; 32]) -> AsyncResult<bool> {
+        self.elect_leader(validator_id, seed).await
+    }
+
+    async fn propose_block(&self, shard_id: u32, block: &[u8; 32]) -> AsyncResult<bool> {
+        self.propose_block(shard_id, block).await
+    }
+
+    async fn validate_block(&self, block: &[u8; 32], shard_id: u32) -> AsyncResult<bool> {
+        self.validate_block(block, shard_id).await
+    }
+}
+
+// Public API to create a consensus runtime
+pub fn create_consensus_runtime(
+    algorithm: ConsensusAlgorithm,
+    shard_count: u32,
+    threshold: u64,
+    validators: HashMap<[u8; 32], u64>,
+    is_embedded: bool,
+    crypto: KeyPair,
+) -> ConsensusRuntime {
+    let config = ConsensusConfig {
+        algorithm,
+        shard_count,
+        threshold,
+        validators,
+        is_embedded,
+    };
+    ConsensusRuntime::new(config, crypto)
+}
+
+// Assume ksl_kapra_crypto.rs, ksl_async.rs, and ksl_errors.rs are in the same crate
+mod ksl_kapra_crypto {
+    pub use super::{sign_dilithium, verify_dilithium, KeyPair};
+}
+
+mod ksl_async {
+    pub use super::{AsyncRuntime, AsyncResult};
+}
+
+mod ksl_errors {
+    pub use super::{KslError, SourcePosition};
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[tokio::test]
+    async fn test_consensus_pos() {
+        let mut validators = HashMap::new();
+        validators.insert([1; 32], 1000);
+        validators.insert([2; 32], 2000);
+        validators.insert([3; 32], 3000);
+
+        let crypto = KeyPair::new();
+        let runtime = create_consensus_runtime(
+            ConsensusAlgorithm::ProofOfStake,
+            4,
+            1000,
+            validators,
+            false,
+            crypto,
+        );
+
+        let result = runtime.elect_leader(&[1; 32], &[0; 32]).await;
+        assert!(result.is_ok());
+        let is_leader = result.unwrap();
+        assert!(is_leader);
+
+        let block = [42; 32];
+        let result = runtime.propose_block(0, &block).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap());
+
+        let result = runtime.validate_block(&block, 0).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_consensus_poa() {
+        let mut validators = HashMap::new();
+        validators.insert([1; 32], 1);
+        validators.insert([2; 32], 1);
+        validators.insert([3; 32], 1);
+
+        let crypto = KeyPair::new();
+        let runtime = create_consensus_runtime(
+            ConsensusAlgorithm::ProofOfAuthority,
+            4,
+            1000,
+            validators,
+            false,
+            crypto,
+        );
+
+        let result = runtime.elect_leader(&[1; 32], &[0; 32]).await;
+        assert!(result.is_ok());
+        let is_leader = result.unwrap();
+        assert!(is_leader);
+
+        let block = [42; 32];
+        let result = runtime.propose_block(0, &block).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap());
+
+        let result = runtime.validate_block(&block, 0).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_consensus_bft() {
+        let mut validators = HashMap::new();
+        validators.insert([1; 32], 1);
+        validators.insert([2; 32], 1);
+        validators.insert([3; 32], 1);
+        validators.insert([4; 32], 1);
+
+        let crypto = KeyPair::new();
+        let runtime = create_consensus_runtime(
+            ConsensusAlgorithm::ByzantineFaultTolerant,
+            4,
+            1000,
+            validators,
+            false,
+            crypto,
+        );
+
+        let result = runtime.elect_leader(&[1; 32], &[0; 32]).await;
+        assert!(result.is_ok());
+        let is_leader = result.unwrap();
+        assert!(is_leader);
+
+        let block = [42; 32];
+        let result = runtime.propose_block(0, &block).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap());
+
+        let result = runtime.validate_block(&block, 0).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap());
+    }
+}

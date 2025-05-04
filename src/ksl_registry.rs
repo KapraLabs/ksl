@@ -1,9 +1,12 @@
 // ksl_registry.rs
 // Implements a remote package registry client for KSL to fetch and publish packages.
+// Supports async operations, new package formats, and integration with package publishing.
 
 use crate::ksl_package::{PackageMetadata, PackageSystem};
+use crate::ksl_package_publish::{PackagePublisher, PublishConfig};
+use crate::ksl_async::{AsyncRuntime, AsyncResult};
 use crate::ksl_errors::{KslError, SourcePosition};
-use reqwest::blocking::Client;
+use reqwest::Client;
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -11,22 +14,40 @@ use tar::Archive;
 use toml::Value;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
-// Registry client configuration
-#[derive(Debug)]
-struct RegistryConfig {
-    url: String, // e.g., https://registry.ksl.dev
-    cache_dir: PathBuf, // e.g., ~/.ksl/packages
+/// Registry client configuration
+#[derive(Debug, Clone)]
+pub struct RegistryConfig {
+    /// Registry URL (e.g., https://registry.ksl.dev)
+    pub url: String,
+    /// Cache directory for downloaded packages
+    pub cache_dir: PathBuf,
+    /// Whether to use async operations
+    pub use_async: bool,
 }
 
-// Registry client state
+/// Registry client state
+#[derive(Debug, Clone)]
+pub struct RegistryState {
+    /// Last fetched package
+    pub last_fetched: Option<PackageMetadata>,
+    /// Package cache
+    pub package_cache: HashMap<String, PackageMetadata>,
+}
+
+/// Registry client for managing KSL packages
 pub struct RegistryClient {
     config: RegistryConfig,
     client: Client,
     package_system: PackageSystem,
+    async_runtime: Arc<AsyncRuntime>,
+    state: Arc<RwLock<RegistryState>>,
 }
 
 impl RegistryClient {
+    /// Creates a new registry client
     pub fn new() -> Self {
         let home_dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
         let cache_dir = home_dir.join(".ksl/packages");
@@ -34,23 +55,32 @@ impl RegistryClient {
             config: RegistryConfig {
                 url: "https://registry.ksl.dev".to_string(),
                 cache_dir,
+                use_async: true,
             },
             client: Client::new(),
             package_system: PackageSystem::new(),
+            async_runtime: Arc::new(AsyncRuntime::new()),
+            state: Arc::new(RwLock::new(RegistryState {
+                last_fetched: None,
+                package_cache: HashMap::new(),
+            })),
         }
     }
 
-    // Fetch and install a package from the remote registry
-    pub fn fetch_package(&mut self, name: &str, version: &str) -> Result<(), KslError> {
+    /// Fetch and install a package from the remote registry asynchronously
+    pub async fn fetch_package_async(&mut self, name: &str, version: &str) -> AsyncResult<()> {
         let package_key = format!("{}@{}", name, version);
-        if self.package_system.packages.contains_key(&package_key) {
-            return Ok(()); // Package already installed
+        let state = self.state.read().await;
+        if state.package_cache.contains_key(&package_key) {
+            return Ok(()); // Package already in cache
         }
+        drop(state);
 
         // Download package tarball
         let url = format!("{}/{}/{}.tar.gz", self.config.url, name, version);
         let response = self.client.get(&url)
             .send()
+            .await
             .map_err(|e| KslError::type_error(
                 format!("Failed to fetch package {}@{}: {}", name, version, e),
                 SourcePosition::new(1, 1),
@@ -67,6 +97,7 @@ impl RegistryClient {
         fs::create_dir_all(&package_dir)
             .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1)))?;
         let tar_gz = response.bytes()
+            .await
             .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1)))?;
         let tar = flate2::read::GzDecoder::new(&tar_gz[..]);
         let mut archive = Archive::new(tar);
@@ -88,9 +119,15 @@ impl RegistryClient {
             ));
         }
 
+        // Update state
+        let mut state = self.state.write().await;
+        state.last_fetched = Some(metadata.clone());
+        state.package_cache.insert(package_key.clone(), metadata.clone());
+        drop(state);
+
         // Install dependencies
         for (dep_name, dep_version) in &metadata.dependencies {
-            self.fetch_package(dep_name, dep_version)?;
+            self.fetch_package_async(dep_name, dep_version).await?;
         }
 
         // Install package locally
@@ -99,8 +136,8 @@ impl RegistryClient {
         Ok(())
     }
 
-    // Publish a package to the remote registry
-    pub fn publish_package(&mut self, package_dir: &Path) -> Result<(), KslError> {
+    /// Publish a package to the remote registry asynchronously
+    pub async fn publish_package_async(&mut self, package_dir: &Path) -> AsyncResult<()> {
         let metadata_file = package_dir.join("ksl_package.toml");
         let metadata_content = fs::read_to_string(&metadata_file)
             .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1)))?;
@@ -128,33 +165,66 @@ impl RegistryClient {
         tar.finish()
             .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1)))?;
 
-        // Upload tarball (placeholder: simulate upload)
+        // Upload tarball
         let url = format!("{}/{}/{}.tar.gz", self.config.url, metadata.name, metadata.version);
-        // Simulate HTTP POST (requires authentication in real implementation)
-        println!("Simulating upload of {} to {}", tarball_path.display(), url);
+        let file = File::open(&tarball_path)
+            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1)))?;
+        let response = self.client.post(&url)
+            .body(file)
+            .send()
+            .await
+            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1)))?;
+        if !response.status().is_success() {
+            return Err(KslError::type_error(
+                format!("Failed to publish package {}@{}", metadata.name, metadata.version),
+                SourcePosition::new(1, 1),
+            ));
+        }
 
         // Clean up tarball
         fs::remove_file(&tarball_path)
             .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1)))?;
 
+        // Update state
+        let mut state = self.state.write().await;
+        state.last_fetched = Some(metadata);
         Ok(())
+    }
+
+    /// Get the last fetched package metadata
+    pub async fn last_fetched(&self) -> Option<PackageMetadata> {
+        self.state.read().await.last_fetched.clone()
+    }
+
+    /// Get a package from the cache
+    pub async fn get_cached_package(&self, name: &str, version: &str) -> Option<PackageMetadata> {
+        let package_key = format!("{}@{}", name, version);
+        self.state.read().await.package_cache.get(&package_key).cloned()
     }
 }
 
-// Public API to manage packages via the registry
-pub fn fetch_package(name: &str, version: &str) -> Result<(), KslError> {
+/// Public API to manage packages via the registry
+pub async fn fetch_package_async(name: &str, version: &str) -> AsyncResult<()> {
     let mut client = RegistryClient::new();
-    client.fetch_package(name, version)
+    client.fetch_package_async(name, version).await
 }
 
-pub fn publish_package(package_dir: &Path) -> Result<(), KslError> {
+pub async fn publish_package_async(package_dir: &Path) -> AsyncResult<()> {
     let mut client = RegistryClient::new();
-    client.publish_package(package_dir)
+    client.publish_package_async(package_dir).await
 }
 
-// Assume ksl_package.rs and ksl_errors.rs are in the same crate
+// Assume ksl_package.rs, ksl_package_publish.rs, ksl_async.rs, and ksl_errors.rs are in the same crate
 mod ksl_package {
     pub use super::{PackageMetadata, PackageSystem};
+}
+
+mod ksl_package_publish {
+    pub use super::{PackagePublisher, PublishConfig};
+}
+
+mod ksl_async {
+    pub use super::{AsyncRuntime, AsyncResult};
 }
 
 mod ksl_errors {
@@ -167,9 +237,8 @@ mod tests {
     use tempfile::TempDir;
     use std::io::Write;
 
-    #[test]
-    fn test_fetch_package() {
-        // Note: Requires a running registry server; simulate with local cache
+    #[tokio::test]
+    async fn test_fetch_package_async() {
         let temp_dir = TempDir::new().unwrap();
         let cache_dir = temp_dir.path().join(".ksl/packages");
         let package_dir = cache_dir.join("mylib").join("1.0.0");
@@ -188,16 +257,17 @@ mod tests {
             config: RegistryConfig {
                 url: "file://".to_string(),
                 cache_dir,
+                use_async: true,
             },
             ..RegistryClient::new()
         };
-        let result = client.fetch_package("mylib", "1.0.0");
+        let result = client.fetch_package_async("mylib", "1.0.0").await;
         assert!(result.is_ok());
         assert!(client.package_system.packages.contains_key("mylib@1.0.0"));
     }
 
-    #[test]
-    fn test_publish_package() {
+    #[tokio::test]
+    async fn test_publish_package_async() {
         let temp_dir = TempDir::new().unwrap();
         let package_dir = temp_dir.path().join("mylib");
         fs::create_dir_all(package_dir.join("src")).unwrap();
@@ -215,12 +285,23 @@ mod tests {
             config: RegistryConfig {
                 url: "file://".to_string(),
                 cache_dir: temp_dir.path().join("registry"),
+                use_async: true,
             },
             ..RegistryClient::new()
         };
-        let result = client.publish_package(&package_dir);
+        let result = client.publish_package_async(&package_dir).await;
         assert!(result.is_ok());
         let tarball = package_dir.join("mylib-1.0.0.tar.gz");
         assert!(!tarball.exists()); // Cleaned up after publish
+    }
+
+    #[tokio::test]
+    async fn test_package_cache() {
+        let mut client = RegistryClient::new();
+        let result = client.fetch_package_async("test-lib", "1.0.0").await;
+        assert!(result.is_ok());
+        let cached = client.get_cached_package("test-lib", "1.0.0").await;
+        assert!(cached.is_some());
+        assert_eq!(cached.unwrap().name, "test-lib");
     }
 }

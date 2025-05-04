@@ -1,8 +1,14 @@
 // ksl_dep_audit.rs
 // Audit KSL package dependencies for security and licensing issues
 
+use crate::ksl_package::{Package, PackageMetadata, DependencySpec};
+use crate::ksl_security::{SecurityCheck, SecurityLevel, SecurityContext};
+use crate::ksl_async::{AsyncContext, AsyncCommand};
+use crate::ksl_errors::{KslError, SourcePosition};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::sync::{Arc, Mutex};
+use tokio::sync::mpsc;
 
 /// Represents a package with its version and dependencies (aligned with ksl_package.rs and ksl_package_version.rs).
 #[derive(Debug, Clone)]
@@ -27,24 +33,41 @@ impl Package {
 /// Represents a semantic version (aligned with ksl_package_version.rs).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SemVer {
+    /// Major version number
     major: u32,
+    /// Minor version number
     minor: u32,
+    /// Patch version number
     patch: u32,
 }
 
 impl SemVer {
+    /// Creates a new semantic version.
     pub fn new(major: u32, minor: u32, patch: u32) -> Self {
         SemVer { major, minor, patch }
     }
 
-    pub fn parse(version: &str) -> Result<Self, String> {
+    /// Parses a version string into a semantic version.
+    pub fn parse(version: &str) -> Result<Self, KslError> {
         let parts: Vec<&str> = version.split('.').collect();
         if parts.len() != 3 {
-            return Err(format!("Invalid version format: '{}', expected 'major.minor.patch'", version));
+            return Err(KslError::parse_error(
+                format!("Invalid version format: '{}', expected 'major.minor.patch'", version),
+                SourcePosition::new(1, 1),
+            ));
         }
-        let major = parts[0].parse::<u32>().map_err(|e| format!("Invalid major version: {}", e))?;
-        let minor = parts[1].parse::<u32>().map_err(|e| format!("Invalid minor version: {}", e))?;
-        let patch = parts[2].parse::<u32>().map_err(|e| format!("Invalid patch version: {}", e))?;
+        let major = parts[0].parse::<u32>().map_err(|e| KslError::parse_error(
+            format!("Invalid major version: {}", e),
+            SourcePosition::new(1, 1),
+        ))?;
+        let minor = parts[1].parse::<u32>().map_err(|e| KslError::parse_error(
+            format!("Invalid minor version: {}", e),
+            SourcePosition::new(1, 1),
+        ))?;
+        let patch = parts[2].parse::<u32>().map_err(|e| KslError::parse_error(
+            format!("Invalid patch version: {}", e),
+            SourcePosition::new(1, 1),
+        ))?;
         Ok(SemVer { major, minor, patch })
     }
 }
@@ -55,12 +78,16 @@ impl fmt::Display for SemVer {
     }
 }
 
-/// Represents a version constraint (aligned with ksl_package_version.rs).
+/// Represents a version constraint with enhanced validation.
 #[derive(Debug, Clone)]
 pub enum VersionConstraint {
+    /// Exact version match
     Exact(SemVer),
+    /// Compatible with version (^)
     Caret(SemVer),
+    /// Greater than or equal to version
     GreaterEqual(SemVer),
+    /// Less than version
     LessThan(SemVer),
 }
 
@@ -91,118 +118,168 @@ impl VersionConstraint {
     }
 }
 
-/// Represents a known vulnerability.
+/// Represents a known vulnerability with severity levels.
 #[derive(Debug, Clone)]
 pub struct Vulnerability {
+    /// Affected package name
     package_name: String,
+    /// Affected version range
     version_range: VersionConstraint,
+    /// Vulnerability description
     description: String,
+    /// Remediation steps
     remediation: String,
+    /// Security severity level
+    severity: SecurityLevel,
 }
 
 impl Vulnerability {
-    pub fn new(package_name: &str, version_range: VersionConstraint, description: &str, remediation: &str) -> Self {
+    /// Creates a new vulnerability with severity.
+    pub fn new(
+        package_name: &str,
+        version_range: VersionConstraint,
+        description: &str,
+        remediation: &str,
+        severity: SecurityLevel,
+    ) -> Self {
         Vulnerability {
             package_name: package_name.to_string(),
             version_range,
             description: description.to_string(),
             remediation: remediation.to_string(),
+            severity,
         }
     }
 
+    /// Checks if a package is affected by this vulnerability.
     pub fn affects(&self, package: &Package) -> bool {
         self.package_name == package.name && self.version_range.satisfies(&package.version)
     }
 }
 
-/// Simulated vulnerability database.
+/// Vulnerability database with async updates.
 #[derive(Debug, Clone)]
 pub struct VulnerabilityDatabase {
+    /// Known vulnerabilities
     vulnerabilities: Vec<Vulnerability>,
+    /// Async context for updates
+    async_context: Arc<Mutex<AsyncContext>>,
 }
 
 impl VulnerabilityDatabase {
+    /// Creates a new vulnerability database.
     pub fn new() -> Self {
-        let mut db = VulnerabilityDatabase {
+        VulnerabilityDatabase {
             vulnerabilities: vec![],
-        };
-        // Populate with example vulnerabilities
-        db.vulnerabilities.push(Vulnerability::new(
-            "crypto-lib",
-            VersionConstraint::parse("<1.1.0").unwrap(),
-            "Buffer overflow in cryptographic function",
-            "Upgrade to version 1.1.0 or higher",
-        ));
-        db.vulnerabilities.push(Vulnerability::new(
-            "math-lib",
-            VersionConstraint::parse("=1.0.0").unwrap(),
-            "Integer overflow in matrix multiplication",
-            "Upgrade to version 1.0.1 or higher",
-        ));
-        db
+            async_context: Arc::new(Mutex::new(AsyncContext::new())),
+        }
     }
 
-    pub fn find_vulnerabilities(&self, package: &Package) -> Vec<&Vulnerability> {
-        self.vulnerabilities
+    /// Updates the vulnerability database asynchronously.
+    pub async fn update(&mut self) -> Result<(), KslError> {
+        let mut async_ctx = self.async_context.lock().await;
+        let command = AsyncCommand::UpdateVulnerabilities;
+        async_ctx.execute_command(command).await?;
+        Ok(())
+    }
+
+    /// Finds vulnerabilities affecting a package asynchronously.
+    pub async fn find_vulnerabilities(&self, package: &Package) -> Result<Vec<&Vulnerability>, KslError> {
+        let mut async_ctx = self.async_context.lock().await;
+        let command = AsyncCommand::CheckVulnerabilities(package.clone());
+        async_ctx.execute_command(command).await?;
+
+        Ok(self.vulnerabilities
             .iter()
             .filter(|vuln| vuln.affects(package))
-            .collect()
+            .collect())
     }
 }
 
-/// Security analyzer (aligned with ksl_security.rs).
+/// Security analyzer with async checks.
 #[derive(Debug, Clone)]
 pub struct SecurityAnalyzer {
-    // Placeholder for security analysis configuration
+    /// Security context
+    context: SecurityContext,
+    /// Async context for security checks
+    async_context: Arc<Mutex<AsyncContext>>,
 }
 
 impl SecurityAnalyzer {
+    /// Creates a new security analyzer.
     pub fn new() -> Self {
-        SecurityAnalyzer {}
+        SecurityAnalyzer {
+            context: SecurityContext::new(),
+            async_context: Arc::new(Mutex::new(AsyncContext::new())),
+        }
     }
 
-    pub fn analyze(&self, package: &Package) -> Vec<String> {
-        let mut issues = vec![];
-        // Simplified security analysis (e.g., check for known risky patterns)
+    /// Analyzes a package for security issues asynchronously.
+    pub async fn analyze(&self, package: &Package) -> Result<Vec<SecurityCheck>, KslError> {
+        let mut async_ctx = self.async_context.lock().await;
+        let command = AsyncCommand::SecurityAnalysis(package.clone());
+        async_ctx.execute_command(command).await?;
+
+        let mut checks = vec![];
         if package.name == "blockchain-lib" && package.version < SemVer::new(1, 1, 0) {
-            issues.push("Potential reentrancy vulnerability in blockchain-lib < 1.1.0".to_string());
+            checks.push(SecurityCheck::new(
+                "Potential reentrancy vulnerability",
+                SecurityLevel::Critical,
+            ));
         }
-        issues
+        Ok(checks)
     }
 }
 
-/// License compliance checker.
+/// License checker with async validation.
 #[derive(Debug, Clone)]
 pub struct LicenseChecker {
+    /// Allowed licenses
     allowed_licenses: HashSet<String>,
+    /// Async context for license checks
+    async_context: Arc<Mutex<AsyncContext>>,
 }
 
 impl LicenseChecker {
+    /// Creates a new license checker.
     pub fn new() -> Self {
         let mut allowed_licenses = HashSet::new();
         allowed_licenses.insert("MIT".to_string());
         allowed_licenses.insert("Apache-2.0".to_string());
         allowed_licenses.insert("BSD-3-Clause".to_string());
-        LicenseChecker { allowed_licenses }
+        LicenseChecker {
+            allowed_licenses,
+            async_context: Arc::new(Mutex::new(AsyncContext::new())),
+        }
     }
 
-    pub fn check(&self, package: &Package) -> Option<String> {
-        if !self.allowed_licenses.contains(&package.license) {
-            Some(format!(
-                "License '{}' for package '{}' is not allowed. Allowed licenses: {:?}", 
-                package.license, package.name, self.allowed_licenses
-            ))
+    /// Checks package license compliance asynchronously.
+    pub async fn check(&self, package: &Package) -> Result<Option<String>, KslError> {
+        let mut async_ctx = self.async_context.lock().await;
+        let command = AsyncCommand::CheckLicense(package.clone());
+        async_ctx.execute_command(command).await?;
+
+        if !self.allowed_licenses.contains(package.license()) {
+            Ok(Some(format!(
+                "License '{}' for package '{}' is not allowed. Allowed licenses: {:?}",
+                package.license(),
+                package.name(),
+                self.allowed_licenses
+            )))
         } else {
-            None
+            Ok(None)
         }
     }
 }
 
-/// Represents an audit issue (vulnerability, security, or licensing).
+/// Represents an audit issue with severity.
 #[derive(Debug, Clone)]
 pub enum AuditIssue {
+    /// Security vulnerability
     Vulnerability(Vulnerability),
-    Security(String),
+    /// Security check failure
+    Security(SecurityCheck),
+    /// License compliance issue
     License(String),
 }
 
@@ -220,19 +297,31 @@ impl fmt::Display for AuditIssue {
     }
 }
 
-/// Represents the audit report.
+/// Represents the audit report with metadata.
 #[derive(Debug, Clone)]
 pub struct AuditReport {
-    issues: HashMap<String, Vec<AuditIssue>>, // Map package name to list of issues
+    /// Issues by package
+    issues: HashMap<String, Vec<AuditIssue>>,
+    /// Package metadata
+    metadata: PackageMetadata,
+    /// Audit timestamp
+    timestamp: u64,
 }
 
 impl AuditReport {
-    pub fn new() -> Self {
+    /// Creates a new audit report.
+    pub fn new(metadata: PackageMetadata) -> Self {
         AuditReport {
             issues: HashMap::new(),
+            metadata,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
         }
     }
 
+    /// Adds an issue to the report.
     pub fn add_issue(&mut self, package_name: &str, issue: AuditIssue) {
         self.issues
             .entry(package_name.to_string())
@@ -240,8 +329,14 @@ impl AuditReport {
             .push(issue);
     }
 
+    /// Checks if the report is clean.
     pub fn is_clean(&self) -> bool {
         self.issues.is_empty()
+    }
+
+    /// Gets the audit timestamp.
+    pub fn timestamp(&self) -> u64 {
+        self.timestamp
     }
 }
 
@@ -264,134 +359,86 @@ impl fmt::Display for AuditReport {
     }
 }
 
-/// Dependency auditor for KSL packages.
+/// Dependency auditor with async support.
 pub struct DependencyAuditor {
+    /// Vulnerability database
     vuln_db: VulnerabilityDatabase,
+    /// Security analyzer
     security_analyzer: SecurityAnalyzer,
+    /// License checker
     license_checker: LicenseChecker,
+    /// Async context for auditing
+    async_context: Arc<Mutex<AsyncContext>>,
 }
 
 impl DependencyAuditor {
+    /// Creates a new dependency auditor.
     pub fn new() -> Self {
         DependencyAuditor {
             vuln_db: VulnerabilityDatabase::new(),
             security_analyzer: SecurityAnalyzer::new(),
             license_checker: LicenseChecker::new(),
+            async_context: Arc::new(Mutex::new(AsyncContext::new())),
         }
     }
 
-    /// Audit a package and its dependencies.
-    pub fn audit(&self, package: &Package, resolved_deps: &HashMap<String, Package>) -> AuditReport {
-        let mut report = AuditReport::new();
+    /// Audits a package and its dependencies asynchronously.
+    pub async fn audit(
+        &self,
+        package: &Package,
+        resolved_deps: &HashMap<String, Package>,
+    ) -> Result<AuditReport, KslError> {
+        let mut report = AuditReport::new(package.metadata().clone());
 
-        // Audit the root package
-        self.audit_package(package, &mut report);
+        // Update vulnerability database
+        self.vuln_db.update().await?;
 
-        // Audit all resolved dependencies
+        // Audit main package
+        self.audit_package(package, &mut report).await?;
+
+        // Audit dependencies
         for dep in resolved_deps.values() {
-            self.audit_package(dep, &mut report);
+            self.audit_package(dep, &mut report).await?;
         }
 
-        report
+        Ok(report)
     }
 
-    fn audit_package(&self, package: &Package, report: &mut AuditReport) {
-        // Check for known vulnerabilities
-        let vulnerabilities = self.vuln_db.find_vulnerabilities(package);
-        for vuln in vulnerabilities {
-            report.add_issue(&package.name, AuditIssue::Vulnerability(vuln.clone()));
+    /// Audits a single package asynchronously.
+    async fn audit_package(&self, package: &Package, report: &mut AuditReport) -> Result<(), KslError> {
+        // Check for vulnerabilities
+        let vulns = self.vuln_db.find_vulnerabilities(package).await?;
+        for vuln in vulns {
+            report.add_issue(&package.name(), AuditIssue::Vulnerability(vuln.clone()));
         }
 
-        // Perform security analysis
-        let security_issues = self.security_analyzer.analyze(package);
+        // Run security analysis
+        let security_issues = self.security_analyzer.analyze(package).await?;
         for issue in security_issues {
-            report.add_issue(&package.name, AuditIssue::Security(issue));
+            report.add_issue(&package.name(), AuditIssue::Security(issue));
         }
 
-        // Check license compliance
-        if let Some(license_issue) = self.license_checker.check(package) {
-            report.add_issue(&package.name, AuditIssue::License(license_issue));
+        // Check license
+        if let Some(license_issue) = self.license_checker.check(package).await? {
+            report.add_issue(&package.name(), AuditIssue::License(license_issue));
         }
+
+        Ok(())
     }
 }
 
-/// CLI integration for `ksl dep-audit <project>` (used by ksl_cli.rs).
-pub fn run_dep_audit(project: &str) -> Result<String, String> {
-    // Create a package registry (simplified, in reality this would query a remote registry)
-    let mut registry = PackageRegistry::new();
-
-    // Populate the registry with example packages
-    registry.publish(Package::new(
-        "blockchain-lib",
-        SemVer::parse("1.0.0").unwrap(),
-        vec![("crypto-lib".to_string(), VersionConstraint::parse(">=1.0.0").unwrap())],
-        "MIT",
-    ));
-    registry.publish(Package::new(
-        "blockchain-lib",
-        SemVer::parse("1.1.0").unwrap(),
-        vec![("crypto-lib".to_string(), VersionConstraint::parse(">=1.0.0").unwrap())],
-        "MIT",
-    ));
-    registry.publish(Package::new(
-        "crypto-lib",
-        SemVer::parse("1.0.0").unwrap(),
-        vec![],
-        "GPL-3.0", // Incompatible license
-    ));
-    registry.publish(Package::new(
-        "ai-model",
-        SemVer::parse("2.0.0").unwrap(),
-        vec![("math-lib".to_string(), VersionConstraint::parse("^1.0.0").unwrap())],
-        "Apache-2.0",
-    ));
-    registry.publish(Package::new(
-        "math-lib",
-        SemVer::parse("1.0.0").unwrap(),
-        vec![],
-        "MIT",
-    ));
-    registry.publish(Package::new(
-        "game-physics",
-        SemVer::parse("1.2.0").unwrap(),
-        vec![("math-lib".to_string(), VersionConstraint::parse(">=1.0.0").unwrap())],
-        "BSD-3-Clause",
-    ));
-
-    // Create a project package based on the input
-    let project_package = match project {
-        "blockchain-project" => Package::new(
-            "blockchain-project",
-            SemVer::parse("0.1.0").unwrap(),
-            vec![("blockchain-lib".to_string(), VersionConstraint::parse("^1.0.0").unwrap())],
-            "MIT",
-        ),
-        "ai-project" => Package::new(
-            "ai-project",
-            SemVer::parse("0.1.0").unwrap(),
-            vec![("ai-model".to_string(), VersionConstraint::parse("^2.0.0").unwrap())],
-            "Apache-2.0",
-        ),
-        "game-project" => Package::new(
-            "game-project",
-            SemVer::parse("0.1.0").unwrap(),
-            vec![("game-physics".to_string(), VersionConstraint::parse("^1.0.0").unwrap())],
-            "BSD-3-Clause",
-        ),
-        _ => return Err(format!("Unknown project: {}", project)),
-    };
-
-    // Resolve dependencies (aligned with ksl_package.rs and ksl_package_version.rs)
-    let mut resolver = PackageRegistry::new();
-    for pkg in registry.packages.values().flatten() {
-        resolver.publish(pkg.clone());
-    }
-    let mut dep_resolver = DependencyResolver::new(resolver);
-    dep_resolver.resolve(&project_package)?;
-
-    // Run the audit
+/// Runs a dependency audit on a project asynchronously.
+pub async fn run_dep_audit(project: &str) -> Result<String, KslError> {
     let auditor = DependencyAuditor::new();
-    let report = auditor.audit(&project_package, dep_resolver.resolved_dependencies());
+    let registry = PackageRegistry::new();
+    let mut resolver = DependencyResolver::new(registry);
+
+    // Load project package
+    let package = Package::load(project)?;
+    resolver.resolve(&package)?;
+
+    // Run audit
+    let report = auditor.audit(&package, resolver.resolved_dependencies()).await?;
     Ok(report.to_string())
 }
 
@@ -472,22 +519,23 @@ impl DependencyResolver {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_vulnerability_check() {
-        let vuln_db = VulnerabilityDatabase::new();
+    #[tokio::test]
+    async fn test_vulnerability_check() {
+        let mut db = VulnerabilityDatabase::new();
+        db.update().await.unwrap();
         let package = Package::new(
             "crypto-lib",
             SemVer::parse("1.0.0").unwrap(),
             vec![],
             "MIT",
         );
-        let vulnerabilities = vuln_db.find_vulnerabilities(&package);
+        let vulnerabilities = db.find_vulnerabilities(&package).await.unwrap();
         assert_eq!(vulnerabilities.len(), 1);
         assert_eq!(vulnerabilities[0].description, "Buffer overflow in cryptographic function");
     }
 
-    #[test]
-    fn test_license_check() {
+    #[tokio::test]
+    async fn test_license_check() {
         let checker = LicenseChecker::new();
         let package = Package::new(
             "crypto-lib",
@@ -495,13 +543,13 @@ mod tests {
             vec![],
             "GPL-3.0",
         );
-        let issue = checker.check(&package);
+        let issue = checker.check(&package).await.unwrap();
         assert!(issue.is_some());
         assert!(issue.unwrap().contains("License 'GPL-3.0' for package 'crypto-lib' is not allowed"));
     }
 
-    #[test]
-    fn test_security_analysis() {
+    #[tokio::test]
+    async fn test_security_analysis() {
         let analyzer = SecurityAnalyzer::new();
         let package = Package::new(
             "blockchain-lib",
@@ -509,14 +557,14 @@ mod tests {
             vec![],
             "MIT",
         );
-        let issues = analyzer.analyze(&package);
+        let issues = analyzer.analyze(&package).await.unwrap();
         assert_eq!(issues.len(), 1);
-        assert!(issues[0].contains("Potential reentrancy vulnerability"));
+        assert!(issues[0].description.contains("Potential reentrancy vulnerability"));
     }
 
-    #[test]
-    fn test_dep_audit_blockchain_project() {
-        let result = run_dep_audit("blockchain-project");
+    #[tokio::test]
+    async fn test_dep_audit_blockchain_project() {
+        let result = run_dep_audit("blockchain-project").await;
         assert!(result.is_ok());
         let report = result.unwrap();
         assert!(report.contains("Package: blockchain-lib"));
@@ -526,9 +574,9 @@ mod tests {
         assert!(report.contains("Buffer overflow in cryptographic function"));
     }
 
-    #[test]
-    fn test_dep_audit_game_project() {
-        let result = run_dep_audit("game-project");
+    #[tokio::test]
+    async fn test_dep_audit_game_project() {
+        let result = run_dep_audit("game-project").await;
         assert!(result.is_ok());
         let report = result.unwrap();
         assert!(report.contains("No issues found"));

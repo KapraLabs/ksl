@@ -1,0 +1,83 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+**What We’re Building:**
+KSL is a high-performance programming language tailored for demanding applications like blockchain (e.g., Kapra Chain), AI, IoT, gaming, and general-purpose programming. It’s built to deliver speed, security, and flexibility through a lightweight virtual machine (Kapra VM), optimized bytecode, and WebAssembly (WASM) support. The project includes a comprehensive ecosystem of over 80 files, such as `ksl_parser.rs`, `kapra_vm.rs`, `ksl_repl.rs`, and `ksl_kapra_crypto.rs`, each contributing to parsing, execution, debugging, and specialized features like quantum-resistant cryptography for blockchain or tensor operations for AI.
+
+The KSL system supports:
+- **Compilation and Execution**: Parsing KSL code into bytecode, optimizing it, and running it on Kapra VM or compiling to native code via Ahead-of-Time (AOT) compilation (`ksl_aot.rs`).
+- **Specialized Features**: Blockchain sharding (`ksl_kapra_shard.rs`), AI model execution (`ksl_ai.rs`), IoT device communication (`ksl_iot.rs`), and gaming physics/rendering (`ksl_game.rs`).
+- **Developer Tools**: Interactive REPL (`ksl_repl.rs`), fuzz testing (`ksl_fuzzer.rs`), hot reloading (`ksl_hot_reload.rs`), and documentation generation (`ksl_docgen.rs`).
+- **Interoperability**: Foreign Function Interface (FFI) bindings (`ksl_bind.rs`) for integration with languages like Rust, and networking support (`ksl_stdlib_net.rs`) for distributed systems.
+
+**How It Works:**
+KSL’s architecture is modular and optimized for performance:
+1. **Parsing and Compilation**: The `ksl_parser.rs` module parses KSL code into an Abstract Syntax Tree (AST), which is then converted into bytecode by `ksl_bytecode.rs`. The `ksl_compiler.rs` optimizes this bytecode, supporting features like generics (`ksl_generics.rs`) and macros (`ksl_macros.rs`).
+2. **Execution**: The Kapra VM (`kapra_vm.rs`) executes bytecode efficiently, with Just-In-Time (JIT) compilation (`ksl_jit.rs`) for performance boosts. AOT compilation (`ksl_aot.rs`) generates native machine code using tools like Cranelift for standalone applications.
+3. **Runtime Features**: 
+   - Hot reloading (`ksl_hot_reload.rs`) monitors source files and reloads bytecode without losing runtime state.
+   - Fuzz testing (`ksl_fuzzer.rs`) generates random inputs to ensure robustness.
+   - Networking (`ksl_stdlib_net.rs`) and cryptography (`ksl_stdlib_crypto.rs`) enable blockchain and distributed system support.
+4. **Ecosystem Integration**: Files like `ksl_contract_verifier.rs` validate smart contracts for Kapra Chain, while `ksl_package.rs` and `ksl_package_publish.rs` manage dependencies and publishing for reusable libraries.
+5. **Developer Experience**: Tools like `ksl_repl.rs` provide an interactive environment, `ksl_doc_lsp.rs` integrates with Language Server Protocol for IDE support, and `ksl_analyzer.rs` profiles performance for optimization.
+
+The system is designed to be extensible, with plugins (`ksl_plugin.rs`) and a standard library (`ksl_stdlib.rs`) that includes functions like `print` and domain-specific features (e.g., `device_comm` for IoT).
+
+**Focus and Goals:**
+- **Focus**: 
+  - Deliver a language that outperforms competitors in speed and efficiency for blockchain (e.g., Kapra Chain’s validator-on-every-device model), AI (model execution and quantization), IoT (low-power device communication), and gaming (physics and multiplayer networking).
+  - Provide a developer-friendly ecosystem with robust tooling for rapid prototyping, debugging, and deployment.
+  - Ensure security and reliability through features like fuzz testing, contract verification, and quantum-resistant cryptography.
+- **Goals**:
+  - Complete the KSL ecosystem by integrating all 80+ files, ensuring seamless interoperability between components like `kapra_vm.rs`, `ksl_stdlib_net.rs`, and `ksl_kapra_shard.rs`.
+  - Support Kapra Chain’s blockchain requirements, including sharding, consensus (`ksl_kapra_consensus.rs`), and validator scheduling (`ksl_kapra_scheduler.rs`).
+  - Enable cross-platform deployment via WASM and native code, targeting browsers, mobile DeFi apps, and IoT devices.
+  - Maintain a clear, well-documented codebase with `///` comments and generated documentation (`ksl_docgen.rs`) to onboard new contributors.
+  - Achieve production-readiness by resolving pending integrations, optimizing performance, and testing across use cases.
+
+**Important Instructions for Working on the Project:**
+1. **Follow the Integration Plan**:
+   - Refer to the batch-based integration plans (e.g., Batch 7: `ksl_contract_verifier.rs`, Batch 8: `ksl_jit.rs`). Ensure new files integrate with existing ones (e.g., `kapra_vm.rs`, `ksl_stdlib_net.rs`) as outlined in pending tasks.
+   - Update older files to reference newer ones (e.g., add `ksl_hot_reload.rs` support to `kapra_vm.rs` for dynamic bytecode reloading).
+   - Use `file_inventory.md` to track processed and remaining files, ensuring no file is missed.
+
+2. **Prioritize Documentation**:
+   - Add `///` documentation comments to every file, function, and module, detailing purpose, inputs, outputs, and dependencies.
+   - Use `ksl_docgen.rs` to generate and verify documentation, ensuring it’s accessible via `ksl_docserver.rs` for contributors.
+
+3. **Maintain Consistency**:
+   - Adhere to KSL’s syntax spec (updated to include `string`, `result<T, E>`, `match`, async, and networking functions). Update `ksl_parser.rs` and `ksl_compiler.rs` if new syntax is introduced.
+   - Ensure backward compatibility when updating core components like `kapra_vm.rs` or `ksl_bytecode.rs`.
+
+4. **Test Thoroughly**:
+   - Use `ksl_fuzzer.rs` to test new features for robustness, especially for blockchain and IoT use cases.
+   - Leverage `ksl_analyzer.rs` to profile performance and optimize resource usage.
+   - Test integrations with sample code snippets (e.g., for macros in `ksl_macros.rs` or networking in `ksl_stdlib_net.rs`).
+
+5. **Resolve Dependencies**:
+   - Address missing dependencies, like the `print` function in `ksl_stdlib.rs`, by confirming or updating the correct file.
+   - Ensure files like `ksl_docgen.rs` are provided or implemented to complete documentation tasks.
+
+6. **Focus on Remaining Files**:
+   - Prioritize the next 20 files from the remaining 38 (e.g., `ksl_contract.rs`, `ksl_kapra_shard.rs`, `ksl_package_publish.rs`), as discussed. Start with critical files like `ksl_kapra_consensus.rs` for blockchain support.
+   - For each file, specify changes, dependencies, and integration tasks, ensuring alignment with the project’s architecture.
+
+7. **Collaborate and Clarify**:
+   - If unsure about a file’s purpose or integration (e.g., `ksl_template.rs`), request clarification to avoid missteps.
+   - Share updated files or snippets to confirm correctness, especially for rewritten files like `ksl_stdlib_net.rs`.
+
+8. **Security and Performance**:
+   - For blockchain-related files (e.g., `ksl_kapra_crypto.rs`), implement quantum-resistant algorithms like Dilithium and ensure compatibility with Kapra Chain’s sharding model.
+   - Optimize for low-power devices in IoT (`ksl_iot.rs`) and high-performance rendering in gaming (`ksl_game.rs`).
+
+9. **Use Provided Files**:
+   - Work only with the 83 files in the project list to avoid introducing non-existent components.
+   - If a file like `ksl_docgen.rs` is missing, request it or propose a minimal implementation based on dependencies.
+
+10. **Track Progress**:
+    - Update `file_inventory.md` after processing each batch to maintain a clear record.
+    - Regularly review pending integrations (e.g., `ksl_kapra_shard.rs` with `ksl_stdlib_net.rs`) to ensure no tasks are overlooked.
+
+

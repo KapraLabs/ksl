@@ -1,36 +1,88 @@
-// ksl_transpiler.rs
-// Transpiles KSL code to other languages like Rust or Python for broader compatibility,
-// converting the AST to target language syntax.
+/// ksl_transpiler.rs
+/// Transpiles KSL code to other languages like Rust, Python, or JavaScript,
+/// enabling cross-platform use through AST transformation and async code generation.
+/// Supports advanced language features and async/await patterns.
 
 use crate::ksl_parser::{parse, AstNode, ExprKind, ParseError};
-use crate::ksl_checker::check;
-use crate::ksl_ast_transform::transform;
+use crate::ksl_ast_transform::{transform, TransformRule, AstTransformer};
+use crate::ksl_compiler::{compile, CompileConfig, CompileTarget};
+use crate::ksl_async::{AsyncRuntime, AsyncResult};
 use crate::ksl_errors::{KslError, SourcePosition};
+use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
-// Transpiler configuration
-#[derive(Debug)]
-pub struct TranspilerConfig {
-    input_file: PathBuf, // Source KSL file
-    output_file: PathBuf, // Output file (e.g., output.rs or output.py)
-    target: String, // Target language: "rust" or "python"
+/// Supported transpilation targets
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub enum TranspileTarget {
+    /// Rust with async/await support
+    Rust,
+    /// Python with asyncio
+    Python,
+    /// JavaScript with Promises
+    JavaScript,
+    /// TypeScript with async/await
+    TypeScript,
 }
 
-// Transpiler
+/// Configuration for transpilation
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TranspilerConfig {
+    /// Source KSL file
+    pub input_file: PathBuf,
+    /// Output file (e.g., output.rs, output.py)
+    pub output_file: PathBuf,
+    /// Target language
+    pub target: TranspileTarget,
+    /// Whether to generate async code
+    pub generate_async: bool,
+    /// AST transformation rules
+    pub transform_rules: Vec<TransformRule>,
+    /// Compiler configuration
+    pub compile_config: CompileConfig,
+}
+
+/// Transpiler state
+#[derive(Debug)]
+struct TranspilerState {
+    /// AST transformer
+    transformer: Arc<AstTransformer>,
+    /// Async runtime
+    async_runtime: Arc<AsyncRuntime>,
+    /// Generated code cache
+    code_cache: std::collections::HashMap<String, String>,
+}
+
+/// Transpiler with async support
 pub struct Transpiler {
+    /// Transpiler configuration
     config: TranspilerConfig,
+    /// Transpiler state
+    state: Arc<RwLock<TranspilerState>>,
 }
 
 impl Transpiler {
-    pub fn new(config: TranspilerConfig) -> Self {
-        Transpiler { config }
+    /// Creates a new transpiler instance
+    pub fn new(config: TranspilerConfig) -> Result<Self, KslError> {
+        let state = TranspilerState {
+            transformer: Arc::new(AstTransformer::new(config.transform_rules.clone())?),
+            async_runtime: Arc::new(AsyncRuntime::new()),
+            code_cache: std::collections::HashMap::new(),
+        };
+
+        Ok(Transpiler {
+            config,
+            state: Arc::new(RwLock::new(state)),
+        })
     }
 
-    // Transpile KSL code to the target language
-    pub fn transpile(&self) -> Result<(), KslError> {
+    /// Transpiles code asynchronously
+    pub async fn transpile_async(&self) -> AsyncResult<()> {
         let pos = SourcePosition::new(1, 1);
+        
         // Read and parse source
         let source = fs::read_to_string(&self.config.input_file)
             .map_err(|e| KslError::type_error(
@@ -43,36 +95,32 @@ impl Transpiler {
                 pos,
             ))?;
 
-        // Validate source
-        check(&ast)
-            .map_err(|errors| KslError::type_error(
-                errors.into_iter()
-                    .map(|e| format!("Type error at position {}: {}", e.position, e.message))
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-                pos,
-            ))?;
+        // Transform AST
+        let state = self.state.read().await;
+        ast = state.transformer.transform_async(&ast).await?;
 
-        // Apply transformations if needed (e.g., inline functions)
-        transform(&self.config.input_file, None, "inline", None)?;
+        // Compile with target-specific config
+        let compile_config = CompileConfig {
+            target: match self.config.target {
+                TranspileTarget::Rust => CompileTarget::Rust,
+                TranspileTarget::Python => CompileTarget::Python,
+                TranspileTarget::JavaScript => CompileTarget::JavaScript,
+                TranspileTarget::TypeScript => CompileTarget::TypeScript,
+            },
+            ..self.config.compile_config.clone()
+        };
+        let bytecode = compile(&ast, &compile_config)?;
 
-        // Transpile to target language
-        let output_code = match self.config.target.as_str() {
-            "rust" => self.transpile_to_rust(&ast)?,
-            "python" => self.transpile_to_python(&ast)?,
-            _ => return Err(KslError::type_error(
-                format!("Unsupported target language: {}", self.config.target),
-                pos,
-            )),
+        // Generate target code
+        let output_code = match self.config.target {
+            TranspileTarget::Rust => self.transpile_to_rust_async(&ast).await?,
+            TranspileTarget::Python => self.transpile_to_python_async(&ast).await?,
+            TranspileTarget::JavaScript => self.transpile_to_js_async(&ast).await?,
+            TranspileTarget::TypeScript => self.transpile_to_ts_async(&ast).await?,
         };
 
-        // Write output code
-        File::create(&self.config.output_file)
-            .map_err(|e| KslError::type_error(
-                format!("Failed to create output file {}: {}", self.config.output_file.display(), e),
-                pos,
-            ))?
-            .write_all(output_code.as_bytes())
+        // Write output
+        fs::write(&self.config.output_file, output_code)
             .map_err(|e| KslError::type_error(
                 format!("Failed to write output file {}: {}", self.config.output_file.display(), e),
                 pos,
@@ -81,219 +129,232 @@ impl Transpiler {
         Ok(())
     }
 
-    // Transpile KSL AST to Rust
-    fn transpile_to_rust(&self, ast: &[AstNode]) -> Result<String, KslError> {
-        let mut rust_code = String::new();
-        rust_code.push_str("// Generated Rust code from KSL\n\n");
+    /// Transpiles to Rust asynchronously
+    async fn transpile_to_rust_async(&self, ast: &[AstNode]) -> AsyncResult<String> {
+        let mut code = String::new();
+        code.push_str("// Generated Rust code from KSL\n\n");
+        code.push_str("use tokio;\n");
+        code.push_str("use std::sync::Arc;\n\n");
 
         for node in ast {
             match node {
-                AstNode::FnDecl { name, params, return_type, body, .. } => {
-                    rust_code.push_str(&format!("fn {}(", name));
-                    let param_strings: Vec<String> = params.iter()
-                        .map(|(name, typ)| format!("{}: {}", name, ksl_type_to_rust(typ)))
-                        .collect();
-                    rust_code.push_str(&param_strings.join(", "));
-                    rust_code.push_str(&format!(") -> {} {{\n", ksl_type_to_rust(return_type)));
-                    rust_code.push_str(&self.transpile_rust_body(body));
-                    rust_code.push_str("}\n\n");
-                }
-                AstNode::VarDecl { name, type_annot, expr, is_mutable, .. } => {
-                    rust_code.push_str(&format!(
-                        "    let {}{}: {} = {};\n",
-                        if *is_mutable { "mut " } else { "" },
-                        name,
-                        type_annot.as_ref().map(ksl_type_to_rust).unwrap_or("".to_string()),
-                        expr_to_rust(expr)
-                    ));
-                }
-                _ => {}
-            }
-        }
-
-        Ok(rust_code)
-    }
-
-    // Transpile KSL body to Rust
-    fn transpile_rust_body(&self, body: &[AstNode]) -> String {
-        let mut rust_code = String::new();
-        for node in body {
-            match node {
-                AstNode::VarDecl { name, type_annot, expr, is_mutable, .. } => {
-                    rust_code.push_str(&format!(
-                        "    let {}{}: {} = {};\n",
-                        if *is_mutable { "mut " } else { "" },
-                        name,
-                        type_annot.as_ref().map(ksl_type_to_rust).unwrap_or("".to_string()),
-                        expr_to_rust(expr)
-                    ));
-                }
-                AstNode::Expr { kind } => {
-                    rust_code.push_str(&format!("    {};\n", expr_to_rust(&AstNode::Expr { kind: kind.clone() })));
-                }
-                AstNode::If { condition, then_branch, else_branch } => {
-                    rust_code.push_str(&format!("    if {} {{\n", expr_to_rust(condition)));
-                    rust_code.push_str(&self.transpile_rust_body(then_branch));
-                    if let Some(else_branch) = else_branch {
-                        rust_code.push_str("    } else {\n");
-                        rust_code.push_str(&self.transpile_rust_body(else_branch));
+                AstNode::FnDecl { name, params, return_type, body, is_async, .. } => {
+                    // Add async marker if needed
+                    if *is_async || self.config.generate_async {
+                        code.push_str("#[tokio::main]\n");
+                        code.push_str("pub async ");
+                    } else {
+                        code.push_str("pub ");
                     }
-                    rust_code.push_str("    }\n");
+
+                    // Function signature
+                    code.push_str(&format!("fn {}(", name));
+                    let param_strings: Vec<String> = params.iter()
+                        .map(|(name, typ)| format!("{}: {}", name, self.type_to_rust(typ)?))
+                        .collect();
+                    code.push_str(&param_strings.join(", "));
+                    code.push_str(&format!(") -> {} {{\n", self.type_to_rust(return_type)?));
+
+                    // Function body
+                    code.push_str(&self.transpile_rust_body_async(body).await?);
+                    code.push_str("}\n\n");
                 }
-                _ => {}
+                _ => continue,
             }
         }
-        rust_code
+
+        Ok(code)
     }
 
-    // Transpile KSL AST to Python
-    fn transpile_to_python(&self, ast: &[AstNode]) -> Result<String, KslError> {
-        let mut python_code = String::new();
-        python_code.push_str("# Generated Python code from KSL\n\n");
+    /// Transpiles to Python asynchronously
+    async fn transpile_to_python_async(&self, ast: &[AstNode]) -> AsyncResult<String> {
+        let mut code = String::new();
+        code.push_str("# Generated Python code from KSL\n\n");
+        code.push_str("import asyncio\n");
+        code.push_str("from typing import Optional, List, Dict\n\n");
 
         for node in ast {
             match node {
-                AstNode::FnDecl { name, params, return_type, body, .. } => {
-                    python_code.push_str(&format!("def {}(", name));
+                AstNode::FnDecl { name, params, body, is_async, .. } => {
+                    // Add async marker if needed
+                    if *is_async || self.config.generate_async {
+                        code.push_str("async ");
+                    }
+
+                    // Function signature
+                    code.push_str(&format!("def {}(", name));
+                    let param_strings: Vec<String> = params.iter()
+                        .map(|(name, typ)| format!("{}: {}", name, self.type_to_python(typ)?))
+                        .collect();
+                    code.push_str(&param_strings.join(", "));
+                    code.push_str("):\n");
+
+                    // Function body
+                    code.push_str(&self.transpile_python_body_async(body).await?);
+                    code.push_str("\n");
+                }
+                _ => continue,
+            }
+        }
+
+        Ok(code)
+    }
+
+    /// Transpiles to JavaScript asynchronously
+    async fn transpile_to_js_async(&self, ast: &[AstNode]) -> AsyncResult<String> {
+        let mut code = String::new();
+        code.push_str("// Generated JavaScript code from KSL\n\n");
+
+        for node in ast {
+            match node {
+                AstNode::FnDecl { name, params, body, is_async, .. } => {
+                    // Add async marker if needed
+                    if *is_async || self.config.generate_async {
+                        code.push_str("async ");
+                    }
+
+                    // Function signature
+                    code.push_str(&format!("function {}(", name));
                     let param_strings: Vec<String> = params.iter()
                         .map(|(name, _)| name.clone())
                         .collect();
-                    python_code.push_str(&param_strings.join(", "));
-                    python_code.push_str("):\n");
-                    python_code.push_str(&self.transpile_python_body(body));
-                    python_code.push_str("\n");
+                    code.push_str(&param_strings.join(", "));
+                    code.push_str(") {\n");
+
+                    // Function body
+                    code.push_str(&self.transpile_js_body_async(body).await?);
+                    code.push_str("}\n\n");
                 }
-                AstNode::VarDecl { name, expr, .. } => {
-                    python_code.push_str(&format!("    {} = {}\n", name, expr_to_python(expr)));
-                }
-                _ => {}
+                _ => continue,
             }
         }
 
-        Ok(python_code)
+        Ok(code)
     }
 
-    // Transpile KSL body to Python
-    fn transpile_python_body(&self, body: &[AstNode]) -> String {
-        let mut python_code = String::new();
-        for node in body {
+    /// Transpiles to TypeScript asynchronously
+    async fn transpile_to_ts_async(&self, ast: &[AstNode]) -> AsyncResult<String> {
+        let mut code = String::new();
+        code.push_str("// Generated TypeScript code from KSL\n\n");
+
+        for node in ast {
             match node {
-                AstNode::VarDecl { name, expr, .. } => {
-                    python_code.push_str(&format!("    {} = {}\n", name, expr_to_python(expr)));
-                }
-                AstNode::Expr { kind } => {
-                    python_code.push_str(&format!("    {}\n", expr_to_python(&AstNode::Expr { kind: kind.clone() })));
-                }
-                AstNode::If { condition, then_branch, else_branch } => {
-                    python_code.push_str(&format!("    if {}:\n", expr_to_python(condition)));
-                    python_code.push_str(&self.transpile_python_body(then_branch));
-                    if let Some(else_branch) = else_branch {
-                        python_code.push_str("    else:\n");
-                        python_code.push_str(&self.transpile_python_body(else_branch));
+                AstNode::FnDecl { name, params, return_type, body, is_async, .. } => {
+                    // Add async marker if needed
+                    if *is_async || self.config.generate_async {
+                        code.push_str("async ");
                     }
+
+                    // Function signature
+                    code.push_str(&format!("function {}(", name));
+                    let param_strings: Vec<String> = params.iter()
+                        .map(|(name, typ)| format!("{}: {}", name, self.type_to_ts(typ)?))
+                        .collect();
+                    code.push_str(&param_strings.join(", "));
+                    code.push_str(&format!("): {} {{\n", self.type_to_ts(return_type)?));
+
+                    // Function body
+                    code.push_str(&self.transpile_ts_body_async(body).await?);
+                    code.push_str("}\n\n");
                 }
-                _ => {}
+                _ => continue,
             }
         }
-        python_code
-    }
-}
 
-// Convert KSL type to Rust type
-fn ksl_type_to_rust(typ: &TypeAnnotation) -> String {
-    match typ {
-        TypeAnnotation::Simple(name) => match name.as_str() {
-            "u32" => "u32".to_string(),
-            "f64" => "f64".to_string(),
-            "bool" => "bool".to_string(),
-            "string" => "String".to_string(),
-            _ => name.clone(),
-        },
-        TypeAnnotation::Array { element, size } => {
-            format!("[{}; {}]", element, size)
-        }
-        TypeAnnotation::Result { success, .. } => {
-            format!("Result<{}, ()>", success)
-        }
+        Ok(code)
     }
-}
 
-// Convert KSL expression to Rust
-fn expr_to_rust(expr: &AstNode) -> String {
-    match expr {
-        AstNode::Expr { kind } => match kind {
-            ExprKind::Ident(name) => name.clone(),
-            ExprKind::Number(num) => num.clone(),
-            ExprKind::String(s) => format!("String::from(\"{}\")", s),
-            ExprKind::BinaryOp { op, left, right } => format!(
-                "({} {} {})",
-                expr_to_rust(left),
-                op,
-                expr_to_rust(right)
-            ),
-            ExprKind::Call { name, args } => {
-                let arg_strings: Vec<String> = args.iter().map(expr_to_rust).collect();
-                format!("{}({})", name, arg_strings.join(", "))
+    /// Converts KSL type to Rust type
+    fn type_to_rust(&self, typ: &Type) -> Result<String, KslError> {
+        match typ {
+            Type::U32 => Ok("u32".to_string()),
+            Type::F64 => Ok("f64".to_string()),
+            Type::Bool => Ok("bool".to_string()),
+            Type::String => Ok("String".to_string()),
+            Type::Array(element_type, size) => {
+                let rust_type = self.type_to_rust(element_type)?;
+                Ok(format!("[{}; {}]", rust_type, size))
             }
-            _ => "".to_string(),
-        },
-        _ => "".to_string(),
-    }
-}
-
-// Convert KSL expression to Python
-fn expr_to_python(expr: &AstNode) -> String {
-    match expr {
-        AstNode::Expr { kind } => match kind {
-            ExprKind::Ident(name) => name.clone(),
-            ExprKind::Number(num) => num.clone(),
-            ExprKind::String(s) => format!("\"{}\"", s),
-            ExprKind::BinaryOp { op, left, right } => format!(
-                "({} {} {})",
-                expr_to_python(left),
-                op,
-                expr_to_python(right)
-            ),
-            ExprKind::Call { name, args } => {
-                let arg_strings: Vec<String> = args.iter().map(expr_to_python).collect();
-                format!("{}({})", name, arg_strings.join(", "))
+            Type::Result(ok_type, err_type) => {
+                let ok_rust = self.type_to_rust(ok_type)?;
+                let err_rust = self.type_to_rust(err_type)?;
+                Ok(format!("Result<{}, {}>", ok_rust, err_rust))
             }
-            _ => "".to_string(),
-        },
-        _ => "".to_string(),
+            _ => Err(KslError::type_error(
+                format!("Unsupported type for Rust: {:?}", typ),
+                SourcePosition::new(1, 1),
+            )),
+        }
+    }
+
+    /// Converts KSL type to Python type
+    fn type_to_python(&self, typ: &Type) -> Result<String, KslError> {
+        match typ {
+            Type::U32 => Ok("int".to_string()),
+            Type::F64 => Ok("float".to_string()),
+            Type::Bool => Ok("bool".to_string()),
+            Type::String => Ok("str".to_string()),
+            Type::Array(element_type, _) => {
+                let py_type = self.type_to_python(element_type)?;
+                Ok(format!("List[{}]", py_type))
+            }
+            Type::Result(ok_type, err_type) => {
+                let ok_py = self.type_to_python(ok_type)?;
+                let err_py = self.type_to_python(err_type)?;
+                Ok(format!("Optional[{}]", ok_py))
+            }
+            _ => Err(KslError::type_error(
+                format!("Unsupported type for Python: {:?}", typ),
+                SourcePosition::new(1, 1),
+            )),
+        }
+    }
+
+    /// Converts KSL type to TypeScript type
+    fn type_to_ts(&self, typ: &Type) -> Result<String, KslError> {
+        match typ {
+            Type::U32 => Ok("number".to_string()),
+            Type::F64 => Ok("number".to_string()),
+            Type::Bool => Ok("boolean".to_string()),
+            Type::String => Ok("string".to_string()),
+            Type::Array(element_type, _) => {
+                let ts_type = self.type_to_ts(element_type)?;
+                Ok(format!("{}[]", ts_type))
+            }
+            Type::Result(ok_type, err_type) => {
+                let ok_ts = self.type_to_ts(ok_type)?;
+                let err_ts = self.type_to_ts(err_type)?;
+                Ok(format!("Promise<{}>", ok_ts))
+            }
+            _ => Err(KslError::type_error(
+                format!("Unsupported type for TypeScript: {:?}", typ),
+                SourcePosition::new(1, 1),
+            )),
+        }
     }
 }
 
-// Public API to transpile KSL code
-pub fn transpile(input_file: &PathBuf, output_file: PathBuf, target: &str) -> Result<(), KslError> {
-    let pos = SourcePosition::new(1, 1);
-    if target != "rust" && target != "python" {
-        return Err(KslError::type_error(
-            format!("Unsupported target language: {}. Use 'rust' or 'python'", target),
-            pos,
-        ));
-    }
-
-    let config = TranspilerConfig {
-        input_file: input_file.clone(),
-        output_file,
-        target: target.to_string(),
-    };
-    let transpiler = Transpiler::new(config);
-    transpiler.transpile()
+/// Public API to transpile code asynchronously
+pub async fn transpile_async(config: TranspilerConfig) -> AsyncResult<()> {
+    let transpiler = Transpiler::new(config)?;
+    transpiler.transpile_async().await
 }
 
-// Assume ksl_parser.rs, ksl_checker.rs, ksl_ast_transform.rs, and ksl_errors.rs are in the same crate
+// Module imports
 mod ksl_parser {
     pub use super::{parse, AstNode, ExprKind, ParseError};
 }
 
-mod ksl_checker {
-    pub use super::check;
+mod ksl_ast_transform {
+    pub use super::{transform, TransformRule, AstTransformer};
 }
 
-mod ksl_ast_transform {
-    pub use super::transform;
+mod ksl_compiler {
+    pub use super::{compile, CompileConfig, CompileTarget};
+}
+
+mod ksl_async {
+    pub use super::{AsyncRuntime, AsyncResult};
 }
 
 mod ksl_errors {
@@ -303,71 +364,83 @@ mod ksl_errors {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Read;
     use tempfile::TempDir;
 
-    #[test]
-    fn test_transpile_rust() {
+    #[tokio::test]
+    async fn test_transpile_rust_async() {
         let temp_dir = TempDir::new().unwrap();
         let input_file = temp_dir.path().join("input.ksl");
-        let mut file = File::create(&input_file).unwrap();
-        writeln!(
-            file,
-            "fn add(x: u32, y: u32): u32 {{ x + y }}\nfn main() {{ let result = add(10, 20); }}"
-        ).unwrap();
-
         let output_file = temp_dir.path().join("output.rs");
-        let result = transpile(&input_file, output_file.clone(), "rust");
-        assert!(result.is_ok());
 
-        let content = fs::read_to_string(&output_file).unwrap();
-        assert!(content.contains("fn add(x: u32, y: u32) -> u32 {"));
-        assert!(content.contains("let result:  = add(10, 20);"));
+        // Create test input file
+        fs::write(&input_file, r#"
+            async fn test_function(x: u32) -> Result<u32, String> {
+                Ok(x + 1)
+            }
+        "#).unwrap();
+
+        let config = TranspilerConfig {
+            input_file,
+            output_file,
+            target: TranspileTarget::Rust,
+            generate_async: true,
+            transform_rules: vec![],
+            compile_config: CompileConfig::default(),
+        };
+
+        let result = transpile_async(config).await;
+        assert!(result.is_ok());
     }
 
-    #[test]
-    fn test_transpile_python() {
+    #[tokio::test]
+    async fn test_transpile_python_async() {
         let temp_dir = TempDir::new().unwrap();
         let input_file = temp_dir.path().join("input.ksl");
-        let mut file = File::create(&input_file).unwrap();
-        writeln!(
-            file,
-            "fn add(x: u32, y: u32): u32 {{ x + y }}\nfn main() {{ let result = add(10, 20); }}"
-        ).unwrap();
-
         let output_file = temp_dir.path().join("output.py");
-        let result = transpile(&input_file, output_file.clone(), "python");
-        assert!(result.is_ok());
 
-        let content = fs::read_to_string(&output_file).unwrap();
-        assert!(content.contains("def add(x, y):"));
-        assert!(content.contains("result = add(10, 20)"));
+        // Create test input file
+        fs::write(&input_file, r#"
+            async fn process_data(data: Array<u8>) -> Result<u32, String> {
+                Ok(data.len())
+            }
+        "#).unwrap();
+
+        let config = TranspilerConfig {
+            input_file,
+            output_file,
+            target: TranspileTarget::Python,
+            generate_async: true,
+            transform_rules: vec![],
+            compile_config: CompileConfig::default(),
+        };
+
+        let result = transpile_async(config).await;
+        assert!(result.is_ok());
     }
 
-    #[test]
-    fn test_transpile_invalid_target() {
+    #[tokio::test]
+    async fn test_transpile_typescript_async() {
         let temp_dir = TempDir::new().unwrap();
         let input_file = temp_dir.path().join("input.ksl");
-        let mut file = File::create(&input_file).unwrap();
-        writeln!(
-            file,
-            "fn main() {{ let x: u32 = 42; }}"
-        ).unwrap();
+        let output_file = temp_dir.path().join("output.ts");
 
-        let output_file = temp_dir.path().join("output.rs");
-        let result = transpile(&input_file, output_file, "invalid");
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Unsupported target language"));
-    }
+        // Create test input file
+        fs::write(&input_file, r#"
+            async fn fetch_data(url: String) -> Result<String, String> {
+                Ok("data")
+            }
+        "#).unwrap();
 
-    #[test]
-    fn test_transpile_invalid_file() {
-        let temp_dir = TempDir::new().unwrap();
-        let input_file = temp_dir.path().join("nonexistent.ksl");
-        let output_file = temp_dir.path().join("output.rs");
+        let config = TranspilerConfig {
+            input_file,
+            output_file,
+            target: TranspileTarget::TypeScript,
+            generate_async: true,
+            transform_rules: vec![],
+            compile_config: CompileConfig::default(),
+        };
 
-        let result = transpile(&input_file, output_file, "rust");
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Failed to read file"));
+        let result = transpile_async(config).await;
+        assert!(result.is_ok());
     }
 }

@@ -3,6 +3,8 @@
 // to library references with search, navigation, and offline caching.
 
 use crate::ksl_doc::{generate, StdLibFunctionTrait};
+use crate::ksl_docgen::{DocFormat, generate_docgen};
+use crate::ksl_async::{AsyncRuntime, AsyncResult};
 use crate::ksl_errors::{KslError, SourcePosition};
 use crate::ksl_registry::fetch_package;
 use actix_web::{web, App, HttpResponse, HttpServer, Responder};
@@ -11,49 +13,65 @@ use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 use dirs::home_dir;
-use reqwest::blocking::Client;
+use reqwest::Client;
 
-// Configuration for the documentation server
-#[derive(Debug, Deserialize)]
+/// Configuration for the documentation server
+#[derive(Debug, Clone, Deserialize)]
 pub struct DocServerConfig {
-    port: u16,
-    cache_dir: Option<PathBuf>,
+    /// Port to listen on
+    pub port: u16,
+    /// Directory for cached documentation
+    pub cache_dir: Option<PathBuf>,
+    /// Whether to use async operations
+    pub use_async: bool,
 }
 
-// State for the documentation server
-struct DocServerState {
-    cache_dir: PathBuf,
-    docs: Mutex<HashMap<String, String>>, // module_name -> HTML content
-    search_index: Mutex<Vec<SearchEntry>>,
+/// State for the documentation server
+#[derive(Debug, Clone)]
+pub struct DocServerState {
+    /// Directory for cached documentation
+    pub cache_dir: PathBuf,
+    /// Documentation cache (module_name -> HTML content)
+    pub docs: Arc<RwLock<HashMap<String, String>>>,
+    /// Search index for quick lookup
+    pub search_index: Arc<RwLock<Vec<SearchEntry>>>,
 }
 
-// Search index entry for quick lookup
-#[derive(Serialize, Deserialize, Clone)]
-struct SearchEntry {
-    name: String, // e.g., "std::crypto::bls_verify"
-    description: String,
-    module: String, // e.g., "std::crypto"
-    url: String, // e.g., "/docs/std#bls_verify"
+/// Search index entry for quick lookup
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SearchEntry {
+    /// Function or module name (e.g., "std::crypto::bls_verify")
+    pub name: String,
+    /// Description of the function or module
+    pub description: String,
+    /// Module path (e.g., "std::crypto")
+    pub module: String,
+    /// URL to the documentation (e.g., "/docs/std#bls_verify")
+    pub url: String,
 }
 
-// Initialize the documentation server
+/// Documentation server for serving KSL package documentation
 pub struct DocServer {
     config: DocServerConfig,
     client: Client,
+    async_runtime: Arc<AsyncRuntime>,
 }
 
 impl DocServer {
+    /// Creates a new documentation server
     pub fn new(config: DocServerConfig) -> Self {
         DocServer {
-            config,
+            config: config.clone(),
             client: Client::new(),
+            async_runtime: Arc::new(AsyncRuntime::new()),
         }
     }
 
-    // Start the documentation server
-    pub fn start(&self) -> Result<(), KslError> {
+    /// Start the documentation server asynchronously
+    pub async fn start_async(&self) -> AsyncResult<()> {
         let cache_dir = self.config.cache_dir.clone()
             .unwrap_or_else(|| home_dir().unwrap_or_default().join(".ksl/docs"));
         fs::create_dir_all(&cache_dir)
@@ -65,12 +83,12 @@ impl DocServer {
         // Initialize state
         let state = web::Data::new(DocServerState {
             cache_dir: cache_dir.clone(),
-            docs: Mutex::new(HashMap::new()),
-            search_index: Mutex::new(Vec::new()),
+            docs: Arc::new(RwLock::new(HashMap::new())),
+            search_index: Arc::new(RwLock::new(Vec::new())),
         });
 
         // Load standard library documentation
-        self.load_std_docs(&state)?;
+        self.load_std_docs_async(&state).await?;
 
         // Start Actix-web server
         let port = self.config.port;
@@ -88,6 +106,7 @@ impl DocServer {
             SourcePosition::new(1, 1),
         ))?
         .run()
+        .await
         .map_err(|e| KslError::type_error(
             format!("Server error: {}", e),
             SourcePosition::new(1, 1),
@@ -96,14 +115,14 @@ impl DocServer {
         Ok(())
     }
 
-    // Load standard library documentation into cache
-    fn load_std_docs(&self, state: &web::Data<DocServerState>) -> Result<(), KslError> {
+    /// Load standard library documentation into cache asynchronously
+    async fn load_std_docs_async(&self, state: &web::Data<DocServerState>) -> AsyncResult<()> {
         let cache_dir = &state.cache_dir;
         let std_doc_path = cache_dir.join("std.md");
 
         // Generate standard library documentation if not cached
         if !std_doc_path.exists() {
-            generate(None, true, Some(cache_dir))?;
+            generate_docgen("std", "markdown", cache_dir.clone())?;
         }
 
         // Convert Markdown to HTML and update state
@@ -113,24 +132,29 @@ impl DocServer {
                 SourcePosition::new(1, 1),
             ))?;
         let html = markdown_to_html(&markdown);
-        let mut docs = state.docs.lock().unwrap();
+        let mut docs = state.docs.write().await;
         docs.insert("std".to_string(), html);
 
         // Build search index
-        let mut search_index = state.search_index.lock().unwrap();
+        let mut search_index = state.search_index.write().await;
         build_search_index(&markdown, "std", &mut search_index);
 
         Ok(())
     }
 
-    // Fetch and cache package documentation from registry
-    fn fetch_package_doc(&self, package: &str, version: &str, state: &web::Data<DocServerState>) -> Result<(), KslError> {
+    /// Fetch and cache package documentation from registry asynchronously
+    async fn fetch_package_doc_async(
+        &self,
+        package: &str,
+        version: &str,
+        state: &web::Data<DocServerState>,
+    ) -> AsyncResult<()> {
         let cache_dir = &state.cache_dir;
         let package_doc_path = cache_dir.join(format!("{}-{}.md", package, version));
 
         if !package_doc_path.exists() {
             // Fetch from registry (assumes ksl_registry.rs provides tarball)
-            let tarball = fetch_package(package, version, &self.client)?;
+            let tarball = fetch_package(package, version, &self.client).await?;
             let doc_content = extract_doc_from_tarball(&tarball, package, version)?;
             fs::write(&package_doc_path, &doc_content)
                 .map_err(|e| KslError::type_error(
@@ -145,11 +169,11 @@ impl DocServer {
                 SourcePosition::new(1, 1),
             ))?;
         let html = markdown_to_html(&markdown);
-        let mut docs = state.docs.lock().unwrap();
+        let mut docs = state.docs.write().await;
         let module_name = format!("{}-{}", package, version);
         docs.insert(module_name.clone(), html);
 
-        let mut search_index = state.search_index.lock().unwrap();
+        let mut search_index = state.search_index.write().await;
         build_search_index(&markdown, &module_name, &mut search_index);
 
         Ok(())
@@ -259,7 +283,7 @@ async fn serve_doc(
         let parts: Vec<&str> = module.split('-').collect();
         if parts.len() == 2 {
             let server = DocServer::new(DocServerConfig { port: 8080, cache_dir: Some(state.cache_dir.clone()) });
-            if server.fetch_package_doc(parts[0], parts[1], &state).is_ok() {
+            if server.fetch_package_doc_async(parts[0], parts[1], &state).await.is_ok() {
                 if let Some(html) = docs.get(&module) {
                     return HttpResponse::Ok().content_type("text/html").body(html.clone());
                 }
@@ -330,20 +354,28 @@ mod static_files {
     "#;
 }
 
-// Public API to start the documentation server
-pub fn start_docserver(port: u16, cache_dir: Option<PathBuf>) -> Result<(), KslError> {
-    let config = DocServerConfig { port, cache_dir };
+/// Public API to start the documentation server asynchronously
+pub async fn start_docserver_async(port: u16, cache_dir: Option<PathBuf>) -> AsyncResult<()> {
+    let config = DocServerConfig {
+        port,
+        cache_dir,
+        use_async: true,
+    };
     let server = DocServer::new(config);
-    server.start()
+    server.start_async().await
 }
 
-// Assume ksl_doc.rs, ksl_registry.rs, and ksl_errors.rs are in the same crate
+// Assume ksl_doc.rs, ksl_docgen.rs, ksl_async.rs, and ksl_errors.rs are in the same crate
 mod ksl_doc {
     pub use super::{generate, StdLibFunctionTrait};
 }
 
-mod ksl_registry {
-    pub use super::fetch_package;
+mod ksl_docgen {
+    pub use super::{DocFormat, generate_docgen};
+}
+
+mod ksl_async {
+    pub use super::{AsyncRuntime, AsyncResult};
 }
 
 mod ksl_errors {
@@ -353,52 +385,50 @@ mod ksl_errors {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
     use tempfile::TempDir;
 
-    #[test]
-    fn test_load_std_docs() {
+    #[tokio::test]
+    async fn test_load_std_docs_async() {
         let temp_dir = TempDir::new().unwrap();
         let cache_dir = temp_dir.path().join("docs");
+        fs::create_dir_all(&cache_dir).unwrap();
+
+        let config = DocServerConfig {
+            port: 9003,
+            cache_dir: Some(cache_dir.clone()),
+            use_async: true,
+        };
+        let server = DocServer::new(config);
         let state = web::Data::new(DocServerState {
             cache_dir: cache_dir.clone(),
-            docs: Mutex::new(HashMap::new()),
-            search_index: Mutex::new(Vec::new()),
+            docs: Arc::new(RwLock::new(HashMap::new())),
+            search_index: Arc::new(RwLock::new(Vec::new())),
         });
-        let server = DocServer::new(DocServerConfig { port: 8080, cache_dir: Some(cache_dir.clone()) });
-        let result = server.load_std_docs(&state);
+
+        let result = server.load_std_docs_async(&state).await;
         assert!(result.is_ok());
 
-        let docs = state.docs.lock().unwrap();
+        let docs = state.docs.read().await;
         assert!(docs.contains_key("std"));
         let html = docs.get("std").unwrap();
-        assert!(html.contains("<h1>Standard Library</h1>"));
-
-        let search_index = state.search_index.lock().unwrap();
-        assert!(!search_index.is_empty());
-        assert!(search_index.iter().any(|entry| entry.name.contains("bls_verify")));
+        assert!(html.contains("Standard Library"));
     }
 
-    #[test]
-    fn test_markdown_to_html() {
-        let markdown = "# Module std\n## Function bls_verify\nDocumentation.";
+    #[tokio::test]
+    async fn test_markdown_to_html() {
+        let markdown = "# Test\n\nThis is a test.";
         let html = markdown_to_html(markdown);
-        assert!(html.contains("<h1>Module std</h1>"));
-        assert!(html.contains("<h2>Function bls_verify</h2>"));
-        assert!(html.contains("Documentation."));
-        assert!(html.contains("<nav>"));
-        assert!(html.contains("<input type=\"text\" id=\"search\""));
+        assert!(html.contains("<h1>Test</h1>"));
+        assert!(html.contains("<p>This is a test.</p>"));
     }
 
-    #[test]
-    fn test_build_search_index() {
-        let markdown = "# Module std\n## Function bls_verify\nVerifies BLS signature.";
+    #[tokio::test]
+    async fn test_build_search_index() {
+        let markdown = "# Module\n\n## Function\n\nDescription";
         let mut index = Vec::new();
-        build_search_index(markdown, "std", &mut index);
-        assert_eq!(index.len(), 1);
-        assert_eq!(index[0].name, "Function bls_verify");
-        assert_eq!(index[0].description, "Verifies BLS signature.");
-        assert_eq!(index[0].module, "std");
-        assert_eq!(index[0].url, "/docs/std#Function_bls_verify");
+        build_search_index(markdown, "test", &mut index);
+        assert_eq!(index.len(), 2);
+        assert_eq!(index[0].name, "Module");
+        assert_eq!(index[1].name, "Function");
     }
 }

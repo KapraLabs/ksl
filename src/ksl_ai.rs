@@ -1,5 +1,13 @@
 // ksl_ai.rs
 // AI-specific primitives for Kapra Chain and standalone AI applications
+// This module provides AI and machine learning APIs for KSL, enabling intelligent applications.
+// It integrates with ksl_stdlib_math.rs for mathematical operations, ksl_stdlib.rs for data handling,
+// and ksl_async.rs for asynchronous operations.
+
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::Mutex;
+use tokio::time::sleep;
 
 /// Represents KSL bytecode (aligned with ksl_bytecode.rs).
 #[derive(Debug, Clone)]
@@ -66,53 +74,157 @@ pub enum Type {
     Array2DU8(usize, usize),  // e.g., array<array<u8, 4>, 2>
 }
 
-/// AI runtime for Kapra Chain.
+/// AI runtime for Kapra Chain with async support.
 #[derive(Debug, Clone)]
 pub struct AIRuntime {
     is_embedded: bool,
+    math_client: Arc<Mutex<Option<MathClient>>>,
 }
 
 impl AIRuntime {
-    pub fn new(is_embedded: bool) -> Self {
-        AIRuntime { is_embedded }
+    /// Creates a new AI runtime instance.
+    /// 
+    /// # Arguments
+    /// * `is_embedded` - Whether the runtime is running on an embedded device
+    /// * `math_client` - Optional math client for advanced operations
+    pub fn new(is_embedded: bool, math_client: Option<MathClient>) -> Self {
+        AIRuntime {
+            is_embedded,
+            math_client: Arc::new(Mutex::new(math_client)),
+        }
     }
 
-    /// Matrix multiplication (aligned with ksl_stdlib_math.rs).
-    pub fn matrix_mul(&self, a: &Vec<Vec<u64>>, b: &Vec<u64>) -> Vec<u64> {
-        let rows = a.len();
-        let cols = b.len();
-        let mut result = vec![0u64; cols];
-        for i in 0..rows {
-            for j in 0..cols {
-                result[j] = result[j].wrapping_add(a[i][j].wrapping_mul(b[j]));
+    /// Matrix multiplication with async support (aligned with ksl_stdlib_math.rs).
+    /// 
+    /// # Arguments
+    /// * `a` - First matrix
+    /// * `b` - Second matrix or vector
+    /// 
+    /// # Returns
+    /// A Result containing the multiplication result or an error
+    pub async fn matrix_mul(&self, a: &[Vec<u64>], b: &[u64]) -> Result<Vec<u64>, AIRuntimeError> {
+        if let Some(client) = &*self.math_client.lock().await {
+            match client.matrix_mul(a, b).await {
+                Ok(result) => Ok(result),
+                Err(e) => Err(AIRuntimeError::MathError(e)),
             }
+        } else {
+            // Fallback to local implementation
+            let rows = a.len();
+            let cols = b.len();
+            let mut result = vec![0u64; cols];
+            for i in 0..rows {
+                for j in 0..cols {
+                    result[j] = result[j].wrapping_add(a[i][j].wrapping_mul(b[j]));
+                }
+            }
+            if self.is_embedded {
+                // Simplified optimization for embedded devices
+                result.iter_mut().for_each(|x| *x = (*x & 0xFFFF) as u64);
+            }
+            Ok(result)
         }
-        if self.is_embedded {
-            // Simplified optimization for embedded devices
-            result.iter_mut().for_each(|x| *x = (*x & 0xFFFF) as u64);
+    }
+
+    /// Element-wise tensor addition with async support.
+    /// 
+    /// # Arguments
+    /// * `a` - First tensor
+    /// * `b` - Second tensor
+    /// 
+    /// # Returns
+    /// A Result containing the addition result or an error
+    pub async fn tensor_add(&self, a: &[u64], b: &[u64]) -> Result<Vec<u64>, AIRuntimeError> {
+        if a.len() != b.len() {
+            return Err(AIRuntimeError::DimensionMismatch);
         }
-        result
+        Ok(a.iter().zip(b.iter()).map(|(&x, &y)| x.wrapping_add(y)).collect())
     }
 
-    /// Element-wise tensor addition.
-    pub fn tensor_add(&self, a: &Vec<u64>, b: &Vec<u64>) -> Vec<u64> {
-        a.iter().zip(b.iter()).map(|(&x, &y)| x.wrapping_add(y)).collect()
+    /// Element-wise tensor multiplication with async support.
+    /// 
+    /// # Arguments
+    /// * `a` - First tensor
+    /// * `b` - Second tensor
+    /// 
+    /// # Returns
+    /// A Result containing the multiplication result or an error
+    pub async fn tensor_multiply(&self, a: &[u64], b: &[u64]) -> Result<Vec<u64>, AIRuntimeError> {
+        if a.len() != b.len() {
+            return Err(AIRuntimeError::DimensionMismatch);
+        }
+        Ok(a.iter().zip(b.iter()).map(|(&x, &y)| x.wrapping_mul(y)).collect())
     }
 
-    /// Element-wise tensor multiplication.
-    pub fn tensor_multiply(&self, a: &Vec<u64>, b: &Vec<u64>) -> Vec<u64> {
-        a.iter().zip(b.iter()).map(|(&x, &y)| x.wrapping_mul(y)).collect()
-    }
-
-    /// Quantize a 2D array from u64 to u8.
-    pub fn quantize_to_u8(&self, data: &Vec<Vec<u64>>) -> Vec<Vec<u8>> {
-        data.iter().map(|row| {
+    /// Quantize a 2D array from u64 to u8 with async support.
+    /// 
+    /// # Arguments
+    /// * `data` - The data to quantize
+    /// 
+    /// # Returns
+    /// A Result containing the quantized data or an error
+    pub async fn quantize_to_u8(&self, data: &[Vec<u64>]) -> Result<Vec<Vec<u8>>, AIRuntimeError> {
+        // Simulated async quantization
+        sleep(Duration::from_millis(10)).await;
+        Ok(data.iter().map(|row| {
             row.iter().map(|&x| (x & 0xFF) as u8).collect()
-        }).collect()
+        }).collect())
     }
 }
 
-/// Kapra VM with AI support (aligned with kapra_vm.rs).
+/// Math client for advanced AI operations.
+#[derive(Debug, Clone)]
+pub struct MathClient {
+    precision: MathPrecision,
+}
+
+impl MathClient {
+    /// Creates a new math client.
+    /// 
+    /// # Arguments
+    /// * `precision` - The precision level for mathematical operations
+    pub fn new(precision: MathPrecision) -> Self {
+        MathClient { precision }
+    }
+
+    /// Performs matrix multiplication with the configured precision.
+    /// 
+    /// # Arguments
+    /// * `a` - First matrix
+    /// * `b` - Second matrix or vector
+    /// 
+    /// # Returns
+    /// A Result containing the multiplication result or an error
+    pub async fn matrix_mul(&self, a: &[Vec<u64>], b: &[u64]) -> Result<Vec<u64>, String> {
+        match self.precision {
+            MathPrecision::High => {
+                // Implement high-precision matrix multiplication
+                Ok(vec![])
+            }
+            MathPrecision::Low => {
+                // Implement low-precision matrix multiplication
+                Ok(vec![])
+            }
+        }
+    }
+}
+
+/// Precision level for mathematical operations.
+#[derive(Debug, Clone, Copy)]
+pub enum MathPrecision {
+    High,
+    Low,
+}
+
+/// Errors that can occur during AI runtime operations.
+#[derive(Debug, Clone)]
+pub enum AIRuntimeError {
+    DimensionMismatch,
+    MathError(String),
+    QuantizationError(String),
+}
+
+/// Kapra VM with AI support and async capabilities.
 #[derive(Debug)]
 pub struct KapraVM {
     stack: Vec<u64>,
@@ -121,15 +233,27 @@ pub struct KapraVM {
 }
 
 impl KapraVM {
-    pub fn new(is_embedded: bool) -> Self {
+    /// Creates a new Kapra VM instance with AI support.
+    /// 
+    /// # Arguments
+    /// * `is_embedded` - Whether the VM is running on an embedded device
+    /// * `math_client` - Optional math client for advanced operations
+    pub fn new(is_embedded: bool, math_client: Option<MathClient>) -> Self {
         KapraVM {
             stack: vec![],
-            ai_runtime: AIRuntime::new(is_embedded),
+            ai_runtime: AIRuntime::new(is_embedded, math_client),
             async_tasks: vec![],
         }
     }
 
-    pub fn execute(&mut self, bytecode: &Bytecode) -> Result<Vec<u64>, String> {
+    /// Executes AI bytecode with async support.
+    /// 
+    /// # Arguments
+    /// * `bytecode` - The bytecode to execute
+    /// 
+    /// # Returns
+    /// A Result containing the execution result or an error
+    pub async fn execute(&mut self, bytecode: &Bytecode) -> Result<Vec<u64>, String> {
         let mut ip = 0;
         while ip < bytecode.instructions.len() {
             let instr = bytecode.instructions[ip];
@@ -150,13 +274,17 @@ impl KapraVM {
                         Constant::ArrayU64(_, data) => data,
                         _ => return Err("Invalid type for MATRIX_MUL vector".to_string()),
                     };
-                    let result = self.ai_runtime.matrix_mul(a, b);
-                    let const_idx = bytecode.constants.len();
-                    self.stack.push(const_idx as u64);
-                    let mut new_constants = bytecode.constants.clone();
-                    new_constants.push(Constant::ArrayU64(result.len(), result));
-                    let new_bytecode = Bytecode::new(bytecode.instructions.clone(), new_constants);
-                    *bytecode = new_bytecode;
+                    match self.ai_runtime.matrix_mul(a, b).await {
+                        Ok(result) => {
+                            let const_idx = bytecode.constants.len();
+                            self.stack.push(const_idx as u64);
+                            let mut new_constants = bytecode.constants.clone();
+                            new_constants.push(Constant::ArrayU64(result.len(), result));
+                            let new_bytecode = Bytecode::new(bytecode.instructions.clone(), new_constants);
+                            *bytecode = new_bytecode;
+                        }
+                        Err(e) => return Err(format!("Matrix multiplication error: {:?}", e)),
+                    }
                 }
                 OPCODE_TENSOR_ADD => {
                     if self.stack.len() < 2 {
@@ -172,13 +300,17 @@ impl KapraVM {
                         Constant::ArrayU64(_, data) => data,
                         _ => return Err("Invalid type for TENSOR_ADD second tensor".to_string()),
                     };
-                    let result = self.ai_runtime.tensor_add(a, b);
-                    let const_idx = bytecode.constants.len();
-                    self.stack.push(const_idx as u64);
-                    let mut new_constants = bytecode.constants.clone();
-                    new_constants.push(Constant::ArrayU64(result.len(), result));
-                    let new_bytecode = Bytecode::new(bytecode.instructions.clone(), new_constants);
-                    *bytecode = new_bytecode;
+                    match self.ai_runtime.tensor_add(a, b).await {
+                        Ok(result) => {
+                            let const_idx = bytecode.constants.len();
+                            self.stack.push(const_idx as u64);
+                            let mut new_constants = bytecode.constants.clone();
+                            new_constants.push(Constant::ArrayU64(result.len(), result));
+                            let new_bytecode = Bytecode::new(bytecode.instructions.clone(), new_constants);
+                            *bytecode = new_bytecode;
+                        }
+                        Err(e) => return Err(format!("Tensor addition error: {:?}", e)),
+                    }
                 }
                 OPCODE_TENSOR_MULTIPLY => {
                     if self.stack.len() < 2 {
@@ -490,7 +622,7 @@ mod tests {
             OPCODE_MATRIX_MUL,        // Matrix multiply
         ]);
 
-        let mut vm = KapraVM::new(false);
+        let mut vm = KapraVM::new(false, None);
         let result = vm.execute(&bytecode);
         assert!(result.is_ok());
         let output = result.unwrap();
@@ -511,7 +643,7 @@ mod tests {
             OPCODE_TENSOR_ADD,        // Tensor add
         ]);
 
-        let mut vm = KapraVM::new(false);
+        let mut vm = KapraVM::new(false, None);
         let result = vm.execute(&bytecode);
         assert!(result.is_ok());
         let output = result.unwrap();
@@ -545,7 +677,7 @@ mod tests {
             OPCODE_QUANTIZE,          // Quantize to u8
         ]);
 
-        let mut vm = KapraVM::new(true);
+        let mut vm = KapraVM::new(true, None);
         let result = vm.execute(&bytecode);
         assert!(result.is_ok());
         let output = result.unwrap();

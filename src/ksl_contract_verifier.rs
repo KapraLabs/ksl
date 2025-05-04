@@ -1,47 +1,101 @@
 // ksl_contract_verifier.rs
 // Provides formal verification for blockchain smart contracts, with Kapra Chain-specific checks for validators
 
+//! Smart contract verification for KSL, ensuring secure blockchain execution.
+//! 
+//! This module provides formal verification for blockchain smart contracts, with support for:
+//! - Arithmetic overflow detection
+//! - State consistency verification
+//! - Gas usage analysis
+//! - Kapra Chain validator checks
+//! - Async contract verification
+//! - Security analysis
+//! 
+//! # Verification Rules
+//! 
+//! ```ksl
+//! // Example contract with verification annotations
+//! #[verify(overflow, state, gas)]
+//! contract MyContract {
+//!     // State variables
+//!     let owner: address;
+//!     let balance: u64;
+//! 
+//!     // Constructor with verification
+//!     #[verify(init)]
+//!     init(initial_owner: address) {
+//!         owner = initial_owner;
+//!         balance = 0;
+//!     }
+//! 
+//!     // Transaction function with verification
+//!     #[verify(transaction)]
+//!     #[transaction]
+//!     fn transfer(to: address, amount: u64) {
+//!         require(balance >= amount, "Insufficient balance");
+//!         balance -= amount;
+//!     }
+//! 
+//!     // Async function with verification
+//!     #[verify(async)]
+//!     #[async]
+//!     fn fetch_price(): u64 {
+//!         let price = await oracle.get_price();
+//!         return price;
+//!     }
+//! }
+//! ```
+
 use crate::ksl_parser::{parse, AstNode, ExprKind, ParseError};
 use crate::ksl_verifier::verify;
 use crate::ksl_security::{analyze_security, SecurityIssue};
+use crate::ksl_contract::{ContractState, ContractEvent};
+use crate::ksl_async::{AsyncRuntime, AsyncResult};
 use crate::ksl_errors::{KslError, SourcePosition};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::PathBuf;
 use std::collections::HashSet;
+use async_trait::async_trait;
+use tokio::fs as tokio_fs;
 
-// Verification configuration
+/// Verification configuration
 #[derive(Debug)]
 pub struct VerificationConfig {
     input_file: PathBuf,
     property: String,
     report_path: Option<PathBuf>,
+    async_enabled: bool,
+    contract_state: Option<ContractState>,
 }
 
-// Verification result
+/// Verification result
 #[derive(Debug)]
-struct VerificationResult {
+pub struct VerificationResult {
     property: String,
     passed: bool,
     message: String,
     position: SourcePosition,
 }
 
-// Contract verifier
+/// Contract verifier
 pub struct ContractVerifier {
     config: VerificationConfig,
     results: Vec<VerificationResult>,
+    runtime: AsyncRuntime,
 }
 
 impl ContractVerifier {
+    /// Creates a new ContractVerifier instance
     pub fn new(config: VerificationConfig) -> Self {
         ContractVerifier {
             config,
             results: Vec::new(),
+            runtime: AsyncRuntime::new(),
         }
     }
 
-    // Verify the smart contract
+    /// Verifies the smart contract synchronously
     pub fn verify_contract(&mut self) -> Result<Vec<VerificationResult>, KslError> {
         let pos = SourcePosition::new(1, 1);
         // Read and parse source
@@ -77,6 +131,7 @@ impl ContractVerifier {
             "state" => self.check_state_consistency(&ast)?,
             "gas" => self.check_gas_usage(&ast)?,
             "kapra-validator" => self.check_kapra_validator(&ast)?,
+            "async" => self.check_async_contract(&ast)?,
             _ => return Err(KslError::type_error(
                 format!("Unsupported property: {}", self.config.property),
                 pos,
@@ -103,7 +158,67 @@ impl ContractVerifier {
         Ok(self.results.clone())
     }
 
-    // Check for arithmetic overflow
+    /// Verifies the smart contract asynchronously
+    pub async fn verify_contract_async(&mut self) -> AsyncResult<Vec<VerificationResult>> {
+        let pos = SourcePosition::new(1, 1);
+        // Read and parse source asynchronously
+        let source = tokio_fs::read_to_string(&self.config.input_file)
+            .await
+            .map_err(|e| KslError::type_error(
+                format!("Failed to read file {}: {}", self.config.input_file.display(), e),
+                pos,
+            ))?;
+        let ast = parse(&source)
+            .map_err(|e| KslError::type_error(
+                format!("Parse error at position {}: {}", e.position, e.message),
+                pos,
+            ))?;
+
+        // Run security analysis asynchronously
+        let security_issues = analyze_security(&self.config.input_file, None)?;
+        for issue in security_issues {
+            self.results.push(VerificationResult {
+                property: issue.kind,
+                passed: false,
+                message: issue.message,
+                position: issue.position,
+            });
+        }
+
+        // Run basic verification
+        verify(&ast)
+            .map_err(|e| KslError::type_error(format!("Basic verification failed: {}", e), pos))?;
+
+        // Verify specific property asynchronously
+        match self.config.property.as_str() {
+            "overflow" => self.check_overflow(&ast)?,
+            "state" => self.check_state_consistency(&ast)?,
+            "gas" => self.check_gas_usage(&ast)?,
+            "kapra-validator" => self.check_kapra_validator(&ast)?,
+            "async" => self.check_async_contract(&ast)?,
+            _ => return Err(KslError::type_error(
+                format!("Unsupported property: {}", self.config.property),
+                pos,
+            )),
+        }
+
+        // Generate report asynchronously
+        if let Some(report_path) = &self.config.report_path {
+            let report_content = self.generate_report();
+            tokio_fs::write(report_path, report_content)
+                .await
+                .map_err(|e| KslError::type_error(
+                    format!("Failed to write report file {}: {}", report_path.display(), e),
+                    pos,
+                ))?;
+        } else {
+            println!("{}", self.generate_report());
+        }
+
+        Ok(self.results.clone())
+    }
+
+    /// Checks for arithmetic overflow in the contract
     fn check_overflow(&mut self, ast: &[AstNode]) -> Result<(), KslError> {
         let pos = SourcePosition::new(1, 1);
         for node in ast {
@@ -163,7 +278,7 @@ impl ContractVerifier {
         Ok(())
     }
 
-    // Check state consistency
+    /// Checks state consistency in the contract
     fn check_state_consistency(&mut self, ast: &[AstNode]) -> Result<(), KslError> {
         let pos = SourcePosition::new(1, 1);
         let mut state_vars = HashSet::new();
@@ -231,38 +346,7 @@ impl ContractVerifier {
         Ok(())
     }
 
-    // Check branch modifications
-    fn check_branch_modifications(&self, nodes: &[AstNode], state_vars: &HashSet<String>, modifies: &mut bool) -> Result<(), KslError> {
-        for node in nodes {
-            match node {
-                AstNode::Expr { kind: ExprKind::Assignment { left, .. } } => {
-                    if let ExprKind::Ident(name) = &left.kind {
-                        if state_vars.contains(name) {
-                            *modifies = true;
-                        }
-                    }
-                }
-                AstNode::If { then_branch, else_branch, .. } => {
-                    self.check_branch_modifications(then_branch, state_vars, modifies)?;
-                    if let Some(else_branch) = else_branch {
-                        self.check_branch_modifications(else_branch, state_vars, modifies)?;
-                    }
-                }
-                AstNode::Match { arms, .. } => {
-                    for arm in arms {
-                        self.check_branch_modifications(&arm.body, state_vars, modifies)?;
-                    }
-                }
-                AstNode::Validator { body, .. } => {
-                    self.check_branch_modifications(body, state_vars, modifies)?;
-                }
-                _ => {}
-            }
-        }
-        Ok(())
-    }
-
-    // Check gas usage with Kapra Chain-specific costs
+    /// Checks gas usage in the contract
     fn check_gas_usage(&mut self, ast: &[AstNode]) -> Result<(), KslError> {
         let pos = SourcePosition::new(1, 1);
         let mut gas_usage = 0;
@@ -349,7 +433,7 @@ impl ContractVerifier {
         Ok(())
     }
 
-    // Check Kapra Chain validator requirements
+    /// Checks Kapra validator requirements
     fn check_kapra_validator(&mut self, ast: &[AstNode]) -> Result<(), KslError> {
         let pos = SourcePosition::new(1, 1);
         let mut found_validator = false;
@@ -474,7 +558,75 @@ impl ContractVerifier {
         Ok(())
     }
 
-    // Check for a specific function call in the AST
+    /// Checks async contract requirements
+    fn check_async_contract(&mut self, ast: &[AstNode]) -> Result<(), KslError> {
+        let pos = SourcePosition::new(1, 1);
+        let mut has_async_functions = false;
+        let mut has_await_calls = false;
+
+        for node in ast {
+            match node {
+                AstNode::FnDecl { attributes, body, .. } => {
+                    if attributes.iter().any(|attr| attr == "async") {
+                        has_async_functions = true;
+                        // Check for await calls in async functions
+                        if self.check_for_await(body) {
+                            has_await_calls = true;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if has_async_functions && !has_await_calls {
+            self.results.push(VerificationResult {
+                property: "Async".to_string(),
+                passed: false,
+                message: "Async function without await calls".to_string(),
+                position: pos,
+            });
+        } else if has_async_functions {
+            self.results.push(VerificationResult {
+                property: "Async".to_string(),
+                passed: true,
+                message: "Async contract verified".to_string(),
+                position: pos,
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Checks for await calls in a function body
+    fn check_for_await(&self, nodes: &[AstNode]) -> bool {
+        for node in nodes {
+            match node {
+                AstNode::Expr { kind: ExprKind::Await { .. } } => return true,
+                AstNode::If { then_branch, else_branch, .. } => {
+                    if self.check_for_await(then_branch) {
+                        return true;
+                    }
+                    if let Some(else_branch) = else_branch {
+                        if self.check_for_await(else_branch) {
+                            return true;
+                        }
+                    }
+                }
+                AstNode::Match { arms, .. } => {
+                    for arm in arms {
+                        if self.check_for_await(&arm.body) {
+                            return true;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// Checks for a specific function call in the AST
     fn check_for_call(&self, nodes: &[AstNode], func_name: &str) -> bool {
         for node in nodes {
             match node {
@@ -509,7 +661,7 @@ impl ContractVerifier {
         false
     }
 
-    // Validate sha3 usage in Kapra Chain validators
+    /// Validate sha3 usage in Kapra Chain validators
     fn check_sha3_usage(&mut self, nodes: &[AstNode]) -> Result<(), KslError> {
         let pos = SourcePosition::new(1, 1);
         for node in nodes {
@@ -553,7 +705,7 @@ impl ContractVerifier {
         Ok(())
     }
 
-    // Generate verification report
+    /// Generates a verification report
     fn generate_report(&self) -> String {
         let mut report = String::new();
         report.push_str("KSL Contract Verification Report\n=================\n\n");
@@ -576,18 +728,45 @@ impl ContractVerifier {
     }
 }
 
-// Public API to verify a smart contract
-pub fn contract_verify(input_file: &PathBuf, property: &str, report_path: Option<PathBuf>) -> Result<Vec<VerificationResult>, KslError> {
+#[async_trait]
+pub trait AsyncContractVerifier {
+    async fn verify_contract_async(&mut self) -> AsyncResult<Vec<VerificationResult>>;
+}
+
+#[async_trait]
+impl AsyncContractVerifier for ContractVerifier {
+    async fn verify_contract_async(&mut self) -> AsyncResult<Vec<VerificationResult>> {
+        self.verify_contract_async().await
+    }
+}
+
+// Public API to verify a contract
+pub fn contract_verify(input_file: &PathBuf, property: &str, report_path: Option<PathBuf>, async_enabled: bool, contract_state: Option<ContractState>) -> Result<Vec<VerificationResult>, KslError> {
     let config = VerificationConfig {
         input_file: input_file.clone(),
         property: property.to_string(),
         report_path,
+        async_enabled,
+        contract_state,
     };
     let mut verifier = ContractVerifier::new(config);
     verifier.verify_contract()
 }
 
-// Assume ksl_parser.rs, ksl_verifier.rs, ksl_security.rs, and ksl_errors.rs are in the same crate
+// Public API to verify a contract asynchronously
+pub async fn contract_verify_async(input_file: &PathBuf, property: &str, report_path: Option<PathBuf>, contract_state: Option<ContractState>) -> AsyncResult<Vec<VerificationResult>> {
+    let config = VerificationConfig {
+        input_file: input_file.clone(),
+        property: property.to_string(),
+        report_path,
+        async_enabled: true,
+        contract_state,
+    };
+    let mut verifier = ContractVerifier::new(config);
+    verifier.verify_contract_async().await
+}
+
+// Assume ksl_parser.rs, ksl_verifier.rs, ksl_security.rs, ksl_contract.rs, ksl_async.rs, and ksl_errors.rs are in the same crate
 mod ksl_parser {
     pub use super::{parse, AstNode, ExprKind, ParseError};
 }
@@ -598,6 +777,14 @@ mod ksl_verifier {
 
 mod ksl_security {
     pub use super::{analyze_security, SecurityIssue};
+}
+
+mod ksl_contract {
+    pub use super::{ContractState, ContractEvent};
+}
+
+mod ksl_async {
+    pub use super::{AsyncRuntime, AsyncResult};
 }
 
 mod ksl_errors {
@@ -621,7 +808,7 @@ mod tests {
         ).unwrap();
 
         let report_path = temp_dir.path().join("report.txt");
-        let results = contract_verify(&input_file, "overflow", Some(report_path.clone())).unwrap();
+        let results = contract_verify(&input_file, "overflow", Some(report_path.clone()), false, None).unwrap();
         assert!(results.iter().any(|r| r.property == "Overflow" && !r.passed));
         assert!(results.iter().any(|r| r.message.contains("Potential arithmetic overflow")));
 
@@ -641,7 +828,7 @@ mod tests {
         ).unwrap();
 
         let report_path = temp_dir.path().join("report.txt");
-        let results = contract_verify(&input_file, "state", Some(report_path.clone())).unwrap();
+        let results = contract_verify(&input_file, "state", Some(report_path.clone()), false, None).unwrap();
         assert!(results.iter().any(|r| r.property == "StateConsistency" && !r.passed));
         assert!(results.iter().any(|r| r.message.contains("Inconsistent state modification")));
 
@@ -666,7 +853,7 @@ mod tests {
         ).unwrap();
 
         let report_path = temp_dir.path().join("report.txt");
-        let results = contract_verify(&input_file, "gas", Some(report_path.clone())).unwrap();
+        let results = contract_verify(&input_file, "gas", Some(report_path.clone()), false, None).unwrap();
         assert!(results.iter().any(|r| r.property == "GasUsage" && !r.passed));
         assert!(results.iter().any(|r| r.message.contains("Gas usage")));
 
@@ -692,7 +879,7 @@ mod tests {
         ).unwrap();
 
         let report_path = temp_dir.path().join("report.txt");
-        let results = contract_verify(&input_file, "kapra-validator", Some(report_path.clone())).unwrap();
+        let results = contract_verify(&input_file, "kapra-validator", Some(report_path.clone()), false, None).unwrap();
         assert!(results.iter().any(|r| r.property == "KapraValidator" && r.passed));
         assert!(results.iter().any(|r| r.message.contains("Kapra Chain validator requirements verified")));
 
@@ -714,7 +901,7 @@ mod tests {
         ).unwrap();
 
         let report_path = temp_dir.path().join("report.txt");
-        let results = contract_verify(&input_file, "kapra-validator", Some(report_path.clone())).unwrap();
+        let results = contract_verify(&input_file, "kapra-validator", Some(report_path.clone()), false, None).unwrap();
         assert!(results.iter().any(|r| r.property == "KapraValidator" && !r.passed));
         assert!(results.iter().any(|r| r.message.contains("must call 'verify_dilithium'")));
         assert!(results.iter().any(|r| r.message.contains("must call 'check_kaprekar'")));
@@ -741,13 +928,29 @@ mod tests {
         ).unwrap();
 
         let report_path = temp_dir.path().join("report.txt");
-        let results = contract_verify(&input_file, "kapra-validator", Some(report_path.clone())).unwrap();
+        let results = contract_verify(&input_file, "kapra-validator", Some(report_path.clone()), false, None).unwrap();
         assert!(results.iter().any(|r| r.property == "KapraValidator" && !r.passed));
         assert!(results.iter().any(|r| r.message.contains("must have exactly 3 parameters")));
 
         let content = fs::read_to_string(&report_path).unwrap();
         assert!(content.contains("KapraValidator"));
         assert!(content.contains("Failed"));
+    }
+
+    #[tokio::test]
+    async fn test_verify_async_contract() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut temp_file = NamedTempFile::new_in(&temp_dir).unwrap();
+        writeln!(
+            temp_file,
+            "#[verify(async)]\n#[async]\nfn fetch_price(): u64 {{\n    let price = await oracle.get_price();\n    return price;\n}}"
+        ).unwrap();
+        let output_dir = temp_dir.path().join("output");
+
+        let result = contract_verify_async(&temp_file.path().to_path_buf(), "async", Some(output_dir), None).await;
+        assert!(result.is_ok());
+        let results = result.unwrap();
+        assert!(results.iter().any(|r| r.property == "Async" && r.passed));
     }
 }
 

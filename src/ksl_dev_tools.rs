@@ -1,6 +1,13 @@
 // ksl_dev_tools.rs
 // Developer tools for debugging, profiling, and visualization in KSL
 
+use crate::ksl_debug::{Debugger, Breakpoint, Watchpoint, DebugState};
+use crate::ksl_async::{AsyncContext, AsyncCommand};
+use crate::ksl_cli::{CliCommand, CliInterface};
+use crate::ksl_errors::{KslError, ErrorType};
+use std::sync::Arc;
+use tokio::sync::Mutex;
+
 /// Represents KSL bytecode (aligned with ksl_bytecode.rs).
 #[derive(Debug, Clone)]
 pub struct Bytecode {
@@ -95,44 +102,68 @@ impl RuntimeMetrics {
 pub struct DevToolsRuntime {
     is_embedded: bool,
     metrics: RuntimeMetrics,
+    debugger: Arc<Mutex<Debugger>>,
+    async_context: Arc<Mutex<AsyncContext>>,
+    cli_interface: Arc<Mutex<CliInterface>>,
 }
 
 impl DevToolsRuntime {
+    /// Creates a new developer tools runtime with debugging, async, and CLI support.
     pub fn new(is_embedded: bool) -> Self {
         DevToolsRuntime {
             is_embedded,
             metrics: RuntimeMetrics::new(),
+            debugger: Arc::new(Mutex::new(Debugger::new())),
+            async_context: Arc::new(Mutex::new(AsyncContext::new())),
+            cli_interface: Arc::new(Mutex::new(CliInterface::new())),
         }
     }
 
-    /// Log a message (aligned with ksl_stdlib_io.rs).
-    pub fn log(&self, message: &Vec<u8>) -> bool {
-        // Simulated print (in reality, this would use print from ksl_stdlib_io.rs)
-        true
+    /// Log a message with async support and CLI integration.
+    pub async fn log(&self, message: &Vec<u8>) -> Result<bool, KslError> {
+        let mut cli = self.cli_interface.lock().await;
+        cli.execute_command(CliCommand::Log(message.clone()))
+            .await
+            .map_err(|e| KslError::new(ErrorType::RuntimeError, e.to_string()))
     }
 
-    /// Set a breakpoint (simulated as a pause).
-    pub fn breakpoint(&self) -> bool {
-        // Simulated breakpoint (in reality, this would pause execution for debugging)
-        true
+    /// Set a breakpoint with debugging support.
+    pub async fn breakpoint(&self, bp: Breakpoint) -> Result<bool, KslError> {
+        let mut debugger = self.debugger.lock().await;
+        debugger.set_breakpoint(bp)
+            .map_err(|e| KslError::new(ErrorType::DebugError, e.to_string()))
     }
 
-    /// Measure performance metrics for a task.
-    pub fn measure(&self, task: &Vec<u8>) -> Vec<u64> {
-        // Simulated measurement based on task length (in reality, this would profile the task)
-        let gas_usage = task.len() as u64 * 10;
-        vec![gas_usage, self.metrics.instruction_count, self.metrics.execution_time]
+    /// Measure performance metrics for a task with async support.
+    pub async fn measure(&self, task: &Vec<u8>) -> Result<Vec<u64>, KslError> {
+        let mut async_ctx = self.async_context.lock().await;
+        let command = AsyncCommand::Measure(task.clone());
+        async_ctx.execute_command(command)
+            .await
+            .map_err(|e| KslError::new(ErrorType::AsyncError, e.to_string()))
     }
 
-    /// Generate a visualization (simplified state diagram or tensor visualization).
-    pub fn generate_diagram(&self, data: &Vec<u64>) -> bool {
-        // Simulated visualization (in reality, this would output a diagram to ksl_stdlib_io.rs)
-        if self.is_embedded {
-            // Simplified visualization for embedded devices
-            data.iter().all(|&x| x < u64::MAX)
-        } else {
-            true
-        }
+    /// Generate a visualization with async support.
+    pub async fn generate_diagram(&self, data: &Vec<u64>) -> Result<bool, KslError> {
+        let mut async_ctx = self.async_context.lock().await;
+        let command = AsyncCommand::Visualize(data.clone());
+        async_ctx.execute_command(command)
+            .await
+            .map_err(|e| KslError::new(ErrorType::AsyncError, e.to_string()))
+    }
+
+    /// Get current debug state.
+    pub async fn get_debug_state(&self) -> Result<DebugState, KslError> {
+        let debugger = self.debugger.lock().await;
+        debugger.get_state()
+            .map_err(|e| KslError::new(ErrorType::DebugError, e.to_string()))
+    }
+
+    /// Add a watchpoint for variable monitoring.
+    pub async fn add_watchpoint(&self, wp: Watchpoint) -> Result<bool, KslError> {
+        let mut debugger = self.debugger.lock().await;
+        debugger.add_watchpoint(wp)
+            .map_err(|e| KslError::new(ErrorType::DebugError, e.to_string()))
     }
 }
 
@@ -153,7 +184,7 @@ impl KapraVM {
         }
     }
 
-    pub fn execute(&mut self, bytecode: &Bytecode) -> Result<Vec<u64>, String> {
+    pub async fn execute(&mut self, bytecode: &Bytecode) -> Result<Vec<u64>, KslError> {
         let mut ip = 0;
         while ip < bytecode.instructions.len() {
             let instr = bytecode.instructions[ip];
@@ -164,30 +195,31 @@ impl KapraVM {
             match instr {
                 OPCODE_LOG => {
                     if self.stack.len() < 1 {
-                        return Err("Not enough values on stack for LOG".to_string());
+                        return Err(KslError::new(ErrorType::StackUnderflow, "Not enough values on stack for LOG".to_string()));
                     }
                     let message_idx = self.stack.pop().unwrap() as usize;
                     let message = match &bytecode.constants[message_idx] {
                         Constant::ArrayU8(_, data) => data,
-                        _ => return Err("Invalid type for LOG message".to_string()),
+                        _ => return Err(KslError::new(ErrorType::TypeError, "Invalid type for LOG message".to_string())),
                     };
-                    let success = self.dev_tools_runtime.log(message);
+                    let success = self.dev_tools_runtime.log(message).await?;
                     self.stack.push(success as u64);
                 }
                 OPCODE_BREAKPOINT => {
-                    let success = self.dev_tools_runtime.breakpoint();
+                    let bp = Breakpoint::new(ip as u64);
+                    let success = self.dev_tools_runtime.breakpoint(bp).await?;
                     self.stack.push(success as u64);
                 }
                 OPCODE_MEASURE => {
                     if self.stack.len() < 1 {
-                        return Err("Not enough values on stack for MEASURE".to_string());
+                        return Err(KslError::new(ErrorType::StackUnderflow, "Not enough values on stack for MEASURE".to_string()));
                     }
                     let task_idx = self.stack.pop().unwrap() as usize;
                     let task = match &bytecode.constants[task_idx] {
                         Constant::ArrayU8(_, data) => data,
-                        _ => return Err("Invalid type for MEASURE task".to_string()),
+                        _ => return Err(KslError::new(ErrorType::TypeError, "Invalid type for MEASURE task".to_string())),
                     };
-                    let metrics = self.dev_tools_runtime.measure(task);
+                    let metrics = self.dev_tools_runtime.measure(task).await?;
                     let const_idx = bytecode.constants.len();
                     self.stack.push(const_idx as u64);
                     let mut new_constants = bytecode.constants.clone();
@@ -197,33 +229,33 @@ impl KapraVM {
                 }
                 OPCODE_GENERATE_DIAGRAM => {
                     if self.stack.len() < 1 {
-                        return Err("Not enough values on stack for GENERATE_DIAGRAM".to_string());
+                        return Err(KslError::new(ErrorType::StackUnderflow, "Not enough values on stack for GENERATE_DIAGRAM".to_string()));
                     }
                     let data_idx = self.stack.pop().unwrap() as usize;
                     let data = match &bytecode.constants[data_idx] {
                         Constant::ArrayU64(_, data) => data,
-                        _ => return Err("Invalid type for GENERATE_DIAGRAM data".to_string()),
+                        _ => return Err(KslError::new(ErrorType::TypeError, "Invalid type for GENERATE_DIAGRAM data".to_string())),
                     };
-                    let success = self.dev_tools_runtime.generate_diagram(data);
+                    let success = self.dev_tools_runtime.generate_diagram(data).await?;
                     self.stack.push(success as u64);
                 }
                 OPCODE_PUSH => {
                     if ip >= bytecode.instructions.len() {
-                        return Err("Incomplete PUSH instruction".to_string());
+                        return Err(KslError::new(ErrorType::InvalidInstruction, "Incomplete PUSH instruction".to_string()));
                     }
                     let value = bytecode.instructions[ip] as u64;
                     ip += 1;
                     self.stack.push(value);
                 }
                 OPCODE_FAIL => {
-                    return Err("Developer tools operation failed".to_string());
+                    return Err(KslError::new(ErrorType::RuntimeError, "Developer tools operation failed".to_string()));
                 }
-                _ => return Err(format!("Unsupported opcode: {}", instr)),
+                _ => return Err(KslError::new(ErrorType::InvalidInstruction, format!("Unsupported opcode: {}", instr))),
             }
         }
 
         if self.stack.len() != 1 {
-            return Err("Developer tools block must return exactly one value".to_string());
+            return Err(KslError::new(ErrorType::StackError, "Developer tools block must return exactly one value".to_string()));
         }
         match &bytecode.constants.last() {
             Some(Constant::ArrayU64(_, data)) => Ok(data.clone()),
@@ -235,7 +267,9 @@ impl KapraVM {
 /// Represents an async task (aligned with ksl_async.rs).
 #[derive(Debug, Clone)]
 pub enum AsyncTask {
-    // Placeholder for async tasks (not used in this demo)
+    Debug(DebugState),
+    Profile(Vec<u64>),
+    Visualize(bool),
 }
 
 /// Developer tools compiler for KSL.

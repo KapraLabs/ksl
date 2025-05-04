@@ -1,35 +1,60 @@
 // ksl_typegen.rs
 // Generates KSL type definitions from external sources like JSON schemas,
 // supporting nested types, arrays, and optional fields for interoperability.
+// Also supports async types, FFI type mappings, and comprehensive type generation.
 
 use crate::ksl_parser::{parse, ParseError};
 use crate::ksl_checker::check;
 use crate::ksl_docgen::generate_docgen;
 use crate::ksl_errors::{KslError, SourcePosition};
+use crate::ksl_types::{Type, TypeKind, TypeSystem};
+use crate::ksl_async::{AsyncType, AsyncContext};
+use crate::ksl_ffi::{FFIType, FFIMapping};
 use serde_json::{Value as JsonValue};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
 
-// Type generator configuration
+/// Configuration for type generation
 #[derive(Debug)]
 pub struct TypeGenConfig {
-    schema_file: PathBuf, // Input schema file (e.g., schema.json)
-    output_file: PathBuf, // Output KSL file (e.g., types.ksl)
-    source_type: String, // Source type: "json" or "protobuf"
+    /// Input schema file (e.g., schema.json)
+    schema_file: PathBuf,
+    /// Output KSL file (e.g., types.ksl)
+    output_file: PathBuf,
+    /// Source type: "json" or "protobuf"
+    source_type: String,
+    /// Whether to generate async types
+    generate_async: bool,
+    /// FFI type mappings for external language integration
+    ffi_mappings: HashMap<String, FFIType>,
 }
 
-// Type generator
+/// Type generator for KSL
 pub struct TypeGen {
     config: TypeGenConfig,
+    type_system: TypeSystem,
+    async_context: Option<AsyncContext>,
 }
 
 impl TypeGen {
+    /// Creates a new type generator with the given configuration
     pub fn new(config: TypeGenConfig) -> Self {
-        TypeGen { config }
+        let type_system = TypeSystem::new();
+        let async_context = if config.generate_async {
+            Some(AsyncContext::new())
+        } else {
+            None
+        };
+        TypeGen {
+            config,
+            type_system,
+            async_context,
+        }
     }
 
-    // Generate KSL types from the schema
+    /// Generates KSL types from the schema
     pub fn generate(&self) -> Result<(), KslError> {
         let pos = SourcePosition::new(1, 1);
         // Read schema file
@@ -87,7 +112,7 @@ impl TypeGen {
         Ok(())
     }
 
-    // Generate KSL types from a JSON schema
+    /// Generates KSL types from a JSON schema
     fn generate_from_json(&self, schema_content: &str) -> Result<String, KslError> {
         let pos = SourcePosition::new(1, 1);
         let schema: JsonValue = serde_json::from_str(schema_content)
@@ -107,7 +132,17 @@ impl TypeGen {
                     .unwrap_or("GeneratedType")
                     .to_string();
                 ksl_code.push_str(&format!("/// Type definition for {}\n", type_name));
-                ksl_code.push_str(&format!("struct {} {{\n", type_name));
+                
+                // Check if type should be async
+                let is_async = obj.get("async")
+                    .and_then(|a| a.as_bool())
+                    .unwrap_or(false);
+                
+                if is_async && self.config.generate_async {
+                    ksl_code.push_str(&format!("async struct {} {{\n", type_name));
+                } else {
+                    ksl_code.push_str(&format!("struct {} {{\n", type_name));
+                }
 
                 let properties = obj.get("properties")
                     .and_then(|p| p.as_object())
@@ -122,10 +157,18 @@ impl TypeGen {
 
                 for (prop_name, prop_schema) in properties {
                     let (ksl_type, is_optional) = self.json_type_to_ksl(prop_schema)?;
-                    let field_type = if !required.contains(prop_name.as_str()) || is_optional {
-                        format!("result<{}, ()>", ksl_type)
+                    
+                    // Apply FFI mapping if exists
+                    let mapped_type = if let Some(ffi_type) = self.config.ffi_mappings.get(&ksl_type) {
+                        ffi_type.to_ksl_type()
                     } else {
                         ksl_type
+                    };
+
+                    let field_type = if !required.contains(prop_name.as_str()) || is_optional {
+                        format!("result<{}, ()>", mapped_type)
+                    } else {
+                        mapped_type
                     };
                     ksl_code.push_str(&format!("    {}: {},\n", prop_name, field_type));
                 }
@@ -147,7 +190,7 @@ impl TypeGen {
         Ok(ksl_code)
     }
 
-    // Convert JSON schema type to KSL type
+    /// Converts JSON schema type to KSL type
     fn json_type_to_ksl(&self, schema: &JsonValue) -> Result<(String, bool), KslError> {
         let pos = SourcePosition::new(1, 1);
         let schema_type = schema.get("type")
@@ -180,7 +223,17 @@ impl TypeGen {
                     .unwrap_or("NestedType")
                     .to_string();
                 let mut nested_code = String::new();
-                nested_code.push_str(&format!("struct {} {{\n", type_name));
+                
+                // Check if nested type should be async
+                let is_async = schema.get("async")
+                    .and_then(|a| a.as_bool())
+                    .unwrap_or(false);
+                
+                if is_async && self.config.generate_async {
+                    nested_code.push_str(&format!("async struct {} {{\n", type_name));
+                } else {
+                    nested_code.push_str(&format!("struct {} {{\n", type_name));
+                }
 
                 let properties = schema.get("properties")
                     .and_then(|p| p.as_object())
@@ -195,10 +248,18 @@ impl TypeGen {
 
                 for (prop_name, prop_schema) in properties {
                     let (ksl_type, is_optional) = self.json_type_to_ksl(prop_schema)?;
-                    let field_type = if !required.contains(prop_name.as_str()) || is_optional {
-                        format!("result<{}, ()>", ksl_type)
+                    
+                    // Apply FFI mapping if exists
+                    let mapped_type = if let Some(ffi_type) = self.config.ffi_mappings.get(&ksl_type) {
+                        ffi_type.to_ksl_type()
                     } else {
                         ksl_type
+                    };
+
+                    let field_type = if !required.contains(prop_name.as_str()) || is_optional {
+                        format!("result<{}, ()>", mapped_type)
+                    } else {
+                        mapped_type
                     };
                     nested_code.push_str(&format!("    {}: {},\n", prop_name, field_type));
                 }
@@ -215,8 +276,14 @@ impl TypeGen {
     }
 }
 
-// Public API to generate KSL types
-pub fn typegen(schema_file: &PathBuf, output_file: PathBuf, source_type: &str) -> Result<(), KslError> {
+/// Public API to generate KSL types
+pub fn typegen(
+    schema_file: &PathBuf,
+    output_file: PathBuf,
+    source_type: &str,
+    generate_async: bool,
+    ffi_mappings: Option<HashMap<String, FFIType>>,
+) -> Result<(), KslError> {
     let pos = SourcePosition::new(1, 1);
     if source_type != "json" && source_type != "protobuf" {
         return Err(KslError::type_error(
@@ -229,6 +296,8 @@ pub fn typegen(schema_file: &PathBuf, output_file: PathBuf, source_type: &str) -
         schema_file: schema_file.clone(),
         output_file,
         source_type: source_type.to_string(),
+        generate_async,
+        ffi_mappings: ffi_mappings.unwrap_or_default(),
     };
     let typegen = TypeGen::new(config);
     typegen.generate()
@@ -278,7 +347,7 @@ mod tests {
         ).unwrap();
 
         let output_file = temp_dir.path().join("types.ksl");
-        let result = typegen(&schema_file, output_file.clone(), "json");
+        let result = typegen(&schema_file, output_file.clone(), "json", false, None);
         assert!(result.is_ok());
 
         let content = fs::read_to_string(&output_file).unwrap();
@@ -316,7 +385,7 @@ mod tests {
         ).unwrap();
 
         let output_file = temp_dir.path().join("types.ksl");
-        let result = typegen(&schema_file, output_file.clone(), "json");
+        let result = typegen(&schema_file, output_file.clone(), "json", false, None);
         assert!(result.is_ok());
 
         let content = fs::read_to_string(&output_file).unwrap();
@@ -332,7 +401,7 @@ mod tests {
         let schema_file = temp_dir.path().join("schema.json");
         let output_file = temp_dir.path().join("types.ksl");
 
-        let result = typegen(&schema_file, output_file, "invalid");
+        let result = typegen(&schema_file, output_file, "invalid", false, None);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Unsupported source type"));
     }
@@ -345,7 +414,7 @@ mod tests {
         writeln!(file, "{{ \"type\": \"invalid\" }}").unwrap();
 
         let output_file = temp_dir.path().join("types.ksl");
-        let result = typegen(&schema_file, output_file, "json");
+        let result = typegen(&schema_file, output_file, "json", false, None);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Schema root must be an object type"));
     }

@@ -1,76 +1,146 @@
 // ksl_generics.rs
 // Support for generic types and functions in KSL
 
-/// Represents a generic type parameter (e.g., T, U).
+use crate::ksl_types::{Type, TypeSystem, TypeConstraint};
+use crate::ksl_analyzer::{Analyzer, AnalysisContext};
+use crate::ksl_async::{AsyncContext, AsyncCommand};
+use crate::ksl_errors::{KslError, SourcePosition};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use tokio::sync::mpsc;
+
+/// Represents a generic type parameter with constraints (e.g., T: FixedSize).
 #[derive(Debug, Clone)]
 pub struct TypeParam {
+    /// Name of the type parameter (e.g., T, U)
     name: String,
-    // Add constraints if needed (e.g., T must be fixed-size)
+    /// Type constraints for the parameter
+    constraints: Vec<TypeConstraint>,
 }
 
 impl TypeParam {
-    pub fn new(name: &str) -> Self {
+    /// Creates a new type parameter with the given name and constraints.
+    pub fn new(name: &str, constraints: Vec<TypeConstraint>) -> Self {
         TypeParam {
             name: name.to_string(),
+            constraints,
         }
+    }
+
+    /// Validates that a concrete type satisfies all constraints.
+    pub fn validate_constraints(&self, ty: &Type, type_system: &TypeSystem) -> Result<(), KslError> {
+        for constraint in &self.constraints {
+            if !type_system.satisfies_constraint(ty, constraint) {
+                return Err(KslError::type_error(
+                    format!("Type {} does not satisfy constraint {:?}", ty, constraint),
+                    SourcePosition::new(1, 1),
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
-/// Represents a generic type or function definition.
+/// Represents a generic type or function definition with async resolution support.
 #[derive(Debug, Clone)]
 pub struct GenericDef {
-    params: Vec<TypeParam>, // List of type parameters (e.g., T, U)
-    concrete_types: Vec<Type>, // Concrete types after monomorphization
+    /// List of type parameters (e.g., T, U)
+    params: Vec<TypeParam>,
+    /// Concrete types after monomorphization
+    concrete_types: Vec<Type>,
+    /// Async context for resolution
+    async_context: Arc<Mutex<AsyncContext>>,
 }
 
 impl GenericDef {
+    /// Creates a new generic definition with the given parameters.
     pub fn new(params: Vec<TypeParam>) -> Self {
         GenericDef {
             params,
             concrete_types: vec![],
+            async_context: Arc::new(Mutex::new(AsyncContext::new())),
         }
     }
 
-    /// Monomorphize the generic definition by substituting type parameters
-    /// with concrete types (e.g., T -> u32).
-    pub fn monomorphize(&mut self, substitutions: Vec<Type>) -> Result<(), String> {
+    /// Monomorphizes the generic definition by substituting type parameters
+    /// with concrete types (e.g., T -> u32) with async support.
+    pub async fn monomorphize(&mut self, substitutions: Vec<Type>, type_system: &TypeSystem) -> Result<(), KslError> {
         if substitutions.len() != self.params.len() {
-            return Err(format!(
-                "Expected {} type arguments, got {}",
-                self.params.len(),
-                substitutions.len()
+            return Err(KslError::type_error(
+                format!(
+                    "Expected {} type arguments, got {}",
+                    self.params.len(),
+                    substitutions.len()
+                ),
+                SourcePosition::new(1, 1),
             ));
         }
+
+        // Validate constraints asynchronously
+        let mut async_ctx = self.async_context.lock().await;
+        for (param, ty) in self.params.iter().zip(substitutions.iter()) {
+            let command = AsyncCommand::ValidateTypeConstraints(param.clone(), ty.clone());
+            if let Err(e) = async_ctx.execute_command(command).await {
+                return Err(KslError::type_error(
+                    format!("Failed to validate constraints: {}", e),
+                    SourcePosition::new(1, 1),
+                ));
+            }
+            param.validate_constraints(ty, type_system)?;
+        }
+
         self.concrete_types = substitutions;
         Ok(())
     }
 }
 
-/// Extend the AST to support generics (used by ksl_parser.rs).
+/// Extends the AST to support generics with enhanced type checking.
 #[derive(Debug, Clone)]
 pub enum AstNode {
-    // Existing node types...
+    /// Generic function definition with type parameters
     GenericFunction {
+        /// Function name
         name: String,
+        /// Type parameters and constraints
         type_params: GenericDef,
+        /// Function arguments with types
         args: Vec<(String, Type)>,
+        /// Return type
         return_type: Type,
+        /// Function body
         body: Vec<AstNode>,
     },
+    /// Generic struct definition with type parameters
     GenericStruct {
+        /// Struct name
         name: String,
+        /// Type parameters and constraints
         type_params: GenericDef,
+        /// Struct fields with types
         fields: Vec<(String, Type)>,
     },
-    // Other node types...
+    // ... existing code ...
 }
 
-/// Integrate with the type checker (used by ksl_checker.rs).
-pub struct GenericTypeChecker;
+/// Integrates with the analyzer for enhanced type checking.
+pub struct GenericTypeChecker {
+    /// Type system for constraint checking
+    type_system: TypeSystem,
+    /// Analysis context for type inference
+    analysis_context: AnalysisContext,
+}
 
 impl GenericTypeChecker {
-    /// Validate a generic function or struct, ensuring type parameters are used correctly.
-    pub fn check_generic_node(&self, node: &AstNode) -> Result<(), String> {
+    /// Creates a new generic type checker with the given type system.
+    pub fn new(type_system: TypeSystem) -> Self {
+        GenericTypeChecker {
+            type_system,
+            analysis_context: AnalysisContext::new(),
+        }
+    }
+
+    /// Validates a generic function or struct with enhanced type checking.
+    pub async fn check_generic_node(&self, node: &AstNode) -> Result<(), KslError> {
         match node {
             AstNode::GenericFunction {
                 type_params,
@@ -79,15 +149,34 @@ impl GenericTypeChecker {
                 body,
                 ..
             } => {
-                // Ensure all type parameters are used and substituted correctly
+                // Analyze type parameters
                 for param in &type_params.params {
-                    // Check if param is used in args or return_type
-                    // (Placeholder for deeper type checking logic)
+                    self.analysis_context.add_type_param(param.clone());
                 }
+
+                // Check argument types
+                for (_, arg_type) in args {
+                    if !self.type_system.is_valid_type(arg_type) {
+                        return Err(KslError::type_error(
+                            format!("Invalid argument type: {:?}", arg_type),
+                            SourcePosition::new(1, 1),
+                        ));
+                    }
+                }
+
+                // Check return type
+                if !self.type_system.is_valid_type(return_type) {
+                    return Err(KslError::type_error(
+                        format!("Invalid return type: {:?}", return_type),
+                        SourcePosition::new(1, 1),
+                    ));
+                }
+
                 // Recursively check the body
                 for node in body {
-                    self.check_generic_node(node)?;
+                    self.check_generic_node(node).await?;
                 }
+
                 Ok(())
             }
             AstNode::GenericStruct {
@@ -95,35 +184,47 @@ impl GenericTypeChecker {
                 fields,
                 ..
             } => {
-                // Ensure all fields use valid types (fixed-size, no dynamic types)
+                // Analyze type parameters
+                for param in &type_params.params {
+                    self.analysis_context.add_type_param(param.clone());
+                }
+
+                // Check field types
                 for (_, field_type) in fields {
-                    if !self.is_fixed_size(field_type) {
-                        return Err(format!("Field type {:?} must be fixed-size", field_type));
+                    if !self.type_system.is_valid_type(field_type) {
+                        return Err(KslError::type_error(
+                            format!("Invalid field type: {:?}", field_type),
+                            SourcePosition::new(1, 1),
+                        ));
                     }
                 }
+
                 Ok(())
             }
             _ => Ok(()), // Other node types handled elsewhere
         }
     }
-
-    /// Check if a type is fixed-size (enforce KSL's constraints).
-    fn is_fixed_size(&self, ty: &Type) -> bool {
-        match ty {
-            Type::U8 | Type::U16 | Type::U32 | Type::U64 | Type::Bool => true,
-            Type::Array(inner, size) => *size > 0 && self.is_fixed_size(inner),
-            Type::Generic(param) => false, // Must be monomorphized before this check
-            _ => false, // Disallow dynamic types
-        }
-    }
 }
 
-/// Integrate with the compiler (used by ksl_compiler.rs).
-pub struct GenericCompiler;
+/// Integrates with the compiler for generic code generation.
+pub struct GenericCompiler {
+    /// Type system for type checking
+    type_system: TypeSystem,
+    /// Async context for compilation
+    async_context: Arc<Mutex<AsyncContext>>,
+}
 
 impl GenericCompiler {
-    /// Compile a generic node by monomorphizing it.
-    pub fn compile_generic_node(&self, node: &AstNode, generics: &mut GenericDef) -> Result<Bytecode, String> {
+    /// Creates a new generic compiler with the given type system.
+    pub fn new(type_system: TypeSystem) -> Self {
+        GenericCompiler {
+            type_system,
+            async_context: Arc::new(Mutex::new(AsyncContext::new())),
+        }
+    }
+
+    /// Compiles a generic node with async support.
+    pub async fn compile_generic_node(&self, node: &AstNode, generics: &mut GenericDef) -> Result<Bytecode, KslError> {
         match node {
             AstNode::GenericFunction {
                 args,
@@ -131,22 +232,33 @@ impl GenericCompiler {
                 body,
                 ..
             } => {
-                // Monomorphize: Substitute type parameters with concrete types
-                let substitutions = generics.concrete_types.clone();
-                if substitutions.is_empty() {
-                    return Err("Generic function must be monomorphized".to_string());
+                // Ensure monomorphization
+                if generics.concrete_types.is_empty() {
+                    return Err(KslError::type_error(
+                        "Generic function must be monomorphized".to_string(),
+                        SourcePosition::new(1, 1),
+                    ));
                 }
 
-                // Compile the function body with substituted types
+                // Compile with async support
+                let mut async_ctx = self.async_context.lock().await;
                 let mut bytecode = Bytecode::new();
+
                 for node in body {
-                    let node_bytecode = self.compile_generic_node(node, generics)?;
+                    let command = AsyncCommand::CompileNode(node.clone());
+                    if let Err(e) = async_ctx.execute_command(command).await {
+                        return Err(KslError::type_error(
+                            format!("Failed to compile node: {}", e),
+                            SourcePosition::new(1, 1),
+                        ));
+                    }
+                    let node_bytecode = self.compile_generic_node(node, generics).await?;
                     bytecode.extend(node_bytecode);
                 }
+
                 Ok(bytecode)
             }
             AstNode::GenericStruct { fields, .. } => {
-                // Compile the struct definition (layout fields in memory)
                 let mut bytecode = Bytecode::new();
                 for (_, field_type) in fields {
                     let concrete_type = self.substitute_type(field_type, &generics.concrete_types)?;
@@ -158,12 +270,20 @@ impl GenericCompiler {
         }
     }
 
-    /// Substitute a generic type with a concrete type.
-    fn substitute_type(&self, ty: &Type, substitutions: &[Type]) -> Result<Type, String> {
+    /// Substitutes a generic type with a concrete type.
+    fn substitute_type(&self, ty: &Type, substitutions: &[Type]) -> Result<Type, KslError> {
         match ty {
             Type::Generic(param) => {
-                // Find the corresponding substitution (simplified)
-                Ok(substitutions[0].clone()) // Placeholder for proper lookup
+                // Find the corresponding substitution
+                for (i, p) in substitutions.iter().enumerate() {
+                    if p.name() == param {
+                        return Ok(p.clone());
+                    }
+                }
+                Err(KslError::type_error(
+                    format!("No substitution found for type parameter {}", param),
+                    SourcePosition::new(1, 1),
+                ))
             }
             Type::Array(inner, size) => {
                 let new_inner = self.substitute_type(inner, substitutions)?;

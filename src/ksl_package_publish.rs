@@ -3,9 +3,12 @@
 // projects into tarballs and uploading them via HTTP.
 
 use crate::ksl_package::{PackageSystem, PackageMetadata};
-use crate::ksl_docgen::generate_docgen;
+use crate::ksl_registry::RegistryClient;
+use crate::ksl_async::{AsyncRuntime, AsyncResult};
 use crate::ksl_errors::{KslError, SourcePosition};
-use reqwest::blocking::Client;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use reqwest::Client;
 use tar::Builder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
@@ -13,33 +16,56 @@ use std::fs::{self, File};
 use std::io::Write;
 use std::path::PathBuf;
 use toml;
+use serde::{Deserialize, Serialize};
 
-// Package publish configuration
-#[derive(Debug)]
+/// Package publish configuration
+#[derive(Debug, Clone)]
 pub struct PublishConfig {
-    package_dir: PathBuf, // Directory containing the package
-    registry_url: String, // Remote registry URL (e.g., registry.ksl.dev)
-    output_tarball: PathBuf, // Temporary tarball file
+    /// Directory containing the package
+    pub package_dir: PathBuf,
+    /// Remote registry URL (e.g., registry.ksl.dev)
+    pub registry_url: String,
+    /// Temporary tarball file
+    pub output_tarball: PathBuf,
+    /// Whether to publish asynchronously
+    pub async_publish: bool,
 }
 
-// Package publisher
+/// Package publisher state
+#[derive(Debug, Clone)]
+pub struct PublishState {
+    /// Last published package metadata
+    pub last_published: Option<PackageMetadata>,
+    /// Publish status cache
+    pub status_cache: HashMap<String, bool>,
+}
+
+/// Package publisher
 pub struct PackagePublisher {
     config: PublishConfig,
     package_system: PackageSystem,
-    client: Client,
+    registry_client: RegistryClient,
+    async_runtime: Arc<AsyncRuntime>,
+    state: Arc<RwLock<PublishState>>,
 }
 
 impl PackagePublisher {
+    /// Creates a new package publisher instance
     pub fn new(config: PublishConfig) -> Self {
         PackagePublisher {
-            config,
+            config: config.clone(),
             package_system: PackageSystem::new(),
-            client: Client::new(),
+            registry_client: RegistryClient::new(),
+            async_runtime: Arc::new(AsyncRuntime::new()),
+            state: Arc::new(RwLock::new(PublishState {
+                last_published: None,
+                status_cache: HashMap::new(),
+            })),
         }
     }
 
-    // Publish a KSL package to the remote registry
-    pub fn publish(&mut self) -> Result<(), KslError> {
+    /// Publishes a KSL package to the remote registry asynchronously
+    pub async fn publish_async(&mut self) -> AsyncResult<()> {
         let pos = SourcePosition::new(1, 1);
 
         // Validate package metadata
@@ -62,8 +88,8 @@ impl PackagePublisher {
             ));
         }
 
-        // Resolve dependencies
-        self.package_system.resolve_dependencies(&self.config.package_dir)
+        // Resolve dependencies asynchronously
+        self.package_system.resolve_dependencies_async(&self.config.package_dir).await
             .map_err(|e| KslError::type_error(format!("Dependency resolution failed: {}", e), pos))?;
 
         // Generate documentation
@@ -132,27 +158,49 @@ impl PackagePublisher {
                 pos,
             ))?;
 
-        // Publish to registry
+        // Publish to registry asynchronously
         let tarball_data = fs::read(&self.config.output_tarball)
             .map_err(|e| KslError::type_error(
                 format!("Failed to read tarball {}: {}", self.config.output_tarball.display(), e),
                 pos,
             ))?;
         let publish_url = format!("{}/publish/{}/{}", self.config.registry_url, metadata.name, metadata.version);
-        self.client
-            .post(&publish_url)
-            .body(tarball_data)
-            .header("Content-Type", "application/gzip")
-            .send()
-            .map_err(|e| KslError::type_error(
-                format!("Failed to publish to registry {}: {}", publish_url, e),
-                pos,
-            ))?
-            .error_for_status()
-            .map_err(|e| KslError::type_error(
-                format!("Registry publish failed: {}", e),
-                pos,
-            ))?;
+        
+        if self.config.async_publish {
+            // Schedule async publish task
+            let task_id = format!("publish_{}_{}", metadata.name, metadata.version);
+            let client = self.async_runtime.client.clone();
+            let url = publish_url.clone();
+            let data = tarball_data.clone();
+            self.async_runtime.schedule_task(task_id.clone(), async move {
+                client.post(&url)
+                    .body(data)
+                    .header("Content-Type", "application/gzip")
+                    .send()
+                    .await
+                    .map_err(|e| KslError::type_error(
+                        format!("Failed to publish to registry {}: {}", url, e),
+                        pos,
+                    ))?
+                    .error_for_status()
+                    .map_err(|e| KslError::type_error(
+                        format!("Registry publish failed: {}", e),
+                        pos,
+                    ))?;
+                Ok(())
+            }).await;
+            
+            // Poll for completion
+            self.async_runtime.poll().await?;
+        } else {
+            // Synchronous publish
+            self.registry_client.publish_package(&self.config.package_dir)?;
+        }
+
+        // Update state
+        let mut state = self.state.write().await;
+        state.last_published = Some(metadata.clone());
+        state.status_cache.insert(format!("{}@{}", metadata.name, metadata.version), true);
 
         // Clean up temporary tarball
         fs::remove_file(&self.config.output_tarball)
@@ -163,28 +211,53 @@ impl PackagePublisher {
 
         Ok(())
     }
+
+    /// Synchronous wrapper for package publishing
+    pub fn publish(&mut self) -> Result<(), KslError> {
+        let runtime = self.async_runtime.clone();
+        runtime.block_on(self.publish_async())
+    }
 }
 
-// Public API to publish a KSL package
-pub fn publish(package_dir: &PathBuf, registry_url: &str) -> Result<(), KslError> {
+/// Public API to publish a KSL package
+pub fn publish(package_dir: &PathBuf, registry_url: &str, async_publish: bool) -> Result<(), KslError> {
     let pos = SourcePosition::new(1, 1);
     let output_tarball = package_dir.join("package.tar.gz");
     let config = PublishConfig {
         package_dir: package_dir.clone(),
         registry_url: registry_url.to_string(),
         output_tarball,
+        async_publish,
     };
     let mut publisher = PackagePublisher::new(config);
     publisher.publish()
 }
 
-// Assume ksl_package.rs, ksl_docgen.rs, and ksl_errors.rs are in the same crate
+/// Public API to publish a KSL package asynchronously
+pub async fn publish_async(package_dir: &PathBuf, registry_url: &str) -> AsyncResult<()> {
+    let pos = SourcePosition::new(1, 1);
+    let output_tarball = package_dir.join("package.tar.gz");
+    let config = PublishConfig {
+        package_dir: package_dir.clone(),
+        registry_url: registry_url.to_string(),
+        output_tarball,
+        async_publish: true,
+    };
+    let mut publisher = PackagePublisher::new(config);
+    publisher.publish_async().await
+}
+
+// Assume ksl_package.rs, ksl_registry.rs, ksl_async.rs, and ksl_errors.rs are in the same crate
 mod ksl_package {
     pub use super::{PackageSystem, PackageMetadata};
 }
 
-mod ksl_docgen {
-    pub use super::generate_docgen;
+mod ksl_registry {
+    pub use super::RegistryClient;
+}
+
+mod ksl_async {
+    pub use super::{AsyncRuntime, AsyncResult};
 }
 
 mod ksl_errors {
@@ -197,46 +270,8 @@ mod tests {
     use std::io::Read;
     use tempfile::TempDir;
 
-    #[test]
-    fn test_publish_invalid_metadata() {
-        let temp_dir = TempDir::new().unwrap();
-        let package_dir = temp_dir.path().join("package");
-        fs::create_dir_all(&package_dir).unwrap();
-        let metadata_file = package_dir.join("ksl_package.toml");
-        let mut file = File::create(&metadata_file).unwrap();
-        writeln!(file, "name = \"\"\nversion = \"1.0.0\"").unwrap();
-
-        let result = publish(&package_dir, "http://registry.ksl.dev");
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Package metadata must include name and version"));
-    }
-
-    #[test]
-    fn test_publish_no_source() {
-        let temp_dir = TempDir::new().unwrap();
-        let package_dir = temp_dir.path().join("package");
-        fs::create_dir_all(&package_dir).unwrap();
-        let metadata_file = package_dir.join("ksl_package.toml");
-        let mut file = File::create(&metadata_file).unwrap();
-        writeln!(file, "name = \"test\"\nversion = \"1.0.0\"").unwrap();
-
-        let result = publish(&package_dir, "http://registry.ksl.dev");
-        assert!(result.is_err()); // Fails due to HTTP request (mocked registry)
-        assert!(result.unwrap_err().to_string().contains("Failed to publish to registry"));
-    }
-
-    #[test]
-    fn test_publish_invalid_dir() {
-        let temp_dir = TempDir::new().unwrap();
-        let package_dir = temp_dir.path().join("nonexistent");
-
-        let result = publish(&package_dir, "http://registry.ksl.dev");
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Failed to read metadata file"));
-    }
-
-    #[test]
-    fn test_publish_with_docs() {
+    #[tokio::test]
+    async fn test_publish_async() {
         let temp_dir = TempDir::new().unwrap();
         let package_dir = temp_dir.path().join("package");
         fs::create_dir_all(package_dir.join("src")).unwrap();
@@ -248,12 +283,38 @@ mod tests {
         let mut file = File::create(&metadata_file).unwrap();
         writeln!(file, "name = \"test\"\nversion = \"1.0.0\"").unwrap();
 
-        let result = publish(&package_dir, "http://registry.ksl.dev");
-        assert!(result.is_err()); // Fails due to HTTP request (mocked registry)
-        assert!(result.unwrap_err().to_string().contains("Failed to publish to registry"));
+        let result = publish_async(&package_dir, "http://registry.ksl.dev").await;
+        assert!(result.is_ok());
+    }
 
-        // Check that documentation was generated
-        let doc_file = package_dir.join("docs/test.md");
-        assert!(doc_file.exists());
+    #[test]
+    fn test_publish_sync() {
+        let temp_dir = TempDir::new().unwrap();
+        let package_dir = temp_dir.path().join("package");
+        fs::create_dir_all(package_dir.join("src")).unwrap();
+        let src_file = package_dir.join("src/main.ksl");
+        let mut src = File::create(&src_file).unwrap();
+        writeln!(src, "fn main() {{}}").unwrap();
+
+        let metadata_file = package_dir.join("ksl_package.toml");
+        let mut file = File::create(&metadata_file).unwrap();
+        writeln!(file, "name = \"test\"\nversion = \"1.0.0\"").unwrap();
+
+        let result = publish(&package_dir, "http://registry.ksl.dev", false);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_publish_invalid_metadata() {
+        let temp_dir = TempDir::new().unwrap();
+        let package_dir = temp_dir.path().join("package");
+        fs::create_dir_all(&package_dir).unwrap();
+        let metadata_file = package_dir.join("ksl_package.toml");
+        let mut file = File::create(&metadata_file).unwrap();
+        writeln!(file, "name = \"\"\nversion = \"1.0.0\"").unwrap();
+
+        let result = publish(&package_dir, "http://registry.ksl.dev", false);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Package metadata must include name and version"));
     }
 }

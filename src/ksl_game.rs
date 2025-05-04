@@ -1,5 +1,13 @@
 // ksl_game.rs
 // Gaming-specific primitives for Kapra Chain and standalone gaming applications
+// This module provides game development APIs for KSL, supporting interactive applications.
+// It integrates with kapra_vm.rs for runtime features, ksl_stdlib.rs for utilities,
+// and ksl_async.rs for asynchronous operations.
+
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::Mutex;
+use tokio::time::sleep;
 
 /// Represents KSL bytecode (aligned with ksl_bytecode.rs).
 #[derive(Debug, Clone)]
@@ -66,45 +74,141 @@ pub enum Type {
     ArrayU8(usize),  // e.g., array<u8, 32>
 }
 
-/// Game runtime for Kapra Chain.
+/// Game runtime for Kapra Chain with async support.
 #[derive(Debug, Clone)]
 pub struct GameRuntime {
     is_embedded: bool,
+    frame_rate: u32,
+    net_client: Arc<Mutex<Option<NetClient>>>,
 }
 
 impl GameRuntime {
-    pub fn new(is_embedded: bool) -> Self {
-        GameRuntime { is_embedded }
+    /// Creates a new game runtime instance.
+    /// 
+    /// # Arguments
+    /// * `is_embedded` - Whether the runtime is running on an embedded device
+    /// * `frame_rate` - Target frame rate for the game loop
+    /// * `net_client` - Optional network client for multiplayer support
+    pub fn new(is_embedded: bool, frame_rate: u32, net_client: Option<NetClient>) -> Self {
+        GameRuntime {
+            is_embedded,
+            frame_rate,
+            net_client: Arc::new(Mutex::new(net_client)),
+        }
     }
 
-    /// Check if two objects collide (simplified AABB collision detection).
-    pub fn collides(&self, obj1: &Vec<u32>, obj2: &Vec<u32>) -> bool {
-        // obj1 and obj2 are [x, y, width, height]
+    /// Check if two objects collide using AABB collision detection.
+    /// 
+    /// # Arguments
+    /// * `obj1` - First object's properties [x, y, width, height]
+    /// * `obj2` - Second object's properties [x, y, width, height]
+    /// 
+    /// # Returns
+    /// A boolean indicating if the objects collide
+    pub fn collides(&self, obj1: &[u32], obj2: &[u32]) -> bool {
         let (x1, y1, w1, h1) = (obj1[0], obj1[1], obj1[2], obj1[3]);
         let (x2, y2, w2, h2) = (obj2[0], obj2[1], obj2[2], obj2[3]);
         x1 < x2 + w2 && x1 + w1 > x2 && y1 < y2 + h2 && y1 + h1 > y2
     }
 
-    /// Draw a sprite (simplified 2D rendering).
-    pub fn draw_sprite(&self, sprite: &Vec<u32>) -> bool {
-        // sprite is [x, y, sprite_id]
+    /// Draw a sprite with async support.
+    /// 
+    /// # Arguments
+    /// * `sprite` - Sprite properties [x, y, sprite_id]
+    /// 
+    /// # Returns
+    /// A Result indicating success or failure
+    pub async fn draw_sprite(&self, sprite: &[u32]) -> Result<bool, GameRuntimeError> {
         if self.is_embedded {
-            // Simplified rendering for embedded devices (e.g., no GPU)
-            sprite[2] != 0 // sprite_id must be non-zero
+            // Simplified rendering for embedded devices
+            Ok(sprite[2] != 0)
         } else {
-            // In reality, this would interact with a graphics API
-            true
+            // Simulated async rendering
+            sleep(Duration::from_millis(1000 / self.frame_rate as u64)).await;
+            Ok(true)
         }
     }
 
-    /// Send game state to a peer (simplified networking).
-    pub fn send_state(&self, peer_id: u32, state: &Vec<u8>) -> bool {
-        // Simulated networking (in reality, this would use net.udp_send from ksl_stdlib_net.rs)
-        peer_id != u32::MAX && state.len() == 32
+    /// Send game state to a peer with async support.
+    /// 
+    /// # Arguments
+    /// * `peer_id` - The ID of the peer to send to
+    /// * `state` - The game state to send
+    /// 
+    /// # Returns
+    /// A Result indicating success or failure
+    pub async fn send_state(&self, peer_id: u32, state: &[u8]) -> Result<bool, GameRuntimeError> {
+        if let Some(client) = &*self.net_client.lock().await {
+            match client.send(peer_id, state).await {
+                Ok(_) => Ok(true),
+                Err(e) => Err(GameRuntimeError::NetworkError(e)),
+            }
+        } else {
+            Err(GameRuntimeError::NetworkError("No network client available".to_string()))
+        }
     }
 }
 
-/// Kapra VM with game support (aligned with kapra_vm.rs).
+/// Network client for game multiplayer support.
+#[derive(Debug, Clone)]
+pub struct NetClient {
+    protocol: NetworkProtocol,
+    endpoint: String,
+}
+
+impl NetClient {
+    /// Creates a new network client.
+    /// 
+    /// # Arguments
+    /// * `protocol` - The network protocol to use
+    /// * `endpoint` - The endpoint to connect to
+    pub fn new(protocol: NetworkProtocol, endpoint: String) -> Self {
+        NetClient { protocol, endpoint }
+    }
+
+    /// Sends game state using the configured protocol.
+    /// 
+    /// # Arguments
+    /// * `peer_id` - The ID of the peer to send to
+    /// * `state` - The game state to send
+    /// 
+    /// # Returns
+    /// A Result indicating success or failure
+    pub async fn send(&self, peer_id: u32, state: &[u8]) -> Result<(), String> {
+        match self.protocol {
+            NetworkProtocol::UDP => {
+                // Implement UDP protocol
+                Ok(())
+            }
+            NetworkProtocol::WebSocket => {
+                // Implement WebSocket protocol
+                Ok(())
+            }
+            NetworkProtocol::Custom => {
+                // Implement custom protocol
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Supported network protocols for game multiplayer.
+#[derive(Debug, Clone, Copy)]
+pub enum NetworkProtocol {
+    UDP,
+    WebSocket,
+    Custom,
+}
+
+/// Errors that can occur during game runtime operations.
+#[derive(Debug, Clone)]
+pub enum GameRuntimeError {
+    NetworkError(String),
+    RenderError(String),
+    PhysicsError(String),
+}
+
+/// Kapra VM with game support and async capabilities.
 #[derive(Debug)]
 pub struct KapraVM {
     stack: Vec<u64>,
@@ -113,15 +217,28 @@ pub struct KapraVM {
 }
 
 impl KapraVM {
-    pub fn new(is_embedded: bool) -> Self {
+    /// Creates a new Kapra VM instance with game support.
+    /// 
+    /// # Arguments
+    /// * `is_embedded` - Whether the VM is running on an embedded device
+    /// * `frame_rate` - Target frame rate for the game loop
+    /// * `net_client` - Optional network client for multiplayer support
+    pub fn new(is_embedded: bool, frame_rate: u32, net_client: Option<NetClient>) -> Self {
         KapraVM {
             stack: vec![],
-            game_runtime: GameRuntime::new(is_embedded),
+            game_runtime: GameRuntime::new(is_embedded, frame_rate, net_client),
             async_tasks: vec![],
         }
     }
 
-    pub fn execute(&mut self, bytecode: &Bytecode) -> Result<bool, String> {
+    /// Executes game bytecode with async support.
+    /// 
+    /// # Arguments
+    /// * `bytecode` - The bytecode to execute
+    /// 
+    /// # Returns
+    /// A Result containing the execution result or an error
+    pub async fn execute(&mut self, bytecode: &Bytecode) -> Result<bool, String> {
         let mut ip = 0;
         while ip < bytecode.instructions.len() {
             let instr = bytecode.instructions[ip];
@@ -154,8 +271,10 @@ impl KapraVM {
                         Constant::ArrayU32(_, data) => data,
                         _ => return Err("Invalid type for DRAW_SPRITE sprite".to_string()),
                     };
-                    let success = self.game_runtime.draw_sprite(sprite);
-                    self.stack.push(success as u64);
+                    match self.game_runtime.draw_sprite(sprite).await {
+                        Ok(success) => self.stack.push(success as u64),
+                        Err(e) => return Err(format!("Render error: {:?}", e)),
+                    }
                 }
                 OPCODE_SEND_STATE => {
                     if self.stack.len() < 2 {
@@ -167,9 +286,13 @@ impl KapraVM {
                         Constant::ArrayU8(_, data) => data,
                         _ => return Err("Invalid type for SEND_STATE state".to_string()),
                     };
-                    let success = self.game_runtime.send_state(peer_id, state);
-                    self.async_tasks.push(AsyncTask::SendState(peer_id, state.clone()));
-                    self.stack.push(success as u64);
+                    match self.game_runtime.send_state(peer_id, state).await {
+                        Ok(success) => {
+                            self.async_tasks.push(AsyncTask::SendState(peer_id, state.clone()));
+                            self.stack.push(success as u64);
+                        }
+                        Err(e) => return Err(format!("Network error: {:?}", e)),
+                    }
                 }
                 OPCODE_PUSH => {
                     if ip >= bytecode.instructions.len() {
@@ -451,8 +574,8 @@ mod tests {
             OPCODE_COLLIDES,          // Check collision
         ]);
 
-        let mut vm = KapraVM::new(false);
-        let result = vm.execute(&bytecode);
+        let mut vm = KapraVM::new(false, 60, None);
+        let result = vm.execute(&bytecode).await;
         assert!(result.is_ok());
         assert!(result.unwrap()); // Should collide
     }
@@ -468,8 +591,8 @@ mod tests {
             OPCODE_DRAW_SPRITE,       // Draw sprite
         ]);
 
-        let mut vm = KapraVM::new(false);
-        let result = vm.execute(&bytecode);
+        let mut vm = KapraVM::new(false, 60, None);
+        let result = vm.execute(&bytecode).await;
         assert!(result.is_ok());
         assert!(result.unwrap());
     }
@@ -486,8 +609,8 @@ mod tests {
             OPCODE_SEND_STATE,        // Send state
         ]);
 
-        let mut vm = KapraVM::new(false);
-        let result = vm.execute(&bytecode);
+        let mut vm = KapraVM::new(false, 60, None);
+        let result = vm.execute(&bytecode).await;
         assert!(result.is_ok());
         assert!(result.unwrap());
         assert_eq!(vm.async_tasks.len(), 1);

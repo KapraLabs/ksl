@@ -1,25 +1,32 @@
 // ksl_project.rs
 // Project initialization tool for KSL with templates and scaffolding
 
+use crate::ksl_package::{PackageMetadata, Dependency, License};
+use crate::ksl_config::{ProjectConfig, ConfigManager};
+use crate::ksl_async::{AsyncContext, AsyncCommand};
+use crate::ksl_errors::{KslError, ErrorType};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 /// Represents a template for a KSL project (aligned with ksl_template.rs).
 #[derive(Debug, Clone)]
 pub struct Template {
     name: String,
     description: String,
-    package_toml: String, // Content for ksl_package.toml
+    package_metadata: PackageMetadata,
     main_ksl: String,     // Content for src/main.ksl
 }
 
 impl Template {
-    pub fn new(name: &str, description: &str, package_toml: &str, main_ksl: &str) -> Self {
+    /// Creates a new template with package metadata and main file content.
+    pub fn new(name: &str, description: &str, package_metadata: PackageMetadata, main_ksl: &str) -> Self {
         Template {
             name: name.to_string(),
             description: description.to_string(),
-            package_toml: package_toml.to_string(),
+            package_metadata,
             main_ksl: main_ksl.to_string(),
         }
     }
@@ -39,14 +46,18 @@ impl TemplateRegistry {
         registry.templates.push(Template::new(
             "blockchain",
             "A blockchain smart contract project",
-            r#"[package]
-name = "{name}"
-version = "0.1.0"
-license = "MIT"
-dependencies = [
-    { name = "blockchain-lib", version = "^1.0.0" },
-]
-"#,
+            PackageMetadata {
+                name: "{name}".to_string(),
+                version: "0.1.0".to_string(),
+                license: License::MIT,
+                dependencies: vec![
+                    Dependency::new("blockchain-lib", "^1.0.0"),
+                ],
+                description: "A blockchain smart contract project".to_string(),
+                authors: vec![],
+                repository: None,
+                documentation: None,
+            },
             r#"// src/main.ksl
 macro! contract_boilerplate($contract_name: ident, $resource: ident) {
     #[contract]
@@ -74,15 +85,19 @@ fn main() {
         registry.templates.push(Template::new(
             "ai",
             "An AI model project",
-            r#"[package]
-name = "{name}"
-version = "0.1.0"
-license = "Apache-2.0"
-dependencies = [
-    { name = "ai-model", version = "^2.0.0" },
-    { name = "math-lib", version = "^1.0.0" },
-]
-"#,
+            PackageMetadata {
+                name: "{name}".to_string(),
+                version: "0.1.0".to_string(),
+                license: License::Apache2,
+                dependencies: vec![
+                    Dependency::new("ai-model", "^2.0.0"),
+                    Dependency::new("math-lib", "^1.0.0"),
+                ],
+                description: "An AI model project".to_string(),
+                authors: vec![],
+                repository: None,
+                documentation: None,
+            },
             r#"// src/main.ksl
 macro! serialize_model($model_name: ident) {
     fn serialize_$model_name() -> array<u8, 1024> {
@@ -110,15 +125,19 @@ fn main() {
         registry.templates.push(Template::new(
             "game",
             "A game project with example logic",
-            r#"[package]
-name = "{name}"
-version = "0.1.0"
-license = "BSD-3-Clause"
-dependencies = [
-    { name = "game-physics", version = "^1.0.0" },
-    { name = "math-lib", version = "^1.0.0" },
-]
-"#,
+            PackageMetadata {
+                name: "{name}".to_string(),
+                version: "0.1.0".to_string(),
+                license: License::BSD3,
+                dependencies: vec![
+                    Dependency::new("game-physics", "^1.0.0"),
+                    Dependency::new("math-lib", "^1.0.0"),
+                ],
+                description: "A game project with example logic".to_string(),
+                authors: vec![],
+                repository: None,
+                documentation: None,
+            },
             r#"// src/main.ksl
 macro! log($msg: string) {
     let formatted: string = concat("LOG: ", $msg);
@@ -150,65 +169,92 @@ fn main() {
     }
 }
 
-/// Project initializer for KSL.
+/// Project initializer for KSL with async support.
 pub struct ProjectInitializer {
     templates: TemplateRegistry,
+    config_manager: Arc<Mutex<ConfigManager>>,
+    async_context: Arc<Mutex<AsyncContext>>,
 }
 
 impl ProjectInitializer {
+    /// Creates a new project initializer with async support.
     pub fn new() -> Self {
         ProjectInitializer {
             templates: TemplateRegistry::new(),
+            config_manager: Arc::new(Mutex::new(ConfigManager::new())),
+            async_context: Arc::new(Mutex::new(AsyncContext::new())),
         }
     }
 
-    /// Initialize a new KSL project.
-    pub fn init(&self, name: &str, template_name: &str) -> Result<(), String> {
+    /// Initialize a new KSL project asynchronously.
+    pub async fn init(&self, name: &str, template_name: &str) -> Result<(), KslError> {
         // Validate project name
         if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
-            return Err("Project name must be non-empty and contain only alphanumeric characters, '-', or '_'".to_string());
+            return Err(KslError::new(ErrorType::ValidationError, "Project name must be non-empty and contain only alphanumeric characters, '-', or '_'".to_string()));
         }
 
         // Check if the project directory already exists
         let project_dir = Path::new(name);
         if project_dir.exists() {
-            return Err(format!("Directory '{}' already exists", name));
+            return Err(KslError::new(ErrorType::FileError, format!("Directory '{}' already exists", name)));
         }
 
         // Find the template
         let template = self.templates.get_template(template_name)
-            .ok_or_else(|| format!("Template '{}' not found. Available templates: blockchain, ai, game", template_name))?;
+            .ok_or_else(|| KslError::new(ErrorType::TemplateError, format!("Template '{}' not found", template_name)))?;
 
         // Create the project directory
-        fs::create_dir(project_dir).map_err(|e| format!("Failed to create project directory: {}", e))?;
+        fs::create_dir(project_dir)
+            .map_err(|e| KslError::new(ErrorType::FileError, format!("Failed to create project directory: {}", e)))?;
 
         // Create the src directory
         let src_dir = project_dir.join("src");
-        fs::create_dir(&src_dir).map_err(|e| format!("Failed to create src directory: {}", e))?;
+        fs::create_dir(&src_dir)
+            .map_err(|e| KslError::new(ErrorType::FileError, format!("Failed to create src directory: {}", e)))?;
 
-        // Render and write ksl_package.toml
-        let package_toml_content = template.package_toml.replace("{name}", name);
+        // Initialize project configuration
+        let mut config = self.config_manager.lock().await;
+        let project_config = ProjectConfig {
+            name: name.to_string(),
+            template: template_name.to_string(),
+            version: template.package_metadata.version.clone(),
+            license: template.package_metadata.license.clone(),
+        };
+        config.save_project_config(&project_config)
+            .await
+            .map_err(|e| KslError::new(ErrorType::ConfigError, e.to_string()))?;
+
+        // Write package metadata
+        let mut package_metadata = template.package_metadata.clone();
+        package_metadata.name = name.to_string();
         let package_toml_path = project_dir.join("ksl_package.toml");
         let mut package_toml_file = File::create(&package_toml_path)
-            .map_err(|e| format!("Failed to create ksl_package.toml: {}", e))?;
-        package_toml_file.write_all(package_toml_content.as_bytes())
-            .map_err(|e| format!("Failed to write ksl_package.toml: {}", e))?;
+            .map_err(|e| KslError::new(ErrorType::FileError, format!("Failed to create ksl_package.toml: {}", e)))?;
+        package_toml_file.write_all(package_metadata.to_toml().as_bytes())
+            .map_err(|e| KslError::new(ErrorType::FileError, format!("Failed to write ksl_package.toml: {}", e)))?;
 
         // Write src/main.ksl
         let main_ksl_path = src_dir.join("main.ksl");
         let mut main_ksl_file = File::create(&main_ksl_path)
-            .map_err(|e| format!("Failed to create src/main.ksl: {}", e))?;
+            .map_err(|e| KslError::new(ErrorType::FileError, format!("Failed to create src/main.ksl: {}", e)))?;
         main_ksl_file.write_all(template.main_ksl.as_bytes())
-            .map_err(|e| format!("Failed to write src/main.ksl: {}", e))?;
+            .map_err(|e| KslError::new(ErrorType::FileError, format!("Failed to write src/main.ksl: {}", e)))?;
+
+        // Execute async initialization tasks
+        let mut async_ctx = self.async_context.lock().await;
+        let command = AsyncCommand::ProjectInit(project_config);
+        async_ctx.execute_command(command)
+            .await
+            .map_err(|e| KslError::new(ErrorType::AsyncError, e.to_string()))?;
 
         Ok(())
     }
 }
 
 /// CLI integration for `ksl project init <name> --template <type>` (used by ksl_cli.rs).
-pub fn run_project_init(name: &str, template: &str) -> Result<String, String> {
+pub async fn run_project_init(name: &str, template: &str) -> Result<String, KslError> {
     let initializer = ProjectInitializer::new();
-    initializer.init(name, template)?;
+    initializer.init(name, template).await?;
     Ok(format!(
         "Project '{}' initialized successfully with template '{}'.",
         name, template

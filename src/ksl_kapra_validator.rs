@@ -1,5 +1,15 @@
 // ksl_kapra_validator.rs
 // Language-level validator primitives for Kapra Chain
+// Implements transaction and block validation for the Kapra blockchain, ensuring
+// integrity through cryptographic verification and consensus integration.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use crate::ksl_async::{AsyncRuntime, AsyncResult};
+use crate::ksl_kapra_consensus::{ConsensusRuntime, ConsensusState};
+use crate::ksl_contract::{ContractState, ContractCompiler};
+use crate::ksl_errors::{KslError, SourcePosition};
 
 /// Represents KSL bytecode (aligned with ksl_bytecode.rs).
 #[derive(Debug, Clone)]
@@ -114,28 +124,12 @@ impl KapraCrypto {
     }
 }
 
-/// Sharding runtime (aligned with ksl_kapra_shard.rs).
+/// Validator state for tracking validation information
 #[derive(Debug, Clone)]
-pub struct ShardRuntime {
-    shard_count: u32,
-}
-
-impl ShardRuntime {
-    pub fn new(shard_count: u32) -> Self {
-        ShardRuntime { shard_count }
-    }
-
-    pub fn shard_route(&self, account: &[u8; 32]) -> u32 {
-        let hash = account.iter().fold(0u32, |acc, &x| acc.wrapping_add(x as u32));
-        hash % self.shard_count
-    }
-
-    pub fn shard_send(&self, shard_id: u32, message: &[u8; 32]) -> bool {
-        if shard_id >= self.shard_count {
-            return false;
-        }
-        true
-    }
+pub struct ValidatorState {
+    pub last_validated_block: [u8; 32],
+    pub contract_states: HashMap<[u8; 32], ContractState>,
+    pub signatures: HashMap<[u8; 32], [u8; 2420]>, // validator_id -> signature
 }
 
 /// Kapra VM with validator support (aligned with kapra_vm.rs).
@@ -143,21 +137,34 @@ impl ShardRuntime {
 pub struct KapraVM {
     stack: Vec<u64>,
     crypto: KapraCrypto,
-    shard_runtime: ShardRuntime,
-    async_tasks: Vec<AsyncTask>,
+    consensus_runtime: Arc<ConsensusRuntime>,
+    async_runtime: Arc<AsyncRuntime>,
+    contract_compiler: Arc<ContractCompiler>,
+    validator_state: Arc<RwLock<ValidatorState>>,
 }
 
 impl KapraVM {
-    pub fn new(shard_count: u32, is_embedded: bool) -> Self {
+    pub fn new(
+        is_embedded: bool,
+        consensus_runtime: Arc<ConsensusRuntime>,
+        async_runtime: Arc<AsyncRuntime>,
+        contract_compiler: Arc<ContractCompiler>,
+    ) -> Self {
         KapraVM {
             stack: vec![],
             crypto: KapraCrypto::new(is_embedded),
-            shard_runtime: ShardRuntime::new(shard_count),
-            async_tasks: vec![],
+            consensus_runtime,
+            async_runtime,
+            contract_compiler,
+            validator_state: Arc::new(RwLock::new(ValidatorState {
+                last_validated_block: [0; 32],
+                contract_states: HashMap::new(),
+                signatures: HashMap::new(),
+            })),
         }
     }
 
-    pub fn execute(&mut self, bytecode: &Bytecode) -> Result<bool, String> {
+    pub async fn execute(&mut self, bytecode: &Bytecode) -> AsyncResult<bool> {
         let mut ip = 0;
         while ip < bytecode.instructions.len() {
             let instr = bytecode.instructions[ip];
@@ -166,17 +173,22 @@ impl KapraVM {
             match instr {
                 OPCODE_SHA3 => {
                     if self.stack.len() < 1 {
-                        return Err("Not enough values on stack for SHA3".to_string());
+                        return Err(KslError::type_error(
+                            "Not enough values on stack for SHA3".to_string(),
+                            SourcePosition::new(1, 1),
+                        ));
                     }
                     let input_idx = self.stack.pop().unwrap() as usize;
                     let input = match &bytecode.constants[input_idx] {
                         Constant::Array1024(arr) => arr,
-                        _ => return Err("Invalid type for SHA3 argument".to_string()),
+                        _ => return Err(KslError::type_error(
+                            "Invalid type for SHA3 argument".to_string(),
+                            SourcePosition::new(1, 1),
+                        )),
                     };
                     let hash = self.crypto.sha3(&input[..]);
                     let const_idx = bytecode.constants.len();
                     self.stack.push(const_idx as u64);
-                    // Mutable borrow issue workaround: collect constants into a new vec
                     let mut new_constants = bytecode.constants.clone();
                     new_constants.push(Constant::Array32(hash.data));
                     let new_bytecode = Bytecode::new(bytecode.instructions.clone(), new_constants);
@@ -184,86 +196,145 @@ impl KapraVM {
                 }
                 OPCODE_DIL_VERIFY => {
                     if self.stack.len() < 3 {
-                        return Err("Not enough values on stack for DIL_VERIFY".to_string());
+                        return Err(KslError::type_error(
+                            "Not enough values on stack for DIL_VERIFY".to_string(),
+                            SourcePosition::new(1, 1),
+                        ));
                     }
                     let sig_idx = self.stack.pop().unwrap() as usize;
                     let pubkey_idx = self.stack.pop().unwrap() as usize;
                     let msg_idx = self.stack.pop().unwrap() as usize;
                     let message = match &bytecode.constants[msg_idx] {
                         Constant::Array32(arr) => FixedArray::new(*arr),
-                        _ => return Err("Invalid type for DIL_VERIFY message".to_string()),
+                        _ => return Err(KslError::type_error(
+                            "Invalid type for DIL_VERIFY message".to_string(),
+                            SourcePosition::new(1, 1),
+                        )),
                     };
                     let pubkey = match &bytecode.constants[pubkey_idx] {
                         Constant::Array1312(arr) => FixedArray::new(*arr),
-                        _ => return Err("Invalid type for DIL_VERIFY pubkey".to_string()),
+                        _ => return Err(KslError::type_error(
+                            "Invalid type for DIL_VERIFY pubkey".to_string(),
+                            SourcePosition::new(1, 1),
+                        )),
                     };
                     let signature = match &bytecode.constants[sig_idx] {
                         Constant::Array2420(arr) => FixedArray::new(*arr),
-                        _ => return Err("Invalid type for DIL_VERIFY signature".to_string()),
+                        _ => return Err(KslError::type_error(
+                            "Invalid type for DIL_VERIFY signature".to_string(),
+                            SourcePosition::new(1, 1),
+                        )),
                     };
                     let result = self.crypto.dil_verify(&message, &pubkey, &signature);
                     self.stack.push(result as u64);
                 }
-                OPCODE_KAPREKAR => {
-                    if self.stack.len() < 1 {
-                        return Err("Not enough values on stack for KAPREKAR".to_string());
+                OPCODE_VALIDATE_CONTRACT => {
+                    if self.stack.len() < 2 {
+                        return Err(KslError::type_error(
+                            "Not enough values on stack for VALIDATE_CONTRACT".to_string(),
+                            SourcePosition::new(1, 1),
+                        ));
                     }
-                    let input_idx = self.stack.pop().unwrap() as usize;
-                    let input = match &bytecode.constants[input_idx] {
-                        Constant::Array32(arr) => &arr[0..4],
-                        _ => return Err("Invalid type for KAPREKAR argument".to_string()),
-                    };
-                    let result = self.kaprekar(input);
-                    self.stack.push(result as u64);
-                }
-                OPCODE_SHARD => {
-                    if self.stack.len() < 1 {
-                        return Err("Not enough values on stack for SHARD".to_string());
-                    }
-                    let account_idx = self.stack.pop().unwrap() as usize;
-                    let account = match &bytecode.constants[account_idx] {
+                    let contract_idx = self.stack.pop().unwrap() as usize;
+                    let function_idx = self.stack.pop().unwrap() as usize;
+                    let contract = match &bytecode.constants[contract_idx] {
                         Constant::Array32(arr) => arr,
-                        _ => return Err("Invalid type for SHARD argument".to_string()),
+                        _ => return Err(KslError::type_error(
+                            "Invalid type for VALIDATE_CONTRACT contract".to_string(),
+                            SourcePosition::new(1, 1),
+                        )),
                     };
-                    let shard_id = self.shard_runtime.shard_route(account);
-                    let success = self.shard_runtime.shard_send(shard_id, account);
-                    self.async_tasks.push(AsyncTask::ShardSend(shard_id, *account));
-                    self.stack.push(shard_id as u64);
-                    self.stack.push(success as u64);
+                    let function = match &bytecode.constants[function_idx] {
+                        Constant::String(s) => s,
+                        _ => return Err(KslError::type_error(
+                            "Invalid type for VALIDATE_CONTRACT function".to_string(),
+                            SourcePosition::new(1, 1),
+                        )),
+                    };
+
+                    // Get contract state
+                    let validator_state = self.validator_state.read().await;
+                    let contract_state = validator_state.contract_states.get(contract).ok_or_else(|| {
+                        KslError::type_error(
+                            format!("Contract {} not found", hex::encode(contract)),
+                            SourcePosition::new(1, 1),
+                        )
+                    })?;
+
+                    // Validate contract execution
+                    let result = self.contract_compiler.execute_async(contract_state, function, vec![]).await?;
+                    self.stack.push(match result {
+                        Type::Bool(b) => b as u64,
+                        _ => 0,
+                    });
                 }
-                OPCODE_FAIL => {
-                    return Err("Validation failed".to_string());
+                OPCODE_VALIDATE_CONSENSUS => {
+                    if self.stack.len() < 1 {
+                        return Err(KslError::type_error(
+                            "Not enough values on stack for VALIDATE_CONSENSUS".to_string(),
+                            SourcePosition::new(1, 1),
+                        ));
+                    }
+                    let block_idx = self.stack.pop().unwrap() as usize;
+                    let block = match &bytecode.constants[block_idx] {
+                        Constant::Array32(arr) => arr,
+                        _ => return Err(KslError::type_error(
+                            "Invalid type for VALIDATE_CONSENSUS block".to_string(),
+                            SourcePosition::new(1, 1),
+                        )),
+                    };
+
+                    // Validate with consensus
+                    let is_valid = self.consensus_runtime.validate_block(block, 0).await?;
+                    self.stack.push(is_valid as u64);
+
+                    // Update validator state
+                    let mut validator_state = self.validator_state.write().await;
+                    validator_state.last_validated_block = *block;
                 }
-                _ => return Err(format!("Unsupported opcode: {}", instr)),
+                OPCODE_PUSH => {
+                    if ip >= bytecode.instructions.len() {
+                        return Err(KslError::type_error(
+                            "Incomplete PUSH instruction".to_string(),
+                            SourcePosition::new(1, 1),
+                        ));
+                    }
+                    let value = bytecode.instructions[ip] as u64;
+                    ip += 1;
+                    self.stack.push(value);
+                }
+                OPCODE_POP => {
+                    if self.stack.is_empty() {
+                        return Err(KslError::type_error(
+                            "Stack underflow".to_string(),
+                            SourcePosition::new(1, 1),
+                        ));
+                    }
+                    self.stack.pop();
+                }
+                _ => return Err(KslError::type_error(
+                    format!("Unsupported opcode: {}", instr),
+                    SourcePosition::new(1, 1),
+                )),
             }
         }
 
         // Return the final result (bool)
         if self.stack.len() != 1 {
-            return Err("Validator block must return exactly one boolean value".to_string());
+            return Err(KslError::type_error(
+                "Validator block must return exactly one boolean value".to_string(),
+                SourcePosition::new(1, 1),
+            ));
         }
         Ok(self.stack[0] != 0)
-    }
-
-    // Simplified Kaprekar computation
-    fn kaprekar(&self, input: &[u8]) -> u16 {
-        if input.len() != 4 {
-            return 0;
-        }
-        let num = u32::from_le_bytes([input[0], input[1], input[2], input[3]]);
-        // Simplified: Always return 6174 for the example
-        if num == 0 {
-            0
-        } else {
-            6174
-        }
     }
 }
 
 /// Represents an async task (aligned with ksl_async.rs).
 #[derive(Debug, Clone)]
 pub enum AsyncTask {
-    ShardSend(u32, [u8; 32]),
+    ValidateContract([u8; 32], String),
+    ValidateConsensus([u8; 32]),
 }
 
 /// Validator compiler for Kapra Chain.

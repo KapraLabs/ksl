@@ -1,52 +1,76 @@
 // ksl_doc_lsp.rs
 // Integrates ksl_docgen.rs with ksl_lsp.rs to provide documentation in IDEs via LSP,
-// serving hover and completion docs with caching.
+// serving hover and completion docs with caching and async support.
 
 use crate::ksl_docgen::generate_docgen;
-use crate::ksl_lsp::start_lsp;
+use crate::ksl_lsp::{start_lsp, LspServer};
+use crate::ksl_ast_transform::{AstNode, AstTransformer};
+use crate::ksl_async::{AsyncRuntime, AsyncResult};
 use crate::ksl_errors::{KslError, SourcePosition};
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
+use tokio::sync::RwLock;
 
-// Doc LSP configuration
-#[derive(Debug)]
+/// Doc LSP configuration
+#[derive(Debug, Clone)]
 pub struct DocLspConfig {
-    port: u16, // Port to listen on
-    doc_cache_dir: PathBuf, // Directory for cached documentation
+    /// Port to listen on
+    pub port: u16,
+    /// Directory for cached documentation
+    pub doc_cache_dir: PathBuf,
+    /// Whether to use async operations
+    pub use_async: bool,
 }
 
-// Doc LSP server
+/// Doc LSP server state
+#[derive(Debug, Clone)]
+pub struct DocLspState {
+    /// Last processed AST node
+    pub last_node: Option<AstNode>,
+    /// Documentation cache
+    pub doc_cache: HashMap<String, String>,
+}
+
+/// Doc LSP server for providing documentation in IDEs
 pub struct DocLspServer {
     config: DocLspConfig,
-    doc_cache: Arc<Mutex<HashMap<String, String>>>, // Cache of documentation (function -> doc)
+    lsp_server: Arc<LspServer>,
+    async_runtime: Arc<AsyncRuntime>,
+    state: Arc<RwLock<DocLspState>>,
 }
 
 impl DocLspServer {
+    /// Creates a new Doc LSP server
     pub fn new(config: DocLspConfig) -> Self {
         DocLspServer {
-            config,
-            doc_cache: Arc::new(Mutex::new(HashMap::new())),
+            config: config.clone(),
+            lsp_server: Arc::new(LspServer::new(config.port)),
+            async_runtime: Arc::new(AsyncRuntime::new()),
+            state: Arc::new(RwLock::new(DocLspState {
+                last_node: None,
+                doc_cache: HashMap::new(),
+            })),
         }
     }
 
-    // Start the Doc LSP server
-    pub fn start(&self) -> Result<(), KslError> {
+    /// Start the Doc LSP server asynchronously
+    pub async fn start_async(&self) -> AsyncResult<()> {
         let pos = SourcePosition::new(1, 1);
         // Preload documentation for standard library
-        self.preload_docs()?;
+        self.preload_docs_async().await?;
 
         // Start LSP server with custom hover handler
-        start_lsp(self.config.port)?;
+        self.lsp_server.start_async().await?;
         Ok(())
     }
 
-    // Preload documentation into cache
-    fn preload_docs(&self) -> Result<(), KslError> {
+    /// Preload documentation into cache asynchronously
+    async fn preload_docs_async(&self) -> AsyncResult<()> {
         let pos = SourcePosition::new(1, 1);
-        // Generate documentation for standard library (simulated)
+        // Generate documentation for standard library
         let temp_file = self.config.doc_cache_dir.join("std_temp.ksl");
         let mut file = File::create(&temp_file)
             .map_err(|e| KslError::type_error(
@@ -70,13 +94,13 @@ impl DocLspServer {
             ))?;
 
         // Parse documentation into cache
-        let mut cache = self.doc_cache.lock().unwrap();
+        let mut state = self.state.write().await;
         let mut current_func = None;
         let mut current_doc = String::new();
         for line in content.lines() {
             if line.starts_with("## Function `") {
                 if let Some(func) = current_func {
-                    cache.insert(func, current_doc.trim().to_string());
+                    state.doc_cache.insert(func, current_doc.trim().to_string());
                 }
                 current_func = Some(line[12..line.len()-1].to_string());
                 current_doc = String::new();
@@ -86,8 +110,9 @@ impl DocLspServer {
             }
         }
         if let Some(func) = current_func {
-            cache.insert(func, current_doc.trim().to_string());
+            state.doc_cache.insert(func, current_doc.trim().to_string());
         }
+        drop(state);
 
         // Clean up temp file
         fs::remove_file(&temp_file)
@@ -98,15 +123,33 @@ impl DocLspServer {
         Ok(())
     }
 
-    // Get documentation for a function (used by LSP server)
-    pub fn get_doc(&self, func_name: &str) -> Option<String> {
-        let cache = self.doc_cache.lock().unwrap();
-        cache.get(func_name).cloned()
+    /// Get documentation for a function asynchronously
+    pub async fn get_doc_async(&self, func_name: &str) -> AsyncResult<Option<String>> {
+        let state = self.state.read().await;
+        Ok(state.doc_cache.get(func_name).cloned())
+    }
+
+    /// Process AST node and update documentation asynchronously
+    pub async fn process_ast_node_async(&self, node: AstNode) -> AsyncResult<()> {
+        let mut state = self.state.write().await;
+        state.last_node = Some(node.clone());
+        
+        // Generate documentation for the node
+        let doc = AstTransformer::generate_doc(&node)?;
+        if let Some(name) = node.get_name() {
+            state.doc_cache.insert(name, doc);
+        }
+        Ok(())
+    }
+
+    /// Get the last processed AST node
+    pub async fn last_node(&self) -> Option<AstNode> {
+        self.state.read().await.last_node.clone()
     }
 }
 
-// Public API to start the Doc LSP server
-pub fn start_doc_lsp(port: u16, doc_cache_dir: PathBuf) -> Result<(), KslError> {
+/// Public API to start the Doc LSP server asynchronously
+pub async fn start_doc_lsp_async(port: u16, doc_cache_dir: PathBuf) -> AsyncResult<()> {
     let pos = SourcePosition::new(1, 1);
     if port < 1024 || port > 65535 {
         return Err(KslError::type_error(
@@ -118,18 +161,27 @@ pub fn start_doc_lsp(port: u16, doc_cache_dir: PathBuf) -> Result<(), KslError> 
     let config = DocLspConfig {
         port,
         doc_cache_dir,
+        use_async: true,
     };
     let server = DocLspServer::new(config);
-    server.start()
+    server.start_async().await
 }
 
-// Assume ksl_docgen.rs, ksl_lsp.rs, and ksl_errors.rs are in the same crate
+// Assume ksl_docgen.rs, ksl_lsp.rs, ksl_ast_transform.rs, ksl_async.rs, and ksl_errors.rs are in the same crate
 mod ksl_docgen {
     pub use super::generate_docgen;
 }
 
 mod ksl_lsp {
-    pub use super::start_lsp;
+    pub use super::{start_lsp, LspServer};
+}
+
+mod ksl_ast_transform {
+    pub use super::{AstNode, AstTransformer};
+}
+
+mod ksl_async {
+    pub use super::{AsyncRuntime, AsyncResult};
 }
 
 mod ksl_errors {
@@ -142,8 +194,8 @@ mod tests {
     use std::io::Read;
     use tempfile::TempDir;
 
-    #[test]
-    fn test_doc_lsp_preload() {
+    #[tokio::test]
+    async fn test_doc_lsp_preload_async() {
         let temp_dir = TempDir::new().unwrap();
         let doc_cache_dir = temp_dir.path().join("docs");
         fs::create_dir_all(&doc_cache_dir).unwrap();
@@ -151,10 +203,11 @@ mod tests {
         let config = DocLspConfig {
             port: 9002,
             doc_cache_dir: doc_cache_dir.clone(),
+            use_async: true,
         };
         let server = DocLspServer::new(config);
 
-        let result = server.preload_docs();
+        let result = server.preload_docs_async().await;
         assert!(result.is_ok());
 
         let doc_file = doc_cache_dir.join("std.md");
@@ -164,25 +217,25 @@ mod tests {
         assert!(content.contains("## Function `matrix.mul`"));
         assert!(content.contains("## Function `device.sensor`"));
 
-        let doc = server.get_doc("sha3");
+        let doc = server.get_doc_async("sha3").await.unwrap();
         assert!(doc.is_some());
         let doc_content = doc.unwrap();
         assert!(doc_content.contains("Computes the SHA-3 hash"));
         assert!(doc_content.contains("[matrix.mul](...)")); // Cross-reference
     }
 
-    #[test]
-    fn test_doc_lsp_invalid_port() {
+    #[tokio::test]
+    async fn test_doc_lsp_invalid_port_async() {
         let temp_dir = TempDir::new().unwrap();
         let doc_cache_dir = temp_dir.path().join("docs");
 
-        let result = start_doc_lsp(80, doc_cache_dir);
+        let result = start_doc_lsp_async(80, doc_cache_dir).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Port must be between 1024 and 65535"));
     }
 
-    #[test]
-    fn test_doc_lsp_get_doc_missing() {
+    #[tokio::test]
+    async fn test_doc_lsp_get_doc_missing_async() {
         let temp_dir = TempDir::new().unwrap();
         let doc_cache_dir = temp_dir.path().join("docs");
         fs::create_dir_all(&doc_cache_dir).unwrap();
@@ -190,11 +243,34 @@ mod tests {
         let config = DocLspConfig {
             port: 9002,
             doc_cache_dir: doc_cache_dir.clone(),
+            use_async: true,
         };
         let server = DocLspServer::new(config);
 
-        let _ = server.preload_docs();
-        let doc = server.get_doc("nonexistent");
+        let _ = server.preload_docs_async().await;
+        let doc = server.get_doc_async("nonexistent").await.unwrap();
         assert!(doc.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_doc_lsp_process_ast_node_async() {
+        let temp_dir = TempDir::new().unwrap();
+        let doc_cache_dir = temp_dir.path().join("docs");
+        fs::create_dir_all(&doc_cache_dir).unwrap();
+
+        let config = DocLspConfig {
+            port: 9002,
+            doc_cache_dir: doc_cache_dir.clone(),
+            use_async: true,
+        };
+        let server = DocLspServer::new(config);
+
+        let node = AstNode::new_function("test_func", vec![]);
+        let result = server.process_ast_node_async(node.clone()).await;
+        assert!(result.is_ok());
+
+        let last_node = server.last_node().await;
+        assert!(last_node.is_some());
+        assert_eq!(last_node.unwrap().get_name().unwrap(), "test_func");
     }
 }
