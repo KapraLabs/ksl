@@ -1,5 +1,24 @@
 // ksl_debug.rs
 // Implements a debugging framework for KSL programs.
+// 
+// The debugger provides interactive debugging capabilities for KSL programs,
+// including breakpoints, step-by-step execution, and state inspection.
+// 
+// New features:
+// - Network state inspection: View active connections and pending requests
+// - Async task monitoring: Track active and pending async tasks
+// - Enhanced state display: Shows networking and async task information
+// 
+// Usage:
+//   debug(file) -> Starts an interactive debugging session
+//   Commands:
+//     break <index>  - Set breakpoint at instruction index
+//     step          - Execute one instruction
+//     continue      - Run until breakpoint or end
+//     print <target> - Print register or memory value
+//     net           - Display detailed network state
+//     tasks         - Display detailed async task state
+//     quit          - Exit debugger
 
 use crate::ksl_parser::parse;
 use crate::ksl_checker::check;
@@ -18,6 +37,8 @@ enum DebugCommand {
     Step, // Execute one instruction
     Continue, // Run until breakpoint or end
     Print(String), // Print register (e.g., "r0") or memory (e.g., "mem 0x100")
+    Net, // Display network state
+    Tasks, // Display async tasks state
     Quit, // Exit debugger
 }
 
@@ -72,7 +93,7 @@ impl Debugger {
 
     // Start the debugging session
     pub fn run(&mut self) -> Result<(), String> {
-        println!("KSL Debugger started. Commands: break <index>, step, continue, print <rN/mem addr>, quit");
+        println!("KSL Debugger started. Commands: break <index>, step, continue, print <rN/mem addr>, net, tasks, quit");
         while self.running {
             self.print_state();
             match self.read_command() {
@@ -110,6 +131,10 @@ impl Debugger {
                 return Err("Invalid print command: use 'print <rN/mem addr>'".to_string());
             }
             return Ok(DebugCommand::Print(parts[1].to_string()));
+        } else if input == "net" {
+            return Ok(DebugCommand::Net);
+        } else if input == "tasks" {
+            return Ok(DebugCommand::Tasks);
         }
 
         Err("Unknown command".to_string())
@@ -162,6 +187,50 @@ impl Debugger {
                     return Err("Invalid print target: use 'rN' or 'mem addr'".to_string());
                 }
             }
+            DebugCommand::Net => {
+                if let Some(net_state) = &self.vm.network_state {
+                    println!("Network State:");
+                    println!("  Active Connections ({}):", net_state.active_connections.len());
+                    for (id, conn) in &net_state.active_connections {
+                        println!("    Connection {}:", id);
+                        println!("      Type: {:?}", conn.conn_type);
+                        println!("      State: {:?}", conn.state);
+                        println!("      Local Address: {:?}", conn.local_addr);
+                        println!("      Remote Address: {:?}", conn.remote_addr);
+                        println!("      Buffer Size: {}", conn.buffer.len());
+                    }
+                    println!("  Pending Requests ({}):", net_state.pending_requests.len());
+                    for (id, req) in &net_state.pending_requests {
+                        println!("    Request {}:", id);
+                        println!("      Type: {:?}", req.request_type);
+                        println!("      URL: {}", req.url);
+                        println!("      Headers: {:?}", req.headers);
+                    }
+                } else {
+                    println!("No network state available");
+                }
+            }
+            DebugCommand::Tasks => {
+                if let Some(task_state) = &self.vm.task_state {
+                    println!("Async Tasks:");
+                    println!("  Active Tasks ({}):", task_state.active_tasks.len());
+                    for (id, task) in &task_state.active_tasks {
+                        println!("    Task {}:", id);
+                        println!("      State: {:?}", task.state);
+                        println!("      PC: 0x{:04x}", task.pc);
+                        println!("      Stack Size: {}", task.stack.len());
+                        println!("      Registers: {:?}", task.registers);
+                    }
+                    println!("  Pending Tasks ({}):", task_state.pending_tasks.len());
+                    for (id, task) in &task_state.pending_tasks {
+                        println!("    Task {}:", id);
+                        println!("      Priority: {}", task.priority);
+                        println!("      Creation Time: {:?}", task.creation_time);
+                    }
+                } else {
+                    println!("No async task state available");
+                }
+            }
             DebugCommand::Quit => {
                 self.running = false;
             }
@@ -194,6 +263,26 @@ impl Debugger {
         }
         if !self.breakpoints.is_empty() {
             println!("Breakpoints: {:?}", self.breakpoints);
+        }
+
+        // Display networking state
+        if let Some(net_state) = &self.vm.network_state {
+            println!("Network State:");
+            println!("  Active Connections: {}", net_state.active_connections.len());
+            for (id, conn) in &net_state.active_connections {
+                println!("    Connection {}: {:?}", id, conn);
+            }
+            println!("  Pending Requests: {}", net_state.pending_requests.len());
+        }
+
+        // Display async task state
+        if let Some(task_state) = &self.vm.task_state {
+            println!("Async Tasks:");
+            println!("  Active Tasks: {}", task_state.active_tasks.len());
+            for (id, task) in &task_state.active_tasks {
+                println!("    Task {}: {:?}", id, task);
+            }
+            println!("  Pending Tasks: {}", task_state.pending_tasks.len());
         }
     }
 }

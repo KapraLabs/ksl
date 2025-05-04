@@ -1,0 +1,207 @@
+# KSL File Inventory
+## Processed Files
+### Batch 1 (First 10 Files)
+- **ksl_parser.rs**: Parses KSL source into AST.
+  - Documentation: Partial (sample `///` comments added).
+  - Integration: Complete (used by `ksl_checker.rs`, `ksl_cli.rs`).
+  - Issues: Complete `///` comments for all public items.
+- **ksl_checker.rs**: Performs type checking on KSL AST.
+  - Documentation: Partial (sample `///` comments added).
+  - Integration: Complete (uses `ksl_parser.rs`, `ksl_types.rs`; used by `ksl_cli.rs`).
+  - Issues: Complete `///` comments; remove redundant `AstNode` re-export.
+- **ksl_types.rs**: Defines KSL type system and utilities.
+  - Documentation: Partial (sample `///` comments added).
+  - Integration: Complete (used by multiple files).
+  - Issues: Complete `///` comments; remove redundant `AstNode` re-export.
+- **ksl_bytecode.rs**: Defines KapraBytecode 2.0 format.
+  - Documentation: Partial (sample `///` comments added).
+  - Integration: Complete (used by `kapra_vm.rs`, `ksl_wasm.rs`).
+  - Issues: Complete `///` comments.
+- **kapra_vm.rs**: Executes KapraBytecode for KSL programs.
+  - Documentation: Partial (sample `///` comments added).
+  - Integration: Partial (needs `ksl_hot_reload.rs`, `ksl_kapra_crypto.rs`).
+  - Issues: Complete `///` comments; implement real crypto; add `reload_bytecode`.
+- **ksl_stdlib.rs**: Minimal KSL standard library.
+  - Documentation: Partial (sample `///` comments added).
+  - Integration: Complete (used by `kapra_vm.rs`).
+  - Issues: Complete `///` comments; add function-specific docs.
+- **ksl_stdlib_crypto.rs**: Cryptographic functions for KSL.
+  - Documentation: Partial (sample `///` comments added).
+  - Integration: Complete (used by `kapra_vm.rs`).
+  - Issues: Complete `///` comments; needs real crypto from `ksl_kapra_crypto.rs`.
+- **ksl_cli.rs**: CLI for KSL programs.
+  - Documentation: Partial (sample `///` comments added).
+  - Integration: Complete (depends on `ksl_compiler.rs`).
+  - Issues: Complete `///` comments.
+- **ksl_errors.rs**: Unified error handling for KSL.
+  - Documentation: Partial (sample `///` comments added).
+  - Integration: Complete (used by multiple files).
+  - Issues: Complete `///` comments.
+- **ksl_wasm.rs**: Translates KapraBytecode to WebAssembly.
+  - Documentation: Partial (sample `///` comments added).
+  - Integration: Complete (uses `ksl_bytecode.rs`).
+  - Issues: Complete `///` comments.
+
+### Batch 2 (Next 9 Files)
+- **ksl_stdlib_io.rs**: I/O functions for KSL standard library (HTTP, sensors).
+  - Documentation: Partial (sample `///` comments added).
+  - Integration: Complete (VM opcodes implemented in Batch 3).
+  - Issues: Complete `///` comments.
+- **ksl_compiler.rs**: Compiles KSL AST to KapraBytecode.
+  - Documentation: Partial (sample `///` comments added).
+  - Integration: Complete (uses `ksl_parser.rs`, `ksl_types.rs`, `ksl_stdlib.rs`; used by `ksl_cli.rs`).
+  - Issues: Complete `///` comments.
+- **ksl_verifier.rs**: Z3-based formal verification for KSL functions.
+  - Documentation: Partial (sample `///` comments added).
+  - Integration: Complete (uses `ksl_parser.rs`, `ksl_stdlib.rs`).
+  - Issues: Complete `///` comments; improve postcondition parsing.
+- **ksl_debug.rs**: Debugging framework for KSL programs.
+  - Documentation: Partial (sample `///` comments added).
+  - Integration: Complete (uses `ksl_parser.rs`, `ksl_checker.rs`, `kapra_vm.rs`).
+  - Issues: Complete `///` comments.
+- **ksl_module.rs**: KSL module system for code organization.
+  - Documentation: Partial (sample `///` comments added).
+  - Integration: Complete (uses `ksl_parser.rs`, `ksl_checker.rs`; used by `ksl_doc.rs`).
+  - Issues: Complete `///` comments.
+- **ksl_linter.rs**: Static analysis tool for KSL code standards.
+  - Documentation: Partial (sample `///` comments added).
+  - Integration: Complete (uses `ksl_parser.rs`, `ksl_module.rs`).
+  - Issues: Complete `///` comments; implement unused variable detection.
+- **ksl_test.rs**: Testing framework for KSL programs.
+  - Documentation: Partial (sample `///` comments added).
+  - Integration: Complete (uses `ksl_parser.rs`, `ksl_checker.rs`, `kapra_vm.rs`).
+  - Issues: Complete `///` comments; improve test function detection.
+- **ksl_doc.rs**: Documentation generator for KSL programs and standard library.
+  - Documentation: Partial (sample `///` comments added).
+  - Integration: Complete (uses `ksl_parser.rs`, `ksl_module.rs`, `ksl_stdlib.rs`).
+  - Issues: Complete `///` comments; add standard library function docs.
+- **ksl_stdlib_math.rs**: Mathematical functions for KSL standard library.
+  - Documentation: Partial (sample `///` comments added).
+  - Integration: Complete (VM opcodes implemented in Batch 3).
+  - Issues: Complete `///` comments.
+- **ksl_package.rs**: KSL package management system.
+  - Documentation: Partial (sample `///` comments added).
+  - Integration: Complete (uses `ksl_module.rs`).
+  - Issues: Complete `///` comments.
+
+### Batch 3 (Next 8 Files)
+- **ksl_bench.rs**: Benchmarking framework for KSL programs.
+  - Documentation: Partial (sample `///` comments added).
+  - Integration: Complete (uses `ksl_parser.rs`, `ksl_checker.rs`, `kapra_vm.rs`, `ksl_module.rs`).
+  - Issues: Complete `///` comments; improve function index detection.
+- **ksl_fuzzer.rs**: Fuzz testing framework for KSL programs.
+  - Documentation: Partial (sample `///` comments added).
+  - Integration: Complete (uses `ksl_parser.rs`, `ksl_checker.rs`, `kapra_vm.rs`, `ksl_module.rs`).
+  - Issues: Complete `///` comments; improve function index detection.
+- **ksl_formatter.rs**: Auto-formatting tool for KSL code.
+  - Documentation: Partial (sample `///` comments added).
+  - Integration: Complete (uses `ksl_parser.rs`, `ksl_module.rs`).
+  - Issues: Complete `///` comments.
+- **ksl_analyzer.rs**: Dynamic analysis tool for KSL program profiling.
+  - Documentation: Partial (sample `///` comments added).
+  - Integration: Complete (VM profiling extension implemented in Batch 3).
+  - Issues: Complete `///` comments.
+- **ksl_profile.rs**: Advanced profiling with call graph and flame graphs.
+  - Documentation: Partial (sample `///` comments added).
+  - Integration: Complete (ProfileVM trait implemented in Batch 3).
+  - Issues: Complete `///` comments.
+- **ksl_registry.rs**: Remote package registry client for KSL.
+  - Documentation: Partial (sample `///` comments added).
+  - Integration: Complete (uses `ksl_package.rs`).
+  - Issues: Complete `///` comments; simulate registry server for tests.
+- **ksl_aot.rs**: Ahead-of-Time compilation for KSL to native code.
+  - Documentation: Partial (sample `///` comments added).
+  - Integration: Complete (uses `ksl_parser.rs`, `ksl_checker.rs`, `ksl_bytecode.rs`).
+  - Issues: Complete `///` comments; support more opcodes in Cranelift.
+- **ksl_bind.rs**: FFI binding generator for KSL programs.
+  - Documentation: Partial (sample `///` comments added).
+  - Integration: Complete (uses `ksl_parser.rs`, `ksl_module.rs`).
+  - Issues: Complete `///` comments.
+- **ksl_repl.rs**: Interactive REPL for KSL programs.
+  - Documentation: Partial (sample `///` comments added).
+  - Integration: Complete (uses `ksl_parser.rs`, `ksl_checker.rs`, `kapra_vm.rs`, `ksl_module.rs`).
+  - Issues: Complete `///` comments; improve result display.
+- **ksl_sandbox.rs**: Sandboxing system for secure KSL execution.
+  - Documentation: Partial (sample `///` comments added).
+  - Integration: Complete (VM sandboxing extension implemented in Batch 3).
+  - Issues: Complete `///` comments.
+
+### Batch 4 (Next 9 Files)
+- **ksl_coverage.rs**: Code coverage measurement for KSL tests.
+  - Documentation: Partial (sample `///` comments added).
+  - Integration: Complete (CoverageVM trait implemented in Batch 4).
+  - Issues: Complete `///` comments.
+- **ksl_deploy.rs**: Packaging and deployment for KSL programs.
+  - Documentation: Partial (sample `///` comments added).
+  - Integration: Complete (uses `ksl_aot.rs`, `ksl_wasm.rs`, `ksl_package.rs`, `ksl_sandbox.rs`).
+  - Issues: Complete `///` comments; simulate IoT deployment for tests.
+- **ksl_metrics.rs**: Runtime metrics collection for KSL programs.
+  - Documentation: Partial (sample `///` comments added).
+  - Integration: Complete (MetricsVM trait implemented in Batch 4).
+  - Issues: Complete `///` comments.
+- **ksl_config.rs**: Global configuration management for KSL tools.
+  - Documentation: Partial (sample `///` comments added).
+  - Integration: Complete (standalone, provides config for other tools).
+  - Issues: Complete `///` comments.
+- **ksl_template.rs**: Boilerplate code generator for KSL projects.
+  - Documentation: Partial (sample `///` comments added).
+  - Integration: Complete (uses `ksl_parser.rs`, `ksl_doc.rs`).
+  - Issues: Complete `///` comments; improve template formatting.
+- **ksl_simulator.rs**: Simulates KSL execution in virtual environments.
+  - Documentation: Partial (sample `///` comments added).
+  - Integration: Complete (SimVM trait implemented in Batch 4).
+  - Issues: Complete `///` comments.
+- **ksl_plugin.rs**: Plugin system for extending KSL functionality.
+  - Documentation: Partial (sample `///` comments added).
+  - Integration: Complete (uses `ksl_parser.rs`, `ksl_sandbox.rs`, `ksl_module.rs`).
+  - Issues: Complete `///` comments; test with real shared library plugins.
+- **ksl_interpreter.rs**: Lightweight interpreter for KSL prototyping.
+  - Documentation: Partial (sample `///` comments added).
+  - Integration: Complete (uses `ksl_parser.rs`, `ksl_checker.rs`, `ksl_sandbox.rs`).
+  - Issues: Complete `///` comments; support more expression types.
+- **ksl_contract.rs**: Specialized compiler for blockchain smart contracts.
+  - Documentation: Partial (sample `///` comments added).
+  - Integration: Complete (uses `ksl_parser.rs`, `ksl_wasm.rs`, `ksl_aot.rs`, `ksl_sandbox.rs`).
+  - Issues: Complete `///` comments; enhance optimization strategies.
+
+### Batch 5 (Next 7 Files)
+- **ksl_docgen.rs**: API documentation generator for KSL libraries.
+  - Documentation: Missing (no `///` comments).
+  - Integration: Complete (uses `ksl_parser.rs`, `ksl_doc.rs`).
+  - Issues: Add `///` comments; enhance cross-referencing.
+- **ksl_testgen.rs**: Automatic unit test generator for KSL code.
+  - Documentation: Missing (no `///` comments).
+  - Integration: Complete (uses `ksl_parser.rs`).
+  - Issues: Add `///` comments; support more parameter types.
+- **ksl_vscode.rs**: VS Code extension configuration generator for KSL.
+  - Documentation: Missing (no `///` comments).
+  - Integration: Complete (standalone).
+  - Issues: Add `///` comments.
+- **ksl_package_publish.rs**: Publishes KSL packages to a registry.
+  - Documentation: Missing (no `///` comments).
+  - Integration: Complete (uses `ksl_package.rs`, `ksl_docgen.rs`).
+  - Issues: Add `///` comments; simulate registry server for tests.
+- **ksl_security.rs**: Advanced security checks for KSL programs.
+  - Documentation: Missing (no `///` comments).
+  - Integration: Complete (uses `ksl_parser.rs`, `ksl_sandbox.rs`, `ksl_verifier.rs`).
+  - Issues: Add `///` comments; enhance buffer overflow detection.
+- **ksl_logger.rs**: Standardized logging framework for KSL tools.
+  - Documentation: Missing (no `///` comments).
+  - Integration: Complete (standalone).
+  - Issues: Add `///` comments.
+- **ksl_ast_transform.rs**: AST transformations for KSL code optimization.
+  - Documentation: Missing (no `///` comments).
+  - Integration: Complete (uses `ksl_parser.rs`, `ksl_checker.rs`, `ksl_plugin.rs`).
+  - Issues: Add `///` comments; enhance unrolling logic.
+- **ksl_migrate.rs**: Migrates KSL code between versions or platforms.
+  - Documentation: Missing (no `///` comments).
+  - Integration: Complete (uses `ksl_parser.rs`, `ksl_checker.rs`, `ksl_doc.rs`).
+  - Issues: Add `///` comments; support more migration rules.
+- **ksl_bundler.rs**: Bundles KSL projects into single-file executables.
+  - Documentation: Missing (no `///` comments).
+  - Integration: Complete (uses `ksl_parser.rs`, `ksl_checker.rs`, `ksl_optimizer.rs`, `ksl_wasm.rs`, `ksl_aot.rs`, `ksl_package.rs`).
+  - Issues: Add `///` comments.
+- **ksl_benchmark.rs**: Dedicated benchmarking tool for KSL performance.
+  - Documentation: Missing (no `///` comments).
+  - Integration: Complete (uses `ksl_parser.rs`, `ksl_checker.rs`, `kapra_vm.rs`, `ksl_optimizer.rs`, `ksl_profile.rs`).
+  - Issues: Add `///` comments.

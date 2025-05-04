@@ -1,6 +1,7 @@
 // ksl_ast_transform.rs
 // Enables AST transformations for advanced code generation and optimization,
-// supporting function inlining, loop unrolling, and custom transformations via plugins.
+// supporting function inlining, loop unrolling, async/await transformation,
+// and networking operation optimization.
 
 use crate::ksl_parser::{parse, AstNode, ExprKind, ParseError};
 use crate::ksl_checker::check;
@@ -9,23 +10,33 @@ use crate::ksl_errors::{KslError, SourcePosition};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::PathBuf;
+use std::collections::HashMap;
 
-// Transformation configuration
+/// Configuration for AST transformations.
 #[derive(Debug)]
 pub struct TransformConfig {
-    input_file: PathBuf, // Source file to transform
-    output_file: Option<PathBuf>, // Optional output file (defaults to input_file)
-    rule: String, // Transformation rule (e.g., "inline", "unroll")
-    plugin_name: Option<String>, // Optional plugin for custom transformation
+    /// Source file to transform
+    input_file: PathBuf,
+    /// Optional output file (defaults to input_file)
+    output_file: Option<PathBuf>,
+    /// Transformation rule (e.g., "inline", "unroll", "async", "network")
+    rule: String,
+    /// Optional plugin for custom transformation
+    plugin_name: Option<String>,
+    /// Maximum number of iterations for loop unrolling
+    max_unroll_iterations: u32,
+    /// Whether to preserve networking state during transformation
+    preserve_networking: bool,
 }
 
-// AST transformer
+/// AST transformer that handles various code transformations.
 pub struct AstTransformer {
     config: TransformConfig,
     plugin_system: PluginSystem,
 }
 
 impl AstTransformer {
+    /// Creates a new AST transformer with the given configuration.
     pub fn new(config: TransformConfig) -> Self {
         AstTransformer {
             config,
@@ -33,7 +44,7 @@ impl AstTransformer {
         }
     }
 
-    // Transform a KSL source file
+    /// Transforms a KSL source file according to the configured rules.
     pub fn transform(&mut self) -> Result<(), KslError> {
         let pos = SourcePosition::new(1, 1);
         // Read and parse source
@@ -62,6 +73,8 @@ impl AstTransformer {
             match self.config.rule.as_str() {
                 "inline" => self.inline_functions(&mut ast)?,
                 "unroll" => self.unroll_loops(&mut ast)?,
+                "async" => self.transform_async(&mut ast)?,
+                "network" => self.optimize_networking(&mut ast)?,
                 _ => return Err(KslError::type_error(
                     format!("Unknown transformation rule: {}", self.config.rule),
                     pos,
@@ -79,7 +92,7 @@ impl AstTransformer {
                 pos,
             ))?;
 
-        // Serialize AST back to source code (simplified)
+        // Serialize AST back to source code
         let transformed_source = ast_to_source(&ast);
 
         // Write transformed code
@@ -98,7 +111,7 @@ impl AstTransformer {
         Ok(())
     }
 
-    // Inline function calls
+    /// Inlines function calls in the AST.
     fn inline_functions(&self, ast: &mut Vec<AstNode>) -> Result<(), KslError> {
         let pos = SourcePosition::new(1, 1);
         let mut functions = HashMap::new();
@@ -144,14 +157,13 @@ impl AstTransformer {
         Ok(())
     }
 
-    // Unroll loops (simplified: assumes loops are in match expressions)
+    /// Unrolls loops in the AST up to the configured maximum iterations.
     fn unroll_loops(&self, ast: &mut Vec<AstNode>) -> Result<(), KslError> {
         let pos = SourcePosition::new(1, 1);
         let mut new_ast = Vec::new();
         for node in ast.iter() {
             match node {
                 AstNode::Match { expr, arms } => {
-                    // Simplified: Look for a range pattern (e.g., 0..5)
                     let mut unrolled = Vec::new();
                     for arm in arms {
                         let (start, end) = match &arm.pattern {
@@ -182,8 +194,8 @@ impl AstTransformer {
                             )),
                         };
 
-                        // Unroll the loop (up to a max of 5 iterations for simplicity)
-                        for i in start..end.min(start + 5) {
+                        // Unroll the loop up to max_unroll_iterations
+                        for i in start..end.min(start + self.config.max_unroll_iterations) {
                             let mut new_body = arm.body.clone();
                             // Replace variable with literal
                             for node in new_body.iter_mut() {
@@ -199,6 +211,93 @@ impl AstTransformer {
                         }
                     }
                     new_ast.extend(unrolled);
+                }
+                _ => new_ast.push(node.clone()),
+            }
+        }
+
+        *ast = new_ast;
+        Ok(())
+    }
+
+    /// Transforms async/await code into a state machine.
+    fn transform_async(&self, ast: &mut Vec<AstNode>) -> Result<(), KslError> {
+        let pos = SourcePosition::new(1, 1);
+        let mut new_ast = Vec::new();
+
+        for node in ast.iter() {
+            match node {
+                AstNode::AsyncFnDecl { name, params, body, .. } => {
+                    // Transform async function into a state machine
+                    let mut state_machine = Vec::new();
+                    let mut state = 0;
+
+                    for stmt in body {
+                        match stmt {
+                            AstNode::Await { expr, .. } => {
+                                // Add state transition
+                                state_machine.push(AstNode::StateTransition {
+                                    from_state: state,
+                                    to_state: state + 1,
+                                    condition: expr.clone(),
+                                });
+                                state += 1;
+                            }
+                            _ => state_machine.push(stmt.clone()),
+                        }
+                    }
+
+                    // Add the transformed function to the new AST
+                    new_ast.push(AstNode::FnDecl {
+                        doc: None,
+                        name: name.clone(),
+                        params: params.clone(),
+                        return_type: None,
+                        body: state_machine,
+                        is_async: false,
+                    });
+                }
+                _ => new_ast.push(node.clone()),
+            }
+        }
+
+        *ast = new_ast;
+        Ok(())
+    }
+
+    /// Optimizes networking operations in the AST.
+    fn optimize_networking(&self, ast: &mut Vec<AstNode>) -> Result<(), KslError> {
+        let pos = SourcePosition::new(1, 1);
+        let mut new_ast = Vec::new();
+
+        for node in ast.iter() {
+            match node {
+                AstNode::Expr { kind: ExprKind::Network { op_type, endpoint, headers, data } } => {
+                    if self.config.preserve_networking {
+                        // Preserve networking state
+                        new_ast.push(node.clone());
+                    } else {
+                        // Optimize networking operation
+                        match op_type {
+                            NetworkOpType::HttpGet | NetworkOpType::HttpPost => {
+                                // Combine multiple HTTP requests to the same endpoint
+                                if let Some(prev_node) = new_ast.last() {
+                                    if let AstNode::Expr { kind: ExprKind::Network { op_type: prev_op_type, endpoint: prev_endpoint, .. } } = prev_node {
+                                        if prev_endpoint == endpoint && 
+                                           (prev_op_type == NetworkOpType::HttpGet || prev_op_type == NetworkOpType::HttpPost) {
+                                            // Skip duplicate request
+                                            continue;
+                                        }
+                                    }
+                                }
+                            }
+                            NetworkOpType::TcpConnect => {
+                                // Preserve TCP connections
+                                new_ast.push(node.clone());
+                            }
+                            _ => new_ast.push(node.clone()),
+                        }
+                    }
                 }
                 _ => new_ast.push(node.clone()),
             }
@@ -291,6 +390,8 @@ pub fn transform(input_file: &PathBuf, output_file: Option<PathBuf>, rule: &str,
         output_file,
         rule: rule.to_string(),
         plugin_name,
+        max_unroll_iterations: 5,
+        preserve_networking: true,
     };
     let mut transformer = AstTransformer::new(config);
     transformer.transform()

@@ -4,15 +4,41 @@
 use crate::ksl_types::Type;
 use std::fmt;
 
-// Operand types for instructions
+// Assume ksl_jit.rs provides JitCompiler
+mod ksl_jit {
+    pub struct JitCompiler;
+    impl JitCompiler {
+        pub fn compile_ir(_ir: &str) -> Result<(), ()> {
+            Ok(()) // Placeholder
+        }
+    }
+}
+
+// Assume ksl_docgen.rs provides DocGenerator
+mod ksl_docgen {
+    pub struct DocGenerator;
+    impl DocGenerator {
+        pub fn process_json(_json: &str) -> Result<(), ()> {
+            Ok(()) // Placeholder
+        }
+    }
+}
+
+/// Operand types for KapraBytecode instructions.
 #[derive(Debug, PartialEq, Clone)]
 pub enum Operand {
-    Register(u8), // Virtual register (0–15)
+    Register(u8),       // Virtual register (0–15)
     Immediate(Vec<u8>), // Immediate value (e.g., number, string)
 }
 
 impl Operand {
-    // Encode operand to bytes
+    /// Encodes the operand to bytes.
+    /// @returns A vector of bytes representing the operand.
+    /// @example
+    /// ```ksl
+    /// let op = Operand::Register(0);
+    /// assert_eq!(op.encode(), vec![0]);
+    /// ```
     pub fn encode(&self) -> Vec<u8> {
         match self {
             Operand::Register(reg) => vec![*reg],
@@ -24,7 +50,17 @@ impl Operand {
         }
     }
 
-    // Decode operand from bytes
+    /// Decodes an operand from bytes.
+    /// @param bytes The input byte slice.
+    /// @param offset The current offset in the byte slice (updated during decoding).
+    /// @returns An `Option` containing the decoded operand, or `None` if invalid.
+    /// @example
+    /// ```ksl
+    /// let bytes = vec![0];
+    /// let mut offset = 0;
+    /// let op = Operand::decode(&bytes, &mut offset).unwrap();
+    /// assert_eq!(op, Operand::Register(0));
+    /// ```
     pub fn decode(bytes: &[u8], offset: &mut usize) -> Option<Self> {
         if *offset >= bytes.len() {
             return None;
@@ -45,31 +81,53 @@ impl Operand {
     }
 }
 
-// Opcodes for KapraBytecode
+/// Opcodes for KapraBytecode instructions.
 #[derive(Debug, PartialEq, Clone)]
 pub enum KapraOpCode {
     // Core operations
-    Mov, // Mov dst_reg, src_reg_or_imm
-    Add, // Add dst_reg, src_reg1, src_reg2
-    Sub, // Sub dst_reg, src_reg1, src_reg2
-    Mul, // Mul dst_reg, src_reg1, src_reg2
-    Halt, // Halt program
-    Fail, // Immediate failure
+    Mov,         // Mov dst_reg, src_reg_or_imm
+    Add,         // Add dst_reg, src_reg1, src_reg2
+    Sub,         // Sub dst_reg, src_reg1, src_reg2
+    Mul,         // Mul dst_reg, src_reg1, src_reg2
+    Halt,        // Halt program
+    Fail,        // Immediate failure
     // Control flow
-    Jump, // Jump to offset (immediate)
-    Call, // Call function (immediate index)
-    Return, // Return from function
+    Jump,        // Jump to offset (immediate)
+    Call,        // Call function (immediate index)
+    Return,      // Return from function
     // Crypto operations
-    Sha3, // Sha3 dst_reg, src_reg (string or array)
-    Sha3_512, // Sha3_512 dst_reg, src_reg (string or array)
-    Kaprekar, // Kaprekar dst_reg, src_reg (array<u8, 4> or u16)
-    BlsVerify, // BlsVerify dst_reg, msg_reg, pubkey_reg, sig_reg
+    Sha3,        // Sha3 dst_reg, src_reg (string or array)
+    Sha3_512,    // Sha3_512 dst_reg, src_reg (string or array)
+    Kaprekar,    // Kaprekar dst_reg, src_reg (array<u8, 4> or u16)
+    BlsVerify,   // BlsVerify dst_reg, msg_reg, pubkey_reg, sig_reg
     DilithiumVerify, // DilithiumVerify dst_reg, msg_reg, pubkey_reg, sig_reg
     MerkleVerify, // MerkleVerify dst_reg, root_reg, proof_reg
+    // Async operations
+    AsyncCall,   // AsyncCall dst_reg, func_index (immediate)
+    // Networking operations
+    TcpConnect,  // TcpConnect dst_reg, host_reg, port_reg
+    UdpSend,     // UdpSend dst_reg, host_reg, port_reg, data_reg
+    HttpPost,    // HttpPost dst_reg, url_reg, data_reg
+    HttpGet,     // HttpGet dst_reg, url_reg
+    // I/O operations
+    Print,       // Print src_reg (string)
+    DeviceSensor, // DeviceSensor dst_reg, id_reg
+    // Math operations
+    Sin,         // Sin dst_reg, src_reg (f64)
+    Cos,         // Cos dst_reg, src_reg (f64)
+    Sqrt,        // Sqrt dst_reg, src_reg (f64)
+    MatrixMul,   // MatrixMul dst_reg, a_reg, b_reg (array<array<f64, N>, N>)
+    TensorReduce, // TensorReduce dst_reg, src_reg (array<array<u64, N>, M>)
 }
 
 impl KapraOpCode {
-    // Encode opcode to a single byte
+    /// Encodes the opcode to a single byte.
+    /// @returns The encoded byte.
+    /// @example
+    /// ```ksl
+    /// let opcode = KapraOpCode::Mov;
+    /// assert_eq!(opcode.encode(), 0x01);
+    /// ```
     pub fn encode(&self) -> u8 {
         match self {
             KapraOpCode::Mov => 0x01,
@@ -87,10 +145,30 @@ impl KapraOpCode {
             KapraOpCode::BlsVerify => 0x0D,
             KapraOpCode::DilithiumVerify => 0x0E,
             KapraOpCode::MerkleVerify => 0x0F,
+            KapraOpCode::AsyncCall => 0x10,
+            // New opcodes
+            KapraOpCode::TcpConnect => 0x11,
+            KapraOpCode::UdpSend => 0x12,
+            KapraOpCode::HttpPost => 0x13,
+            KapraOpCode::HttpGet => 0x14,
+            KapraOpCode::Print => 0x15,
+            KapraOpCode::DeviceSensor => 0x16,
+            KapraOpCode::Sin => 0x17,
+            KapraOpCode::Cos => 0x18,
+            KapraOpCode::Sqrt => 0x19,
+            KapraOpCode::MatrixMul => 0x1A,
+            KapraOpCode::TensorReduce => 0x1B,
         }
     }
 
-    // Decode opcode from a byte
+    /// Decodes an opcode from a byte.
+    /// @param byte The input byte.
+    /// @returns An `Option` containing the decoded opcode, or `None` if invalid.
+    /// @example
+    /// ```ksl
+    /// let opcode = KapraOpCode::decode(0x01).unwrap();
+    /// assert_eq!(opcode, KapraOpCode::Mov);
+    /// ```
     pub fn decode(byte: u8) -> Option<Self> {
         match byte {
             0x01 => Some(KapraOpCode::Mov),
@@ -108,12 +186,79 @@ impl KapraOpCode {
             0x0D => Some(KapraOpCode::BlsVerify),
             0x0E => Some(KapraOpCode::DilithiumVerify),
             0x0F => Some(KapraOpCode::MerkleVerify),
+            0x10 => Some(KapraOpCode::AsyncCall),
+            // New opcodes
+            0x11 => Some(KapraOpCode::TcpConnect),
+            0x12 => Some(KapraOpCode::UdpSend),
+            0x13 => Some(KapraOpCode::HttpPost),
+            0x14 => Some(KapraOpCode::HttpGet),
+            0x15 => Some(KapraOpCode::Print),
+            0x16 => Some(KapraOpCode::DeviceSensor),
+            0x17 => Some(KapraOpCode::Sin),
+            0x18 => Some(KapraOpCode::Cos),
+            0x19 => Some(KapraOpCode::Sqrt),
+            0x1A => Some(KapraOpCode::MatrixMul),
+            0x1B => Some(KapraOpCode::TensorReduce),
             _ => None,
         }
     }
+
+    /// Generates JSON documentation for the opcode.
+    /// @returns A JSON string describing the opcode, operands, and type.
+    /// @example
+    /// ```ksl
+    /// let opcode = KapraOpCode::Mov;
+    /// let json = opcode.to_doc_json(&Type::U32);
+    /// // Returns JSON string
+    /// ```
+    pub fn to_doc_json(&self, type_info: &Option<Type>) -> String {
+        let (description, operand_count) = match self {
+            KapraOpCode::Mov => ("Moves value to register", 2),
+            KapraOpCode::Add => ("Adds two registers", 3),
+            KapraOpCode::Sub => ("Subtracts two registers", 3),
+            KapraOpCode::Mul => ("Multiplies two registers", 3),
+            KapraOpCode::Halt => ("Halts program execution", 0),
+            KapraOpCode::Fail => ("Triggers immediate failure", 0),
+            KapraOpCode::Jump => ("Jumps to offset", 1),
+            KapraOpCode::Call => ("Calls function by index", 1),
+            KapraOpCode::Return => ("Returns from function", 0),
+            KapraOpCode::Sha3 => ("Computes SHA3 hash", 2),
+            KapraOpCode::Sha3_512 => ("Computes SHA3-512 hash", 2),
+            KapraOpCode::Kaprekar => ("Applies Kaprekar operation", 2),
+            KapraOpCode::BlsVerify => ("Verifies BLS signature", 4),
+            KapraOpCode::DilithiumVerify => ("Verifies Dilithium signature", 4),
+            KapraOpCode::MerkleVerify => ("Verifies Merkle proof", 3),
+            KapraOpCode::AsyncCall => ("Calls async function by index", 2),
+            // New opcodes
+            KapraOpCode::TcpConnect => ("Establishes TCP connection", 3),
+            KapraOpCode::UdpSend => ("Sends UDP packet", 4),
+            KapraOpCode::HttpPost => ("Sends HTTP POST request", 3),
+            KapraOpCode::HttpGet => ("Sends HTTP GET request", 2),
+            KapraOpCode::Print => ("Prints string to output", 1),
+            KapraOpCode::DeviceSensor => ("Reads device sensor value", 2),
+            KapraOpCode::Sin => ("Computes sine of angle", 2),
+            KapraOpCode::Cos => ("Computes cosine of angle", 2),
+            KapraOpCode::Sqrt => ("Computes square root", 2),
+            KapraOpCode::MatrixMul => ("Multiplies two matrices", 3),
+            KapraOpCode::TensorReduce => ("Reduces tensor dimensions", 2),
+        };
+        let type_str = match type_info {
+            Some(ty) => format!("{:?}", ty),
+            None => "None".to_string(),
+        };
+        format!(
+            r#"{{
+                "opcode": "{:?}",
+                "description": "{}",
+                "operands": {},
+                "type": "{}"
+            }}"#,
+            self, description, operand_count, type_str
+        )
+    }
 }
 
-// Instruction structure
+/// Instruction structure for KapraBytecode.
 #[derive(Debug, PartialEq, Clone)]
 pub struct KapraInstruction {
     pub opcode: KapraOpCode,
@@ -122,6 +267,19 @@ pub struct KapraInstruction {
 }
 
 impl KapraInstruction {
+    /// Creates a new instruction.
+    /// @param opcode The opcode.
+    /// @param operands The list of operands.
+    /// @param type_info The optional result type.
+    /// @returns A new `KapraInstruction`.
+    /// @example
+    /// ```ksl
+    /// let instr = KapraInstruction::new(
+    ///     KapraOpCode::Mov,
+    ///     vec![Operand::Register(0), Operand::Immediate(vec![42])],
+    ///     Some(Type::U32)
+    /// );
+    /// ```
     pub fn new(opcode: KapraOpCode, operands: Vec<Operand>, type_info: Option<Type>) -> Self {
         KapraInstruction {
             opcode,
@@ -130,7 +288,17 @@ impl KapraInstruction {
         }
     }
 
-    // Encode instruction to bytes
+    /// Encodes the instruction to bytes.
+    /// @returns A vector of bytes representing the instruction.
+    /// @example
+    /// ```ksl
+    /// let instr = KapraInstruction::new(
+    ///     KapraOpCode::Mov,
+    ///     vec![Operand::Register(0), Operand::Immediate(vec![42])],
+    ///     Some(Type::U32)
+    /// );
+    /// let bytes = instr.encode();
+    /// ```
     pub fn encode(&self) -> Vec<u8> {
         let mut bytes = vec![self.opcode.encode()];
         for operand in &self.operands {
@@ -139,7 +307,17 @@ impl KapraInstruction {
         bytes
     }
 
-    // Decode instruction from bytes
+    /// Decodes an instruction from bytes.
+    /// @param bytes The input byte slice.
+    /// @param offset The current offset in the byte slice (updated during decoding).
+    /// @returns An `Option` containing the decoded instruction, or `None` if invalid.
+    /// @example
+    /// ```ksl
+    /// let bytes = vec![0x01, 0, 1, 42];
+    /// let mut offset = 0;
+    /// let instr = KapraInstruction::decode(&bytes, &mut offset).unwrap();
+    /// assert_eq!(instr.opcode, KapraOpCode::Mov);
+    /// ```
     pub fn decode(bytes: &[u8], offset: &mut usize) -> Option<Self> {
         if *offset >= bytes.len() {
             return None;
@@ -148,7 +326,6 @@ impl KapraInstruction {
         *offset += 1;
         let mut operands = Vec::new();
 
-        // Simplified: Assume fixed operand count based on opcode
         let operand_count = match opcode {
             KapraOpCode::Mov => 2, // dst, src
             KapraOpCode::Add | KapraOpCode::Sub | KapraOpCode::Mul => 3, // dst, src1, src2
@@ -157,6 +334,14 @@ impl KapraInstruction {
             KapraOpCode::Sha3 | KapraOpCode::Sha3_512 | KapraOpCode::Kaprekar => 2, // dst, src
             KapraOpCode::BlsVerify | KapraOpCode::DilithiumVerify => 4, // dst, msg, pubkey, sig
             KapraOpCode::MerkleVerify => 3, // dst, root, proof
+            KapraOpCode::AsyncCall => 2, // dst, func_index
+            // New opcodes
+            KapraOpCode::TcpConnect | KapraOpCode::UdpSend | KapraOpCode::HttpPost | KapraOpCode::HttpGet => 3, // dst, host, port
+            KapraOpCode::Print => 1, // src
+            KapraOpCode::DeviceSensor => 2, // dst, id
+            KapraOpCode::Sin | KapraOpCode::Cos | KapraOpCode::Sqrt => 2, // dst, src
+            KapraOpCode::MatrixMul => 3, // dst, a, b
+            KapraOpCode::TensorReduce => 2, // dst, src
         };
 
         for _ in 0..operand_count {
@@ -164,34 +349,290 @@ impl KapraInstruction {
             operands.push(operand);
         }
 
-        // Type info not encoded yet (can be added later)
         Some(KapraInstruction {
             opcode,
             operands,
             type_info: None,
         })
     }
+
+    /// Generates LLVM-style IR for the instruction.
+    /// @returns A string containing the IR representation.
+    /// @example
+    /// ```ksl
+    /// let instr = KapraInstruction::new(
+    ///     KapraOpCode::Mov,
+    ///     vec![Operand::Register(0), Operand::Immediate(vec![42])],
+    ///     Some(Type::U32)
+    /// );
+    /// let ir = instr.to_jit_ir();
+    /// // Returns "store i32 42, i32* %r0"
+    /// ```
+    pub fn to_jit_ir(&self) -> String {
+        match self.opcode {
+            KapraOpCode::Mov => {
+                if let [Operand::Register(dst), src] = self.operands.as_slice() {
+                    match src {
+                        Operand::Register(src_reg) => {
+                            format!("store i32 %r{}, i32* %r{}", src_reg, dst)
+                        }
+                        Operand::Immediate(data) => {
+                            let value = data.iter().fold(0, |acc, &x| (acc << 8) | x as u32);
+                            format!("store i32 {}, i32* %r{}", value, dst)
+                        }
+                    }
+                } else {
+                    "unreachable".to_string()
+                }
+            }
+            KapraOpCode::Add => {
+                if let [Operand::Register(dst), Operand::Register(src1), Operand::Register(src2)] =
+                    self.operands.as_slice()
+                {
+                    format!(
+                        "%r{} = add i32 %r{}, %r{}",
+                        dst, src1, src2
+                    )
+                } else {
+                    "unreachable".to_string()
+                }
+            }
+            KapraOpCode::Sub => {
+                if let [Operand::Register(dst), Operand::Register(src1), Operand::Register(src2)] =
+                    self.operands.as_slice()
+                {
+                    format!(
+                        "%r{} = sub i32 %r{}, %r{}",
+                        dst, src1, src2
+                    )
+                } else {
+                    "unreachable".to_string()
+                }
+            }
+            KapraOpCode::Mul => {
+                if let [Operand::Register(dst), Operand::Register(src1), Operand::Register(src2)] =
+                    self.operands.as_slice()
+                {
+                    format!(
+                        "%r{} = mul i32 %r{}, %r{}",
+                        dst, src1, src2
+                    )
+                } else {
+                    "unreachable".to_string()
+                }
+            }
+            KapraOpCode::Halt => "ret void".to_string(),
+            KapraOpCode::Fail => "unreachable".to_string(),
+            KapraOpCode::Jump => {
+                if let [Operand::Immediate(offset)] = self.operands.as_slice() {
+                    let value = offset.iter().fold(0, |acc, &x| (acc << 8) | x as u32);
+                    format!("br label %{}", value)
+                } else {
+                    "unreachable".to_string()
+                }
+            }
+            KapraOpCode::Call => {
+                if let [Operand::Immediate(index)] = self.operands.as_slice() {
+                    let value = index.iter().fold(0, |acc, &x| (acc << 8) | x as u32);
+                    format!("call void @func{}", value)
+                } else {
+                    "unreachable".to_string()
+                }
+            }
+            KapraOpCode::Return => "ret void".to_string(),
+            KapraOpCode::Sha3 => {
+                if let [Operand::Register(dst), Operand::Register(src)] = self.operands.as_slice() {
+                    format!("%r{} = call [32 x i8] @sha3(i32 %r{})", dst, src)
+                } else {
+                    "unreachable".to_string()
+                }
+            }
+            KapraOpCode::Sha3_512 => {
+                if let [Operand::Register(dst), Operand::Register(src)] = self.operands.as_slice() {
+                    format!("%r{} = call [64 x i8] @sha3_512(i32 %r{})", dst, src)
+                } else {
+                    "unreachable".to_string()
+                }
+            }
+            KapraOpCode::Kaprekar => {
+                if let [Operand::Register(dst), Operand::Register(src)] = self.operands.as_slice() {
+                    format!("%r{} = call i32 @kaprekar(i32 %r{})", dst, src)
+                } else {
+                    "unreachable".to_string()
+                }
+            }
+            KapraOpCode::BlsVerify => {
+                if let [Operand::Register(dst), Operand::Register(msg), Operand::Register(pubkey), Operand::Register(sig)] =
+                    self.operands.as_slice()
+                {
+                    format!(
+                        "%r{} = call i32 @bls_verify(i32 %r{}, i32 %r{}, i32 %r{})",
+                        dst, msg, pubkey, sig
+                    )
+                } else {
+                    "unreachable".to_string()
+                }
+            }
+            KapraOpCode::DilithiumVerify => {
+                if let [Operand::Register(dst), Operand::Register(msg), Operand::Register(pubkey), Operand::Register(sig)] =
+                    self.operands.as_slice()
+                {
+                    format!(
+                        "%r{} = call i32 @dilithium_verify(i32 %r{}, i32 %r{}, i32 %r{})",
+                        dst, msg, pubkey, sig
+                    )
+                } else {
+                    "unreachable".to_string()
+                }
+            }
+            KapraOpCode::MerkleVerify => {
+                if let [Operand::Register(dst), Operand::Register(root), Operand::Register(proof)] =
+                    self.operands.as_slice()
+                {
+                    format!(
+                        "%r{} = call i32 @merkle_verify(i32 %r{}, i32 %r{})",
+                        dst, root, proof
+                    )
+                } else {
+                    "unreachable".to_string()
+                }
+            }
+            KapraOpCode::AsyncCall => {
+                if let [Operand::Register(dst), Operand::Immediate(index)] = self.operands.as_slice() {
+                    let value = index.iter().fold(0, |acc, &x| (acc << 8) | x as u32);
+                    format!("%r{} = call i32 @async_func{}", dst, value)
+                } else {
+                    "unreachable".to_string()
+                }
+            }
+            // New opcodes
+            KapraOpCode::TcpConnect => {
+                if let [Operand::Register(dst), Operand::Register(host), Operand::Register(port)] = self.operands.as_slice() {
+                    format!("%r{} = call i32 @tcp_connect(i32 %r{}, i32 %r{}, i32 %r{})", dst, host, port)
+                } else {
+                    "unreachable".to_string()
+                }
+            }
+            KapraOpCode::UdpSend => {
+                if let [Operand::Register(dst), Operand::Register(host), Operand::Register(port), Operand::Register(data)] = self.operands.as_slice() {
+                    format!("%r{} = call i32 @udp_send(i32 %r{}, i32 %r{}, i32 %r{}, i32 %r{})", dst, host, port, data)
+                } else {
+                    "unreachable".to_string()
+                }
+            }
+            KapraOpCode::HttpPost => {
+                if let [Operand::Register(dst), Operand::Register(url), Operand::Register(data)] = self.operands.as_slice() {
+                    format!("%r{} = call i32 @http_post(i32 %r{}, i32 %r{}, i32 %r{})", dst, url, data)
+                } else {
+                    "unreachable".to_string()
+                }
+            }
+            KapraOpCode::HttpGet => {
+                if let [Operand::Register(dst), Operand::Register(url)] = self.operands.as_slice() {
+                    format!("%r{} = call i32 @http_get(i32 %r{}, i32 %r{})", dst, url)
+                } else {
+                    "unreachable".to_string()
+                }
+            }
+            KapraOpCode::Print => {
+                if let [Operand::Register(src)] = self.operands.as_slice() {
+                    format!("call void @print(i32 %r{})", src)
+                } else {
+                    "unreachable".to_string()
+                }
+            }
+            KapraOpCode::DeviceSensor => {
+                if let [Operand::Register(dst), Operand::Register(id)] = self.operands.as_slice() {
+                    format!("%r{} = call i32 @device_sensor(i32 %r{}, i32 %r{})", dst, id)
+                } else {
+                    "unreachable".to_string()
+                }
+            }
+            KapraOpCode::Sin => {
+                if let [Operand::Register(dst), Operand::Register(src)] = self.operands.as_slice() {
+                    format!("%r{} = call f64 @sin(f64 %r{})", dst, src)
+                } else {
+                    "unreachable".to_string()
+                }
+            }
+            KapraOpCode::Cos => {
+                if let [Operand::Register(dst), Operand::Register(src)] = self.operands.as_slice() {
+                    format!("%r{} = call f64 @cos(f64 %r{})", dst, src)
+                } else {
+                    "unreachable".to_string()
+                }
+            }
+            KapraOpCode::Sqrt => {
+                if let [Operand::Register(dst), Operand::Register(src)] = self.operands.as_slice() {
+                    format!("%r{} = call f64 @sqrt(f64 %r{})", dst, src)
+                } else {
+                    "unreachable".to_string()
+                }
+            }
+            KapraOpCode::MatrixMul => {
+                if let [Operand::Register(dst), Operand::Register(a), Operand::Register(b)] = self.operands.as_slice() {
+                    format!("%r{} = call [32 x i8] @matrix_mul(i32 %r{}, i32 %r{}, i32 %r{})", dst, a, b)
+                } else {
+                    "unreachable".to_string()
+                }
+            }
+            KapraOpCode::TensorReduce => {
+                if let [Operand::Register(dst), Operand::Register(src)] = self.operands.as_slice() {
+                    format!("%r{} = call [32 x i8] @tensor_reduce(i32 %r{}, i32 %r{})", dst, src)
+                } else {
+                    "unreachable".to_string()
+                }
+            }
+        }
+    }
 }
 
-// Bytecode program structure
+/// Bytecode program structure.
 #[derive(Debug, PartialEq)]
 pub struct KapraBytecode {
     pub instructions: Vec<KapraInstruction>,
 }
 
 impl KapraBytecode {
+    /// Creates a new bytecode program.
+    /// @returns A new `KapraBytecode` instance.
+    /// @example
+    /// ```ksl
+    /// let program = KapraBytecode::new();
+    /// ```
     pub fn new() -> Self {
         KapraBytecode {
             instructions: Vec::new(),
         }
     }
 
-    // Add an instruction
+    /// Adds an instruction to the program.
+    /// @param instruction The instruction to add.
+    /// @example
+    /// ```ksl
+    /// let mut program = KapraBytecode::new();
+    /// program.add_instruction(KapraInstruction::new(
+    ///     KapraOpCode::Halt,
+    ///     vec![],
+    ///     None
+    /// ));
+    /// ```
     pub fn add_instruction(&mut self, instruction: KapraInstruction) {
         self.instructions.push(instruction);
     }
 
-    // Encode entire program to bytes
+    /// Encodes the entire program to bytes.
+    /// @returns A vector of bytes representing the program.
+    /// @example
+    /// ```ksl
+    /// let mut program = KapraBytecode::new();
+    /// program.add_instruction(KapraInstruction::new(
+    ///     KapraOpCode::Halt,
+    ///     vec![],
+    ///     None
+    /// ));
+    /// let bytes = program.encode();
+    /// ```
     pub fn encode(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
         for instruction in &self.instructions {
@@ -200,7 +641,15 @@ impl KapraBytecode {
         bytes
     }
 
-    // Decode program from bytes
+    /// Decodes a program from bytes.
+    /// @param bytes The input byte slice.
+    /// @returns An `Option` containing the decoded program, or `None` if invalid.
+    /// @example
+    /// ```ksl
+    /// let bytes = vec![0x05];
+    /// let program = KapraBytecode::decode(&bytes).unwrap();
+    /// assert_eq!(program.instructions[0].opcode, KapraOpCode::Halt);
+    /// ```
     pub fn decode(bytes: &[u8]) -> Option<Self> {
         let mut instructions = Vec::new();
         let mut offset = 0;
@@ -252,7 +701,6 @@ mod tests {
         let decoded = KapraInstruction::decode(&bytes, &mut offset).unwrap();
         assert_eq!(decoded.opcode, instr.opcode);
         assert_eq!(decoded.operands, instr.operands);
-        // Note: type_info not decoded yet
     }
 
     #[test]
@@ -360,5 +808,273 @@ mod tests {
         let decoded = KapraInstruction::decode(&bytes, &mut offset).unwrap();
         assert_eq!(decoded.opcode, KapraOpCode::MerkleVerify);
         assert_eq!(decoded.operands.len(), 3);
+    }
+
+    #[test]
+    fn encode_decode_async_call() {
+        let instr = KapraInstruction::new(
+            KapraOpCode::AsyncCall,
+            vec![
+                Operand::Register(0),
+                Operand::Immediate(vec![1]),
+            ],
+            Some(Type::Option(Box::new(Type::String))),
+        );
+        let bytes = instr.encode();
+        let mut offset = 0;
+        let decoded = KapraInstruction::decode(&bytes, &mut offset).unwrap();
+        assert_eq!(decoded.opcode, KapraOpCode::AsyncCall);
+        assert_eq!(decoded.operands.len(), 2);
+    }
+
+    #[test]
+    fn jit_ir_generation() {
+        let instr = KapraInstruction::new(
+            KapraOpCode::Mov,
+            vec![
+                Operand::Register(0),
+                Operand::Immediate(vec![42]),
+            ],
+            Some(Type::U32),
+        );
+        let ir = instr.to_jit_ir();
+        assert_eq!(ir, "store i32 42, i32* %r0");
+
+        let instr = KapraInstruction::new(
+            KapraOpCode::Add,
+            vec![
+                Operand::Register(1),
+                Operand::Register(0),
+                Operand::Register(0),
+            ],
+            Some(Type::U32),
+        );
+        let ir = instr.to_jit_ir();
+        assert_eq!(ir, "%r1 = add i32 %r0, %r0");
+
+        let instr = KapraInstruction::new(
+            KapraOpCode::AsyncCall,
+            vec![
+                Operand::Register(0),
+                Operand::Immediate(vec![1]),
+            ],
+            Some(Type::Option(Box::new(Type::String))),
+        );
+        let ir = instr.to_jit_ir();
+        assert_eq!(ir, "%r0 = call i32 @async_func1");
+    }
+
+    #[test]
+    fn opcode_documentation() {
+        let opcode = KapraOpCode::Mov;
+        let json = opcode.to_doc_json(&Some(Type::U32));
+        assert!(json.contains(r#""opcode": "Mov""#));
+        assert!(json.contains(r#""description": "Moves value to register""#));
+        assert!(json.contains(r#""operands": 2"#));
+        assert!(json.contains(r#""type": "U32""#));
+    }
+
+    #[test]
+    fn encode_decode_networking() {
+        let opcodes = vec![
+            (KapraOpCode::TcpConnect, 0x11),
+            (KapraOpCode::UdpSend, 0x12),
+            (KapraOpCode::HttpPost, 0x13),
+            (KapraOpCode::HttpGet, 0x14),
+        ];
+
+        for (opcode, byte) in opcodes {
+            assert_eq!(opcode.encode(), byte);
+            assert_eq!(KapraOpCode::decode(byte), Some(opcode));
+        }
+    }
+
+    #[test]
+    fn encode_decode_io() {
+        let opcodes = vec![
+            (KapraOpCode::Print, 0x15),
+            (KapraOpCode::DeviceSensor, 0x16),
+        ];
+
+        for (opcode, byte) in opcodes {
+            assert_eq!(opcode.encode(), byte);
+            assert_eq!(KapraOpCode::decode(byte), Some(opcode));
+        }
+    }
+
+    #[test]
+    fn encode_decode_math() {
+        let opcodes = vec![
+            (KapraOpCode::Sin, 0x17),
+            (KapraOpCode::Cos, 0x18),
+            (KapraOpCode::Sqrt, 0x19),
+            (KapraOpCode::MatrixMul, 0x1A),
+            (KapraOpCode::TensorReduce, 0x1B),
+        ];
+
+        for (opcode, byte) in opcodes {
+            assert_eq!(opcode.encode(), byte);
+            assert_eq!(KapraOpCode::decode(byte), Some(opcode));
+        }
+    }
+
+    #[test]
+    fn networking_instruction_serialization() {
+        let instructions = vec![
+            KapraInstruction::new(
+                KapraOpCode::TcpConnect,
+                vec![Operand::Register(0), Operand::Register(1), Operand::Register(2)],
+                Some(Type::U32),
+            ),
+            KapraInstruction::new(
+                KapraOpCode::UdpSend,
+                vec![Operand::Register(0), Operand::Register(1), Operand::Register(2), Operand::Register(3)],
+                Some(Type::U32),
+            ),
+            KapraInstruction::new(
+                KapraOpCode::HttpPost,
+                vec![Operand::Register(0), Operand::Register(1), Operand::Register(2)],
+                Some(Type::String),
+            ),
+            KapraInstruction::new(
+                KapraOpCode::HttpGet,
+                vec![Operand::Register(0), Operand::Register(1)],
+                Some(Type::String),
+            ),
+        ];
+
+        for instr in instructions {
+            let bytes = instr.encode();
+            let mut offset = 0;
+            let decoded = KapraInstruction::decode(&bytes, &mut offset).unwrap();
+            assert_eq!(instr, decoded);
+        }
+    }
+
+    #[test]
+    fn io_instruction_serialization() {
+        let instructions = vec![
+            KapraInstruction::new(
+                KapraOpCode::Print,
+                vec![Operand::Register(0)],
+                Some(Type::Void),
+            ),
+            KapraInstruction::new(
+                KapraOpCode::DeviceSensor,
+                vec![Operand::Register(0), Operand::Register(1)],
+                Some(Type::F64),
+            ),
+        ];
+
+        for instr in instructions {
+            let bytes = instr.encode();
+            let mut offset = 0;
+            let decoded = KapraInstruction::decode(&bytes, &mut offset).unwrap();
+            assert_eq!(instr, decoded);
+        }
+    }
+
+    #[test]
+    fn math_instruction_serialization() {
+        let instructions = vec![
+            KapraInstruction::new(
+                KapraOpCode::Sin,
+                vec![Operand::Register(0), Operand::Register(1)],
+                Some(Type::F64),
+            ),
+            KapraInstruction::new(
+                KapraOpCode::Cos,
+                vec![Operand::Register(0), Operand::Register(1)],
+                Some(Type::F64),
+            ),
+            KapraInstruction::new(
+                KapraOpCode::Sqrt,
+                vec![Operand::Register(0), Operand::Register(1)],
+                Some(Type::F64),
+            ),
+            KapraInstruction::new(
+                KapraOpCode::MatrixMul,
+                vec![Operand::Register(0), Operand::Register(1), Operand::Register(2)],
+                Some(Type::Array(Box::new(Type::Array(Box::new(Type::F64), 4)), 4)),
+            ),
+            KapraInstruction::new(
+                KapraOpCode::TensorReduce,
+                vec![Operand::Register(0), Operand::Register(1)],
+                Some(Type::Array(Box::new(Type::U64), 4)),
+            ),
+        ];
+
+        for instr in instructions {
+            let bytes = instr.encode();
+            let mut offset = 0;
+            let decoded = KapraInstruction::decode(&bytes, &mut offset).unwrap();
+            assert_eq!(instr, decoded);
+        }
+    }
+
+    #[test]
+    fn networking_jit_ir() {
+        let instructions = vec![
+            KapraInstruction::new(
+                KapraOpCode::TcpConnect,
+                vec![Operand::Register(0), Operand::Register(1), Operand::Register(2)],
+                Some(Type::U32),
+            ),
+            KapraInstruction::new(
+                KapraOpCode::UdpSend,
+                vec![Operand::Register(0), Operand::Register(1), Operand::Register(2), Operand::Register(3)],
+                Some(Type::U32),
+            ),
+        ];
+
+        for instr in instructions {
+            let ir = instr.to_jit_ir();
+            assert!(!ir.is_empty());
+            assert!(!ir.contains("unreachable"));
+        }
+    }
+
+    #[test]
+    fn io_jit_ir() {
+        let instructions = vec![
+            KapraInstruction::new(
+                KapraOpCode::Print,
+                vec![Operand::Register(0)],
+                Some(Type::Void),
+            ),
+            KapraInstruction::new(
+                KapraOpCode::DeviceSensor,
+                vec![Operand::Register(0), Operand::Register(1)],
+                Some(Type::F64),
+            ),
+        ];
+
+        for instr in instructions {
+            let ir = instr.to_jit_ir();
+            assert!(!ir.is_empty());
+            assert!(!ir.contains("unreachable"));
+        }
+    }
+
+    #[test]
+    fn math_jit_ir() {
+        let instructions = vec![
+            KapraInstruction::new(
+                KapraOpCode::Sin,
+                vec![Operand::Register(0), Operand::Register(1)],
+                Some(Type::F64),
+            ),
+            KapraInstruction::new(
+                KapraOpCode::MatrixMul,
+                vec![Operand::Register(0), Operand::Register(1), Operand::Register(2)],
+                Some(Type::Array(Box::new(Type::Array(Box::new(Type::F64), 4)), 4)),
+            ),
+        ];
+
+        for instr in instructions {
+            let ir = instr.to_jit_ir();
+            assert!(!ir.is_empty());
+            assert!(!ir.contains("unreachable"));
+        }
     }
 }

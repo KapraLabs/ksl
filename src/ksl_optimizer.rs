@@ -1,54 +1,180 @@
 // ksl_optimizer.rs
 // Implements bytecode optimizations for KSL with advanced techniques
+// including async operation optimizations and enhanced constant propagation
 
-use crate::ksl_bytecode::{KapraBytecode, KapraInstruction, KapraOpCode, Operand};
+use crate::ksl_bytecode::{KapraBytecode, KapraInstruction, KapraOpCode, Operand, Constant};
 use crate::ksl_types::Type;
 use crate::ksl_errors::{KslError, SourcePosition};
 use std::collections::{HashMap, HashSet};
 
-// Optimization error
+/// Optimization error
 type OptError = KslError;
 
-// Optimizer state
+/// Optimizer configuration
+#[derive(Debug, Clone)]
+pub struct OptimizerConfig {
+    /// Maximum iterations for loop unrolling
+    pub max_unroll_iterations: u32,
+    /// Whether to enable async optimizations
+    pub optimize_async: bool,
+    /// Whether to enable networking optimizations
+    pub optimize_networking: bool,
+    /// Whether this is for an embedded target
+    pub is_embedded: bool,
+}
+
+/// Optimizer state
 pub struct Optimizer {
     bytecode: KapraBytecode,
     errors: Vec<OptError>,
-    is_embedded: bool, // Configuration for embedded devices
+    config: OptimizerConfig,
+    /// Tracks async operations for optimization
+    async_ops: Vec<AsyncOpInfo>,
+}
+
+/// Information about async operations for optimization
+#[derive(Debug, Clone)]
+struct AsyncOpInfo {
+    /// Instruction index
+    index: usize,
+    /// Type of async operation
+    op_type: AsyncOpType,
+    /// Dependencies
+    dependencies: Vec<usize>,
+}
+
+/// Types of async operations
+#[derive(Debug, Clone)]
+enum AsyncOpType {
+    /// Simple async task
+    Task,
+    /// Async network operation
+    Network(NetworkOpType),
+    /// Async file operation
+    File,
 }
 
 impl Optimizer {
-    pub fn new(bytecode: KapraBytecode, is_embedded: bool) -> Self {
+    /// Creates a new optimizer with default configuration
+    pub fn new(bytecode: KapraBytecode) -> Self {
         Optimizer {
             bytecode,
             errors: Vec::new(),
-            is_embedded,
+            config: OptimizerConfig {
+                max_unroll_iterations: 4,
+                optimize_async: true,
+                optimize_networking: true,
+                is_embedded: false,
+            },
+            async_ops: Vec::new(),
         }
     }
 
-    // Optimize the bytecode
+    /// Creates a new optimizer with custom configuration
+    pub fn with_config(bytecode: KapraBytecode, config: OptimizerConfig) -> Self {
+        Optimizer {
+            bytecode,
+            errors: Vec::new(),
+            config,
+            async_ops: Vec::new(),
+        }
+    }
+
+    /// Optimize the bytecode with all passes
     pub fn optimize(&mut self) -> Result<KapraBytecode, Vec<OptError>> {
         let mut optimized = self.bytecode.clone();
 
-        // Pass 1: Constant propagation (from ksl_optimizer_advanced.rs)
+        // Pass 1: Collect async operation information
+        if self.config.optimize_async {
+            self.collect_async_ops(&optimized);
+        }
+
+        // Pass 2: Constant propagation
         optimized = self.propagate_constants(optimized);
 
-        // Pass 2: Constant folding (from ksl_optimizer.rs)
+        // Pass 3: Constant folding
         optimized = self.constant_folding(optimized);
 
-        // Pass 3: Loop unrolling (combined from both)
+        // Pass 4: Loop unrolling
         optimized = self.loop_unrolling(optimized);
 
-        // Pass 4: Dead code elimination (combined from both)
+        // Pass 5: Dead code elimination
         optimized = self.dead_code_elimination(optimized);
 
-        // Pass 5: Tail call optimization (from ksl_optimizer.rs)
+        // Pass 6: Tail call optimization
         optimized = self.tail_call_optimization(optimized);
+
+        // Pass 7: Async operation optimization
+        if self.config.optimize_async {
+            optimized = self.optimize_async_ops(optimized);
+        }
 
         if self.errors.is_empty() {
             Ok(optimized)
         } else {
             Err(self.errors.clone())
         }
+    }
+
+    /// Collect information about async operations in the bytecode
+    fn collect_async_ops(&mut self, bytecode: &KapraBytecode) {
+        for (i, instr) in bytecode.instructions.iter().enumerate() {
+            match instr.opcode {
+                KapraOpCode::AsyncStart => {
+                    self.async_ops.push(AsyncOpInfo {
+                        index: i,
+                        op_type: AsyncOpType::Task,
+                        dependencies: vec![],
+                    });
+                }
+                KapraOpCode::HttpGet | KapraOpCode::HttpPost => {
+                    self.async_ops.push(AsyncOpInfo {
+                        index: i,
+                        op_type: AsyncOpType::Network(NetworkOpType::from(instr.opcode)),
+                        dependencies: vec![],
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Optimize async operations by reordering and combining
+    fn optimize_async_ops(&self, bytecode: KapraBytecode) -> KapraBytecode {
+        let mut result = bytecode.clone();
+        
+        // Group network operations by endpoint
+        if self.config.optimize_networking {
+            let mut network_ops: HashMap<String, Vec<usize>> = HashMap::new();
+            
+            for op in &self.async_ops {
+                if let AsyncOpType::Network(_) = op.op_type {
+                    if let Some(Operand::Immediate(endpoint)) = result.instructions[op.index].operands.get(0) {
+                        if let Ok(endpoint_str) = String::from_utf8(endpoint.clone()) {
+                            network_ops.entry(endpoint_str).or_default().push(op.index);
+                        }
+                    }
+                }
+            }
+            
+            // Combine multiple requests to same endpoint
+            for (_, indices) in network_ops {
+                if indices.len() > 1 {
+                    // Keep first operation, replace others with NOOP
+                    for &idx in &indices[1..] {
+                        result.instructions[idx] = KapraInstruction::new(
+                            KapraOpCode::Noop,
+                            vec![],
+                            None,
+                        );
+                    }
+                }
+            }
+        }
+        
+        // Remove NOOP instructions
+        result.instructions.retain(|instr| instr.opcode != KapraOpCode::Noop);
+        result
     }
 
     // Constant propagation: Propagate constant values to eliminate redundant computations
@@ -61,6 +187,13 @@ impl Optimizer {
         let mut i = 0;
         while i < result.instructions.len() {
             let instr = &result.instructions[i];
+            
+            // Skip async operations during constant propagation
+            if matches!(instr.opcode, KapraOpCode::AsyncStart | KapraOpCode::HttpGet | KapraOpCode::HttpPost) {
+                i += 1;
+                continue;
+            }
+
             if instr.opcode == OPCODE_MOV {
                 if let (Operand::Register(dst), Operand::Immediate(data)) = (&instr.operands[0], &instr.operands[1]) {
                     if let Ok(value) = u64::from_le_bytes(data.as_slice().try_into().map_err(|_| ())) {
@@ -193,7 +326,7 @@ impl Optimizer {
                         });
 
                         // Determine unrolling limit based on is_embedded
-                        let unroll_limit = if self.is_embedded { 2 } else { 4 };
+                        let unroll_limit = if self.config.is_embedded { 2 } else { 4 };
                         let iterations = if is_fixed_iteration && loop_body.len() <= unroll_limit as usize {
                             unroll_limit // Unroll up to the limit
                         } else {
@@ -367,9 +500,16 @@ impl OperandExt for Operand {
 }
 
 // Public API to optimize bytecode
-pub fn optimize(bytecode: KapraBytecode, is_embedded: bool) -> Result<KapraBytecode, Vec<OptError>> {
-    let mut optimizer = Optimizer::new(bytecode, is_embedded);
-    optimizer.optimize()
+pub fn optimize(bytecode: KapraBytecode) -> Result<KapraBytecode, Vec<OptError>> {
+    Optimizer::new(bytecode).optimize()
+}
+
+// Public API to optimize bytecode with custom configuration
+pub fn optimize_with_config(
+    bytecode: KapraBytecode, 
+    config: OptimizerConfig
+) -> Result<KapraBytecode, Vec<OptError>> {
+    Optimizer::with_config(bytecode, config).optimize()
 }
 
 // Assume ksl_bytecode.rs, ksl_types.rs, and ksl_errors.rs are in the same crate
@@ -418,7 +558,7 @@ mod tests {
             Some(Type::U64),
         ));
 
-        let optimized = optimize(bytecode, false).unwrap();
+        let optimized = optimize(bytecode).unwrap();
         assert_eq!(optimized.instructions.len(), 3);
         assert_eq!(optimized.instructions[2].opcode, KapraOpCode::Mov);
         assert_eq!(
@@ -450,7 +590,7 @@ mod tests {
             None,
         ));
 
-        let optimized = optimize(bytecode, false).unwrap();
+        let optimized = optimize(bytecode).unwrap();
         assert!(!optimized.instructions.contains(&KapraOpCode::Loop));
         assert_eq!(optimized.instructions.len(), 2); // Two ADD instructions
         assert_eq!(optimized.instructions[0].opcode, KapraOpCode::Add);
@@ -491,7 +631,7 @@ mod tests {
             Some(Type::U64),
         ));
 
-        let optimized = optimize(bytecode, false).unwrap();
+        let optimized = optimize(bytecode).unwrap();
         assert_eq!(optimized.instructions.len(), 2); // Mov + Halt
         assert_eq!(optimized.instructions[1].opcode, KapraOpCode::Halt);
     }
@@ -510,7 +650,7 @@ mod tests {
             None,
         ));
 
-        let optimized = optimize(bytecode, false).unwrap();
+        let optimized = optimize(bytecode).unwrap();
         assert_eq!(optimized.instructions.len(), 1);
         assert_eq!(optimized.instructions[0].opcode, KapraOpCode::Jump);
     }
@@ -538,7 +678,7 @@ mod tests {
             None,
         ));
 
-        let optimized = optimize(bytecode, true).unwrap();
+        let optimized = optimize(bytecode).unwrap();
         assert!(optimized.instructions.contains(&KapraOpCode::Loop));
         assert_eq!(optimized.instructions.len(), 3); // Loop + Add + LoopEnd
     }

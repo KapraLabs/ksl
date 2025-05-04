@@ -3,7 +3,33 @@
 
 use std::collections::HashMap;
 
-// Type representation for KSL
+// Assume ksl_generics.rs provides GenericResolver
+mod ksl_generics {
+    use super::{Type, TypeContext, TypeError};
+    pub struct GenericResolver;
+    impl GenericResolver {
+        pub fn resolve_type(
+            _name: &str,
+            _constraints: &[Type],
+            _ctx: &TypeContext,
+        ) -> Result<Type, TypeError> {
+            Ok(Type::Void) // Placeholder
+        }
+    }
+}
+
+// Assume ksl_typegen.rs provides TypeGenerator
+mod ksl_typegen {
+    use super::TypeError;
+    pub struct TypeGenerator;
+    impl TypeGenerator {
+        pub fn validate_schema(_schema: &str) -> Result<(), TypeError> {
+            Ok(()) // Placeholder
+        }
+    }
+}
+
+/// Type representation for KSL.
 #[derive(Debug, PartialEq, Clone)]
 pub enum Type {
     // Primitive types
@@ -35,42 +61,89 @@ pub enum Type {
     }, // e.g., result<string, error>
     Tuple(Vec<Type>), // e.g., (u32, f32)
     Void, // For functions with no return value
+    Generic {
+        name: String,
+        constraints: Vec<Type>, // e.g., T: U32 | F32
+    },
+    Generated {
+        schema: String, // e.g., schema name for JSON/Protobuf
+    },
+    // Networking types
+    Function {
+        params: Vec<Type>,
+        return_type: Box<Type>,
+    }, // e.g., function<u32, string>
+    Error, // For error handling
+    Socket, // For network sockets
+    HttpRequest, // For HTTP requests
+    HttpResponse, // For HTTP responses
 }
 
-// Context for type inference (e.g., variable bindings)
+/// Context for type inference (e.g., variable bindings).
 #[derive(Debug, Default)]
 pub struct TypeContext {
     bindings: HashMap<String, Type>, // Maps variable names to their types
 }
 
 impl TypeContext {
+    /// Creates a new type context.
+    /// @returns A new `TypeContext` instance.
+    /// @example
+    /// ```ksl
+    /// let ctx = TypeContext::new();
+    /// ```
     pub fn new() -> Self {
         TypeContext {
             bindings: HashMap::new(),
         }
     }
 
+    /// Adds a variable binding to the context.
+    /// @param name The variable name.
+    /// @param ty The variable's type.
+    /// @example
+    /// ```ksl
+    /// let mut ctx = TypeContext::new();
+    /// ctx.add_binding("x".to_string(), Type::U32);
+    /// ```
     pub fn add_binding(&mut self, name: String, ty: Type) {
         self.bindings.insert(name, ty);
     }
 
+    /// Retrieves a variable's type from the context.
+    /// @param name The variable name.
+    /// @returns An `Option` containing the type, if found.
+    /// @example
+    /// ```ksl
+    /// let mut ctx = TypeContext::new();
+    /// ctx.add_binding("x".to_string(), Type::U32);
+    /// assert_eq!(ctx.get_binding("x"), Some(&Type::U32));
+    /// ```
     pub fn get_binding(&self, name: &str) -> Option<&Type> {
         self.bindings.get(name)
     }
 }
 
-// Type inference and validation errors
+/// Type inference and validation errors.
 #[derive(Debug, PartialEq)]
 pub struct TypeError {
     pub message: String,
     pub position: usize,
 }
 
-// Type utilities
+/// Type utilities for parsing and inference.
 pub struct TypeSystem;
 
 impl TypeSystem {
-    // Parse a type annotation from a string (e.g., "u32", "array<u8, 32>")
+    /// Parses a type annotation from a string.
+    /// @param annot The type annotation (e.g., "u32", "array<u8, 32>", "T<U32 | F32>").
+    /// @param position The source position for error reporting.
+    /// @returns A `Result` containing the parsed `Type` or a `TypeError`.
+    /// @example
+    /// ```ksl
+    /// let ty = TypeSystem::parse_type_annotation("u32", 0).unwrap();
+    /// assert_eq!(ty, Type::U32);
+    /// ```
     pub fn parse_type_annotation(annot: &str, position: usize) -> Result<Type, TypeError> {
         match annot {
             "u8" => Ok(Type::U8),
@@ -85,8 +158,12 @@ impl TypeSystem {
             "f64" => Ok(Type::F64),
             "string" => Ok(Type::String),
             "void" => Ok(Type::Void),
+            "error" => Ok(Type::Error),
+            "socket" => Ok(Type::Socket),
+            "http_request" => Ok(Type::HttpRequest),
+            "http_response" => Ok(Type::HttpResponse),
             _ if annot.starts_with("array<") && annot.ends_with('>') => {
-                let inner = &annot[6..annot.len() - 1]; // Extract "u8, 32"
+                let inner = &annot[6..annot.len() - 1];
                 let parts: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
                 if parts.len() != 2 {
                     return Err(TypeError {
@@ -106,6 +183,76 @@ impl TypeSystem {
                 let inner_type = Self::parse_type_annotation(inner, position)?;
                 Ok(Type::Option(Box::new(inner_type)))
             }
+            _ if annot.starts_with("generated<") && annot.ends_with('>') => {
+                let schema = &annot[10..annot.len() - 1].trim().to_string();
+                ksl_typegen::TypeGenerator::validate_schema(schema).map_err(|e| TypeError {
+                    message: e.message,
+                    position,
+                })?;
+                Ok(Type::Generated { schema: schema.to_string() })
+            }
+            _ if annot.contains('<') && annot.ends_with('>') => {
+                let parts: Vec<&str> = annot.split('<').collect();
+                if parts.len() != 2 {
+                    return Err(TypeError {
+                        message: "Invalid generic type syntax".to_string(),
+                        position,
+                    });
+                }
+                let name = parts[0].trim();
+                let constraints_str = &parts[1][..parts[1].len() - 1];
+                let constraints: Vec<Type> = constraints_str
+                    .split('|')
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| Self::parse_type_annotation(s, position))
+                    .collect::<Result<Vec<Type>, TypeError>>()?;
+                if constraints.is_empty() {
+                    return Err(TypeError {
+                        message: "Generic type requires at least one constraint".to_string(),
+                        position,
+                    });
+                }
+                Ok(Type::Generic {
+                    name: name.to_string(),
+                    constraints,
+                })
+            }
+            _ if annot.starts_with("function<") && annot.ends_with('>') => {
+                let inner = &annot[9..annot.len() - 1];
+                let parts: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
+                if parts.len() < 2 {
+                    return Err(TypeError {
+                        message: "Function type requires at least return type".to_string(),
+                        position,
+                    });
+                }
+                let return_type = Self::parse_type_annotation(parts.last().unwrap(), position)?;
+                let params = parts[..parts.len() - 1]
+                    .iter()
+                    .map(|s| Self::parse_type_annotation(s, position))
+                    .collect::<Result<Vec<Type>, TypeError>>()?;
+                Ok(Type::Function {
+                    params,
+                    return_type: Box::new(return_type),
+                })
+            }
+            _ if annot.starts_with("result<") && annot.ends_with('>') => {
+                let inner = &annot[7..annot.len() - 1];
+                let parts: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
+                if parts.len() != 2 {
+                    return Err(TypeError {
+                        message: "Result type requires ok and err types".to_string(),
+                        position,
+                    });
+                }
+                let ok_type = Self::parse_type_annotation(parts[0], position)?;
+                let err_type = Self::parse_type_annotation(parts[1], position)?;
+                Ok(Type::Result {
+                    ok: Box::new(ok_type),
+                    err: Box::new(err_type),
+                })
+            }
             _ => Err(TypeError {
                 message: format!("Unknown type: {}", annot),
                 position,
@@ -113,7 +260,20 @@ impl TypeSystem {
         }
     }
 
-    // Infer the type of an AST node (simplified, integrates with ksl_parser.rs)
+    /// Infers the type of an AST node.
+    /// @param node The AST node to infer the type for.
+    /// @param ctx The type context with variable bindings.
+    /// @param position The source position for error reporting.
+    /// @returns A `Result` containing the inferred `Type` or a `TypeError`.
+    /// @example
+    /// ```ksl
+    /// let node = AstNode::Expr {
+    ///     kind: ExprKind::Number("42".to_string()),
+    /// };
+    /// let ctx = TypeContext::new();
+    /// let ty = TypeSystem::infer_type(&node, &ctx, 0).unwrap();
+    /// assert_eq!(ty, Type::U32);
+    /// ```
     pub fn infer_type(
         node: &AstNode,
         ctx: &TypeContext,
@@ -124,7 +284,7 @@ impl TypeSystem {
                 if let Some(annot) = type_annot {
                     let annot_type = Self::parse_type_annotation(annot, position)?;
                     let expr_type = Self::infer_type(expr, ctx, position)?;
-                    if annot_type != expr_type {
+                    if !Self::is_compatible(&annot_type, &expr_type) {
                         return Err(TypeError {
                             message: format!(
                                 "Type mismatch: expected {:?}, got {:?}",
@@ -138,14 +298,35 @@ impl TypeSystem {
                     Self::infer_type(expr, ctx, position)
                 }
             }
+            AstNode::FnDecl { return_type, body, .. } => {
+                let ret_type = Self::parse_type_annotation(return_type, position)?;
+                if let Some(last_node) = body.last() {
+                    let last_type = Self::infer_type(last_node, ctx, position)?;
+                    if !Self::is_compatible(&ret_type, &last_type) {
+                        return Err(TypeError {
+                            message: format!(
+                                "Function return type mismatch: expected {:?}, got {:?}",
+                                ret_type, last_type
+                            ),
+                            position,
+                        });
+                    }
+                }
+                Ok(ret_type)
+            }
+            AstNode::MacroDef { .. } => {
+                // Macros don't have a type; return Void
+                Ok(Type::Void)
+            }
             AstNode::Expr { kind } => match kind {
                 ExprKind::Number(num) => {
                     if num.contains('.') {
-                        Ok(Type::F32) // Simplified: treat all decimals as f32 for now
+                        Ok(Type::F32)
                     } else {
-                        Ok(Type::U32) // Simplified: treat integers as u32
+                        Ok(Type::U32)
                     }
                 }
+                ExprKind::String(_) => Ok(Type::String),
                 ExprKind::Ident(name) => ctx.get_binding(name).cloned().ok_or_else(|| TypeError {
                     message: format!("Undefined variable: {}", name),
                     position,
@@ -166,7 +347,7 @@ impl TypeSystem {
                         }
                         ">" | "==" => {
                             if left_type == right_type {
-                                Ok(Type::U32) // Comparisons return u32 (boolean-like)
+                                Ok(Type::U32)
                             } else {
                                 Err(TypeError {
                                     message: "Type mismatch in comparison".to_string(),
@@ -180,6 +361,75 @@ impl TypeSystem {
                         }),
                     }
                 }
+                ExprKind::Call { name, args } => {
+                    // Simplified: Assume function type is in context
+                    let fn_type = ctx.get_binding(name).cloned().ok_or_else(|| TypeError {
+                        message: format!("Undefined function: {}", name),
+                        position,
+                    })?;
+                    // Basic validation of arguments
+                    if let Type::Tuple(arg_types) = fn_type {
+                        if arg_types.len() != args.len() {
+                            return Err(TypeError {
+                                message: format!(
+                                    "Expected {} arguments, got {}",
+                                    arg_types.len(),
+                                    args.len()
+                                ),
+                                position,
+                            });
+                        }
+                        for (arg, expected_type) in args.iter().zip(arg_types.iter()) {
+                            let arg_type = Self::infer_type(arg, ctx, position)?;
+                            if !Self::is_compatible(expected_type, &arg_type) {
+                                return Err(TypeError {
+                                    message: format!(
+                                        "Argument type mismatch: expected {:?}, got {:?}",
+                                        expected_type, arg_type
+                                    ),
+                                    position,
+                                });
+                            }
+                        }
+                    }
+                    Ok(Type::Void) // Simplified: Assume void return for now
+                }
+                ExprKind::MacroCall { .. } => {
+                    // Macro calls don't have a type; return Void
+                    Ok(Type::Void)
+                }
+                ExprKind::AsyncCall { name, args } => {
+                    // Simplified: Assume async function returns a Future-like type
+                    let fn_type = ctx.get_binding(name).cloned().ok_or_else(|| TypeError {
+                        message: format!("Undefined async function: {}", name),
+                        position,
+                    })?;
+                    if let Type::Tuple(arg_types) = fn_type {
+                        if arg_types.len() != args.len() {
+                            return Err(TypeError {
+                                message: format!(
+                                    "Expected {} arguments, got {}",
+                                    arg_types.len(),
+                                    args.len()
+                                ),
+                                position,
+                            });
+                        }
+                        for (arg, expected_type) in args.iter().zip(arg_types.iter()) {
+                            let arg_type = Self::infer_type(arg, ctx, position)?;
+                            if !Self::is_compatible(expected_type, &arg_type) {
+                                return Err(TypeError {
+                                    message: format!(
+                                        "Argument type mismatch: expected {:?}, got {:?}",
+                                        expected_type, arg_type
+                                    ),
+                                    position,
+                                });
+                            }
+                        }
+                    }
+                    Ok(Type::Option(Box::new(Type::Void))) // Simplified: Assume async returns Option<Void>
+                }
             },
             _ => Err(TypeError {
                 message: "Type inference not yet supported for this node".to_string(),
@@ -188,14 +438,39 @@ impl TypeSystem {
         }
     }
 
-    // Check if two types are compatible (e.g., for assignments)
+    /// Checks if two types are compatible for assignments.
+    /// @param expected The expected type.
+    /// @param actual The actual type.
+    /// @returns `true` if the types are compatible, `false` otherwise.
+    /// @example
+    /// ```ksl
+    /// assert!(TypeSystem::is_compatible(&Type::U32, &Type::U32));
+    /// ```
     pub fn is_compatible(expected: &Type, actual: &Type) -> bool {
-        expected == actual // Strict equality for now
+        match (expected, actual) {
+            (Type::Generic { constraints, .. }, actual) => {
+                constraints.iter().any(|c| c == actual)
+            }
+            (expected, Type::Generic { constraints, .. }) => {
+                constraints.iter().any(|c| c == expected)
+            }
+            (Type::Function { params: p1, return_type: r1 }, Type::Function { params: p2, return_type: r2 }) => {
+                p1.len() == p2.len() && p1.iter().zip(p2.iter()).all(|(t1, t2)| Self::is_compatible(t1, t2))
+                    && Self::is_compatible(r1, r2)
+            }
+            (Type::Error, Type::Error) => true,
+            (Type::Socket, Type::Socket) => true,
+            (Type::HttpRequest, Type::HttpRequest) => true,
+            (Type::HttpResponse, Type::HttpResponse) => true,
+            (Type::Result { ok: ok1, err: err1 }, Type::Result { ok: ok2, err: err2 }) => {
+                Self::is_compatible(ok1, ok2) && Self::is_compatible(err1, err2)
+            }
+            _ => expected == actual,
+        }
     }
 }
 
-// Re-export AstNode and ExprKind from ksl_parser.rs for integration
-// (In a real project, these would likely be in a shared module)
+// Updated AstNode and ExprKind to match ksl_parser.rs
 #[derive(Debug, PartialEq)]
 pub enum AstNode {
     VarDecl {
@@ -219,6 +494,11 @@ pub enum AstNode {
         expr: Box<AstNode>,
         arms: Vec<(AstNode, Vec<AstNode>)>,
     },
+    MacroDef {
+        name: String,
+        params: Vec<(String, String)>,
+        body: Vec<AstNode>,
+    },
     Expr {
         kind: ExprKind,
     },
@@ -228,10 +508,23 @@ pub enum AstNode {
 pub enum ExprKind {
     Ident(String),
     Number(String),
+    String(String),
     BinaryOp {
         op: String,
         left: Box<AstNode>,
         right: Box<AstNode>,
+    },
+    Call {
+        name: String,
+        args: Vec<AstNode>,
+    },
+    MacroCall {
+        name: String,
+        args: Vec<AstNode>,
+    },
+    AsyncCall {
+        name: String,
+        args: Vec<AstNode>,
     },
 }
 
@@ -252,6 +545,19 @@ mod tests {
         assert_eq!(
             TypeSystem::parse_type_annotation("option<u32>", 0),
             Ok(Type::Option(Box::new(Type::U32)))
+        );
+        assert_eq!(
+            TypeSystem::parse_type_annotation("T<u32 | f32>", 0),
+            Ok(Type::Generic {
+                name: "T".to_string(),
+                constraints: vec![Type::U32, Type::F32],
+            })
+        );
+        assert_eq!(
+            TypeSystem::parse_type_annotation("generated<user_schema>", 0),
+            Ok(Type::Generated {
+                schema: "user_schema".to_string(),
+            })
         );
         assert!(TypeSystem::parse_type_annotation("unknown", 0).is_err());
     }
@@ -322,5 +628,146 @@ mod tests {
             },
         };
         assert_eq!(TypeSystem::infer_type(&node, &ctx, 0), Ok(Type::U32));
+    }
+
+    #[test]
+    fn infer_type_generic() {
+        let mut ctx = TypeContext::new();
+        ctx.add_binding(
+            "add".to_string(),
+            Type::Tuple(vec![Type::Generic {
+                name: "T".to_string(),
+                constraints: vec![Type::U32, Type::F32],
+            }]),
+        );
+        let node = AstNode::Expr {
+            kind: ExprKind::Call {
+                name: "add".to_string(),
+                args: vec![
+                    AstNode::Expr {
+                        kind: ExprKind::Number("1".to_string()),
+                    },
+                    AstNode::Expr {
+                        kind: ExprKind::Number("2".to_string()),
+                    },
+                ],
+            },
+        };
+        assert_eq!(TypeSystem::infer_type(&node, &ctx, 0), Ok(Type::Void));
+    }
+
+    #[test]
+    fn parse_networking_types() {
+        let tests = vec![
+            ("function<u32, string>", Type::Function {
+                params: vec![Type::U32],
+                return_type: Box::new(Type::String),
+            }),
+            ("result<string, error>", Type::Result {
+                ok: Box::new(Type::String),
+                err: Box::new(Type::Error),
+            }),
+            ("array<u8, 1024>", Type::Array(Box::new(Type::U8), 1024)),
+            ("socket", Type::Socket),
+            ("http_request", Type::HttpRequest),
+            ("http_response", Type::HttpResponse),
+        ];
+
+        for (input, expected) in tests {
+            let result = TypeSystem::parse_type_annotation(input, 0);
+            assert_eq!(result, Ok(expected));
+        }
+    }
+
+    #[test]
+    fn is_compatible_networking() {
+        let tests = vec![
+            (
+                Type::Function {
+                    params: vec![Type::U32],
+                    return_type: Box::new(Type::String),
+                },
+                Type::Function {
+                    params: vec![Type::U32],
+                    return_type: Box::new(Type::String),
+                },
+                true,
+            ),
+            (
+                Type::Result {
+                    ok: Box::new(Type::String),
+                    err: Box::new(Type::Error),
+                },
+                Type::Result {
+                    ok: Box::new(Type::String),
+                    err: Box::new(Type::Error),
+                },
+                true,
+            ),
+            (
+                Type::Array(Box::new(Type::U8), 1024),
+                Type::Array(Box::new(Type::U8), 1024),
+                true,
+            ),
+            (
+                Type::Socket,
+                Type::Socket,
+                true,
+            ),
+            (
+                Type::HttpRequest,
+                Type::HttpResponse,
+                false,
+            ),
+        ];
+
+        for (t1, t2, expected) in tests {
+            assert_eq!(TypeSystem::is_compatible(&t1, &t2), expected);
+        }
+    }
+
+    #[test]
+    fn infer_networking_types() {
+        let ctx = TypeContext::new();
+        let tests = vec![
+            (
+                AstNode::Expr {
+                    kind: ExprKind::AsyncCall {
+                        name: "http.get".to_string(),
+                        args: vec![AstNode::Expr {
+                            kind: ExprKind::String("url".to_string()),
+                        }],
+                    },
+                },
+                Type::Result {
+                    ok: Box::new(Type::String),
+                    err: Box::new(Type::Error),
+                },
+            ),
+            (
+                AstNode::Expr {
+                    kind: ExprKind::AsyncCall {
+                        name: "http.post".to_string(),
+                        args: vec![
+                            AstNode::Expr {
+                                kind: ExprKind::String("url".to_string()),
+                            },
+                            AstNode::Expr {
+                                kind: ExprKind::String("data".to_string()),
+                            },
+                        ],
+                    },
+                },
+                Type::Result {
+                    ok: Box::new(Type::String),
+                    err: Box::new(Type::Error),
+                },
+            ),
+        ];
+
+        for (node, expected) in tests {
+            let result = TypeSystem::infer_type(&node, &ctx, 0);
+            assert_eq!(result, Ok(expected));
+        }
     }
 }

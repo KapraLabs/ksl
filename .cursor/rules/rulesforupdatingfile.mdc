@@ -1,0 +1,6 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+update the files as the instructions show, make sure to check dependencies so you update them correctly, don't remove any important code unless you absolutely need  to, when you're done updating the file it should work flawlessly with the whole project.

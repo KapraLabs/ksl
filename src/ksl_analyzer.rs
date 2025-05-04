@@ -1,5 +1,6 @@
 // ksl_analyzer.rs
-// Implements a dynamic analysis tool to profile KSL programs for performance and resource usage.
+// Implements static and dynamic analysis tools for KSL programs, including performance profiling,
+// async code analysis, and resource usage tracking.
 
 use crate::ksl_parser::parse;
 use crate::ksl_checker::check;
@@ -8,42 +9,100 @@ use crate::ksl_bytecode::{KapraBytecode, KapraInstruction, KapraOpCode};
 use crate::kapra_vm::{KapraVM, RuntimeError};
 use crate::ksl_module::ModuleSystem;
 use crate::ksl_errors::{KslError, SourcePosition};
+use crate::ksl_ast_transform::AstNode;
 use std::fs;
 use std::path::PathBuf;
 use std::time::{Instant, Duration};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-// Profiling data for a single instruction
+/// Profiling data for a single instruction
 #[derive(Debug)]
 struct InstructionProfile {
     count: u64,
     total_time: Duration,
 }
 
-// Profiling data for a function
+/// Profiling data for a function
 #[derive(Debug)]
 struct FunctionProfile {
     name: String,
     calls: u64,
     total_time: Duration,
     instructions: HashMap<u32, InstructionProfile>,
+    is_async: bool,
+    async_operations: Vec<String>,
 }
 
-// Analyzer state
+/// Analysis rules for async code
+#[derive(Debug)]
+struct AsyncAnalysisRules {
+    /// Maximum number of concurrent async operations allowed
+    max_concurrent_ops: usize,
+    /// Forbidden async operations in certain contexts
+    forbidden_ops: HashSet<String>,
+    /// Required error handling for async operations
+    require_error_handling: bool,
+}
+
+/// Analyzer state with async support
 pub struct Analyzer {
     module_system: ModuleSystem,
     profiles: Vec<FunctionProfile>,
+    async_rules: AsyncAnalysisRules,
+    async_contexts: HashMap<String, Vec<String>>,
 }
 
 impl Analyzer {
+    /// Creates a new analyzer with default settings
     pub fn new() -> Self {
         Analyzer {
             module_system: ModuleSystem::new(),
             profiles: Vec::new(),
+            async_rules: AsyncAnalysisRules {
+                max_concurrent_ops: 100,
+                forbidden_ops: HashSet::new(),
+                require_error_handling: true,
+            },
+            async_contexts: HashMap::new(),
         }
     }
 
-    // Analyze a KSL file
+    /// Analyzes async code patterns in the AST
+    fn analyze_async_patterns(&mut self, ast: &[AstNode]) -> Result<(), Vec<KslError>> {
+        let mut errors = Vec::new();
+        let mut async_stack = Vec::new();
+
+        for node in ast {
+            match node {
+                AstNode::AsyncBlock { body, .. } => {
+                    async_stack.push("block".to_string());
+                    self.analyze_async_patterns(body)?;
+                    async_stack.pop();
+                }
+                AstNode::AsyncFnDecl { name, body, .. } => {
+                    async_stack.push(name.clone());
+                    self.analyze_async_patterns(body)?;
+                    async_stack.pop();
+                }
+                AstNode::AwaitExpr { .. } => {
+                    if async_stack.is_empty() {
+                        errors.push(KslError::type_error(
+                            "await used outside async context".to_string(),
+                            SourcePosition::new(1, 1),
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if !errors.is_empty() {
+            return Err(errors);
+        }
+        Ok(())
+    }
+
+    /// Analyzes a KSL file for both static and dynamic properties
     pub fn analyze_file(&mut self, file: &PathBuf) -> Result<(), Vec<KslError>> {
         let main_module_name = file.file_stem()
             .and_then(|s| s.to_str())
@@ -63,6 +122,9 @@ impl Analyzer {
                 SourcePosition::new(1, 1),
             )])?;
 
+        // Analyze async patterns
+        self.analyze_async_patterns(&ast)?;
+
         // Type-check
         check(&ast)
             .map_err(|errors| errors)?;
@@ -81,24 +143,37 @@ impl Analyzer {
             )])?;
         let total_duration = start.elapsed();
 
-        // Collect function profiles
+        // Collect function profiles with async information
         let mut function_profiles = HashMap::new();
         for (fn_index, profile) in vm.function_profiles {
             let fn_name = ast.iter()
                 .filter_map(|node| {
-                    if let AstNode::FnDecl { name, .. } = node {
+                    match node {
+                        AstNode::FnDecl { name, .. } => Some(name.clone()),
+                        AstNode::AsyncFnDecl { name, .. } => Some(name.clone()),
+                        _ => None,
+                    }
+                })
+                .nth(fn_index as usize)
+                .unwrap_or(format!("fn_{}", fn_index));
+
+            let is_async = ast.iter()
+                .filter_map(|node| {
+                    if let AstNode::AsyncFnDecl { name, .. } = node {
                         Some(name.clone())
                     } else {
                         None
                     }
                 })
-                .nth(fn_index as usize)
-                .unwrap_or(format!("fn_{}", fn_index));
+                .any(|name| name == fn_name);
+
             function_profiles.insert(fn_index, FunctionProfile {
                 name: fn_name,
                 calls: profile.calls,
                 total_time: profile.total_time,
                 instructions: profile.instructions,
+                is_async,
+                async_operations: Vec::new(),
             });
         }
 
@@ -111,12 +186,19 @@ impl Analyzer {
         println!("\nFunction Profiles:");
         for profile in &self.profiles {
             println!(
-                "{}: {} calls, {:.2?} ({:.2}% of total)",
+                "{}: {} calls, {:.2?} ({:.2}% of total){}",
                 profile.name,
                 profile.calls,
                 profile.total_time,
-                (profile.total_time.as_secs_f64() / total_duration.as_secs_f64()) * 100.0
+                (profile.total_time.as_secs_f64() / total_duration.as_secs_f64()) * 100.0,
+                if profile.is_async { " [ASYNC]" } else { "" }
             );
+            if profile.is_async {
+                println!("  Async Operations:");
+                for op in &profile.async_operations {
+                    println!("    - {}", op);
+                }
+            }
             println!("  Top Instructions:");
             let mut instrs: Vec<_> = profile.instructions.iter().collect();
             instrs.sort_by(|a, b| b.1.total_time.cmp(&a.1.total_time));
@@ -187,6 +269,20 @@ mod tests {
         let analyzer = Analyzer::new();
         assert!(!analyzer.profiles.is_empty());
         assert!(analyzer.profiles.iter().any(|p| p.name == "compute"));
+    }
+
+    #[test]
+    fn test_analyze_async() {
+        let mut temp_file = NamedTempFile::new().unwrap();
+        writeln!(
+            temp_file,
+            "async fn fetch_data() { let data = await http.get(\"https://example.com\"); }"
+        ).unwrap();
+
+        let result = analyze(&temp_file.path().to_path_buf());
+        assert!(result.is_ok());
+        let analyzer = Analyzer::new();
+        assert!(analyzer.profiles.iter().any(|p| p.name == "fetch_data" && p.is_async));
     }
 
     #[test]
