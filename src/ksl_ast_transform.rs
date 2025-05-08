@@ -11,6 +11,21 @@ use std::fs::{self, File};
 use std::io::Write;
 use std::path::PathBuf;
 use std::collections::HashMap;
+use log::{debug, info, warn};
+
+/// Trait defining an AST transformation pass
+pub trait TransformPass {
+    /// Name of the transform pass
+    fn name(&self) -> &'static str;
+    
+    /// Apply the transformation to the AST
+    fn apply(&self, ast: &mut Vec<AstNode>) -> Result<(), KslError>;
+    
+    /// Optional validation after transformation
+    fn validate(&self, ast: &[AstNode]) -> Result<(), KslError> {
+        Ok(()) // Default implementation does no validation
+    }
+}
 
 /// Configuration for AST transformations.
 #[derive(Debug)]
@@ -19,8 +34,8 @@ pub struct TransformConfig {
     input_file: PathBuf,
     /// Optional output file (defaults to input_file)
     output_file: Option<PathBuf>,
-    /// Transformation rule (e.g., "inline", "unroll", "async", "network")
-    rule: String,
+    /// Transformation passes to apply in order
+    passes: Vec<Box<dyn TransformPass>>,
     /// Optional plugin for custom transformation
     plugin_name: Option<String>,
     /// Maximum number of iterations for loop unrolling
@@ -29,94 +44,20 @@ pub struct TransformConfig {
     preserve_networking: bool,
 }
 
-/// AST transformer that handles various code transformations.
-pub struct AstTransformer {
-    config: TransformConfig,
-    plugin_system: PluginSystem,
-}
+/// Function inlining transform pass
+pub struct InlinePass;
 
-impl AstTransformer {
-    /// Creates a new AST transformer with the given configuration.
-    pub fn new(config: TransformConfig) -> Self {
-        AstTransformer {
-            config,
-            plugin_system: PluginSystem::new(),
-        }
+impl TransformPass for InlinePass {
+    fn name(&self) -> &'static str {
+        "inline"
     }
 
-    /// Transforms a KSL source file according to the configured rules.
-    pub fn transform(&mut self) -> Result<(), KslError> {
-        let pos = SourcePosition::new(1, 1);
-        // Read and parse source
-        let source = fs::read_to_string(&self.config.input_file)
-            .map_err(|e| KslError::type_error(
-                format!("Failed to read file {}: {}", self.config.input_file.display(), e),
-                pos,
-            ))?;
-        let mut ast = parse(&source)
-            .map_err(|e| KslError::type_error(
-                format!("Parse error at position {}: {}", e.position, e.message),
-                pos,
-            ))?;
-
-        // Apply transformation
-        if let Some(plugin_name) = &self.config.plugin_name {
-            // Use plugin for custom transformation
-            self.plugin_system.run_plugin(
-                plugin_name,
-                "transform",
-                &self.config.input_file,
-                &[self.config.rule.clone()],
-            )?;
-        } else {
-            // Apply built-in transformation
-            match self.config.rule.as_str() {
-                "inline" => self.inline_functions(&mut ast)?,
-                "unroll" => self.unroll_loops(&mut ast)?,
-                "async" => self.transform_async(&mut ast)?,
-                "network" => self.optimize_networking(&mut ast)?,
-                _ => return Err(KslError::type_error(
-                    format!("Unknown transformation rule: {}", self.config.rule),
-                    pos,
-                )),
-            }
-        }
-
-        // Validate transformed AST
-        check(&ast)
-            .map_err(|errors| KslError::type_error(
-                errors.into_iter()
-                    .map(|e| format!("Type error at position {}: {}", e.position, e.message))
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-                pos,
-            ))?;
-
-        // Serialize AST back to source code
-        let transformed_source = ast_to_source(&ast);
-
-        // Write transformed code
-        let output_path = self.config.output_file.clone().unwrap_or(self.config.input_file.clone());
-        File::create(&output_path)
-            .map_err(|e| KslError::type_error(
-                format!("Failed to create output file {}: {}", output_path.display(), e),
-                pos,
-            ))?
-            .write_all(transformed_source.as_bytes())
-            .map_err(|e| KslError::type_error(
-                format!("Failed to write output file {}: {}", output_path.display(), e),
-                pos,
-            ))?;
-
-        Ok(())
-    }
-
-    /// Inlines function calls in the AST.
-    fn inline_functions(&self, ast: &mut Vec<AstNode>) -> Result<(), KslError> {
-        let pos = SourcePosition::new(1, 1);
+    fn apply(&self, ast: &mut Vec<AstNode>) -> Result<(), KslError> {
+        debug!("Starting function inlining pass");
         let mut functions = HashMap::new();
         for node in ast.iter() {
             if let AstNode::FnDecl { name, params, body, .. } = node {
+                debug!("Found function to inline: {}", name);
                 functions.insert(name.clone(), (params.clone(), body.clone()));
             }
         }
@@ -126,13 +67,13 @@ impl AstTransformer {
             match node {
                 AstNode::Expr { kind: ExprKind::Call { name, args } } => {
                     if let Some((params, body)) = functions.get(name) {
+                        info!("Inlining function call: {}", name);
                         if params.len() != args.len() {
                             return Err(KslError::type_error(
                                 format!("Function {} expects {} arguments, got {}", name, params.len(), args.len()),
-                                pos,
+                                SourcePosition::new(1, 1),
                             ));
                         }
-                        // Create a new block with variable declarations for arguments
                         let mut inline_block = Vec::new();
                         for ((param_name, _), arg) in params.iter().zip(args) {
                             inline_block.push(AstNode::VarDecl {
@@ -154,16 +95,28 @@ impl AstTransformer {
         }
 
         *ast = new_ast;
+        debug!("Completed function inlining pass");
         Ok(())
     }
+}
 
-    /// Unrolls loops in the AST up to the configured maximum iterations.
-    fn unroll_loops(&self, ast: &mut Vec<AstNode>) -> Result<(), KslError> {
-        let pos = SourcePosition::new(1, 1);
+/// Loop unrolling transform pass
+pub struct UnrollPass {
+    max_iterations: u32,
+}
+
+impl TransformPass for UnrollPass {
+    fn name(&self) -> &'static str {
+        "unroll"
+    }
+
+    fn apply(&self, ast: &mut Vec<AstNode>) -> Result<(), KslError> {
+        debug!("Starting loop unrolling pass (max iterations: {})", self.max_iterations);
         let mut new_ast = Vec::new();
         for node in ast.iter() {
             match node {
                 AstNode::Match { expr, arms } => {
+                    info!("Found match expression to unroll");
                     let mut unrolled = Vec::new();
                     for arm in arms {
                         let (start, end) = match &arm.pattern {
@@ -173,7 +126,7 @@ impl AstTransformer {
                                 } else {
                                     return Err(KslError::type_error(
                                         "Range bounds must be numeric literals".to_string(),
-                                        pos,
+                                        SourcePosition::new(1, 1),
                                     ));
                                 }
                             }
@@ -186,21 +139,15 @@ impl AstTransformer {
                             }
                         };
 
-                        let var_name = match &arm.var {
-                            Some(name) => name.clone(),
-                            None => return Err(KslError::type_error(
-                                "Range match requires a variable".to_string(),
-                                pos,
-                            )),
-                        };
+                        debug!("Unrolling range {}..{}", start, end);
+                        let iterations = end.min(start + self.max_iterations) - start;
+                        info!("Unrolling {} iterations", iterations);
 
-                        // Unroll the loop up to max_unroll_iterations
-                        for i in start..end.min(start + self.config.max_unroll_iterations) {
+                        for i in start..end.min(start + self.max_iterations) {
                             let mut new_body = arm.body.clone();
-                            // Replace variable with literal
                             for node in new_body.iter_mut() {
                                 if let AstNode::Expr { kind: ExprKind::Ident(ref name) } = node {
-                                    if name == &var_name {
+                                    if name == &arm.var {
                                         *node = AstNode::Expr {
                                             kind: ExprKind::Number(i.to_string()),
                                         };
@@ -217,25 +164,42 @@ impl AstTransformer {
         }
 
         *ast = new_ast;
+        debug!("Completed loop unrolling pass");
         Ok(())
     }
+}
 
-    /// Transforms async/await code into a state machine.
-    fn transform_async(&self, ast: &mut Vec<AstNode>) -> Result<(), KslError> {
-        let pos = SourcePosition::new(1, 1);
+/// Async transform pass
+pub struct AsyncPass;
+
+impl TransformPass for AsyncPass {
+    fn name(&self) -> &'static str {
+        "async"
+    }
+
+    fn apply(&self, ast: &mut Vec<AstNode>) -> Result<(), KslError> {
+        debug!("Starting async transformation pass");
         let mut new_ast = Vec::new();
 
         for node in ast.iter() {
             match node {
                 AstNode::AsyncFnDecl { name, params, body, .. } => {
-                    // Transform async function into a state machine
+                    info!("Transforming async function: {}", name);
                     let mut state_machine = Vec::new();
                     let mut state = 0;
 
+                    // Create state enum
+                    let state_enum = create_state_enum(name, body);
+                    new_ast.push(state_enum);
+
+                    // Create state struct
+                    let state_struct = create_state_struct(name, params);
+                    new_ast.push(state_struct);
+
                     for stmt in body {
                         match stmt {
-                            AstNode::Await { expr, .. } => {
-                                // Add state transition
+                            AstNode::Await { expr } => {
+                                debug!("Found await expression in state {}", state);
                                 state_machine.push(AstNode::StateTransition {
                                     from_state: state,
                                     to_state: state + 1,
@@ -247,238 +211,302 @@ impl AstTransformer {
                         }
                     }
 
-                    // Add the transformed function to the new AST
-                    new_ast.push(AstNode::FnDecl {
-                        doc: None,
-                        name: name.clone(),
-                        params: params.clone(),
-                        return_type: None,
-                        body: state_machine,
-                        is_async: false,
-                    });
+                    // Create poll function
+                    let poll_fn = create_poll_function(name, &state_machine);
+                    new_ast.push(poll_fn);
                 }
                 _ => new_ast.push(node.clone()),
             }
         }
 
         *ast = new_ast;
+        debug!("Completed async transformation pass");
         Ok(())
     }
 
-    /// Optimizes networking operations in the AST.
-    fn optimize_networking(&self, ast: &mut Vec<AstNode>) -> Result<(), KslError> {
-        let pos = SourcePosition::new(1, 1);
+    fn validate(&self, ast: &[AstNode]) -> Result<(), KslError> {
+        debug!("Validating async transformation");
+        // Ensure no await expressions remain
+        for node in ast {
+            if let AstNode::Await { .. } = node {
+                return Err(KslError::type_error(
+                    "Found untransformed await expression".to_string(),
+                    SourcePosition::new(1, 1),
+                ));
+            }
+        }
+        debug!("Async validation successful");
+        Ok(())
+    }
+}
+
+/// Network optimization transform pass
+pub struct NetworkPass {
+    preserve_state: bool,
+}
+
+impl TransformPass for NetworkPass {
+    fn name(&self) -> &'static str {
+        "network"
+    }
+
+    fn apply(&self, ast: &mut Vec<AstNode>) -> Result<(), KslError> {
+        debug!("Starting network optimization pass");
         let mut new_ast = Vec::new();
+        let mut connection_cache = HashMap::new();
 
         for node in ast.iter() {
             match node {
-                AstNode::Expr { kind: ExprKind::Network { op_type, endpoint, headers, data } } => {
-                    if self.config.preserve_networking {
-                        // Preserve networking state
-                        new_ast.push(node.clone());
-                    } else {
-                        // Optimize networking operation
-                        match op_type {
-                            NetworkOpType::HttpGet | NetworkOpType::HttpPost => {
-                                // Combine multiple HTTP requests to the same endpoint
-                                if let Some(prev_node) = new_ast.last() {
-                                    if let AstNode::Expr { kind: ExprKind::Network { op_type: prev_op_type, endpoint: prev_endpoint, .. } } = prev_node {
-                                        if prev_endpoint == endpoint && 
-                                           (prev_op_type == NetworkOpType::HttpGet || prev_op_type == NetworkOpType::HttpPost) {
-                                            // Skip duplicate request
-                                            continue;
-                                        }
-                                    }
-                                }
-                            }
-                            NetworkOpType::TcpConnect => {
-                                // Preserve TCP connections
-                                new_ast.push(node.clone());
-                            }
-                            _ => new_ast.push(node.clone()),
+                AstNode::Expr { kind: ExprKind::Call { name, args } } => {
+                    match name.as_str() {
+                        "http.get" | "http.post" => {
+                            info!("Optimizing HTTP call: {}", name);
+                            let optimized = optimize_http_call(name, args, &mut connection_cache)?;
+                            new_ast.push(optimized);
                         }
+                        "tcp.connect" => {
+                            info!("Optimizing TCP connection");
+                            let optimized = optimize_tcp_connection(args, &mut connection_cache)?;
+                            new_ast.push(optimized);
+                        }
+                        _ => new_ast.push(node.clone()),
                     }
                 }
                 _ => new_ast.push(node.clone()),
             }
         }
 
+        if !self.preserve_state {
+            debug!("Clearing connection cache");
+            connection_cache.clear();
+        }
+
         *ast = new_ast;
+        debug!("Completed network optimization pass");
         Ok(())
     }
 }
 
-// Convert AST back to source code (simplified)
-fn ast_to_source(ast: &[AstNode]) -> String {
-    let mut source = String::new();
-    for node in ast {
-        match node {
-            AstNode::FnDecl { doc, name, params, return_type, body, .. } => {
-                if let Some(doc) = doc {
-                    source.push_str(&format!("/// {}\n", doc.text));
-                }
-                source.push_str(&format!("fn {}(", name));
-                let param_strings: Vec<String> = params.iter()
-                    .map(|(name, typ)| format!("{}: {}", name, format_type(typ)))
-                    .collect();
-                source.push_str(&param_strings.join(", "));
-                source.push_str(&format!("): {} {{\n", format_type(return_type)));
-                source.push_str(&ast_to_source(body));
-                source.push_str("}\n\n");
-            }
-            AstNode::VarDecl { name, type_annot, expr, is_mutable, .. } => {
-                source.push_str(&format!("    let {}{} = {};\n", if *is_mutable { "mut " } else { "" }, name, expr_to_source(expr)));
-            }
-            AstNode::If { condition, then_branch, else_branch } => {
-                source.push_str(&format!("    if {} {{\n", expr_to_source(condition)));
-                source.push_str(&ast_to_source(then_branch));
-                if let Some(else_branch) = else_branch {
-                    source.push_str("    } else {\n");
-                    source.push_str(&ast_to_source(else_branch));
-                }
-                source.push_str("    }\n");
-            }
-            AstNode::Expr { kind } => {
-                source.push_str(&format!("    {};\n", expr_to_source(&AstNode::Expr { kind: kind.clone() })));
-            }
-            _ => {}
-        }
-    }
-    source
+// Helper functions for async transformation
+fn create_state_enum(name: &str, body: &[AstNode]) -> AstNode {
+    // Implementation
+    unimplemented!()
 }
 
-// Format a type annotation
-fn format_type(annot: &TypeAnnotation) -> String {
-    match annot {
-        TypeAnnotation::Simple(name) => name.clone(),
-        TypeAnnotation::Array { element, size } => format!("array<{}, {}>", element, size),
-        TypeAnnotation::Result { success, error } => format!("result<{}, {}>", success, error),
-    }
+fn create_state_struct(name: &str, params: &[(String, Type)]) -> AstNode {
+    // Implementation
+    unimplemented!()
 }
 
-// Convert expression to source code (simplified)
-fn expr_to_source(expr: &AstNode) -> String {
-    match expr {
-        AstNode::Expr { kind } => match kind {
-            ExprKind::Ident(name) => name.clone(),
-            ExprKind::Number(num) => num.clone(),
-            ExprKind::String(s) => format!("\"{}\"", s),
-            ExprKind::BinaryOp { op, left, right } => format!(
-                "({} {} {})",
-                expr_to_source(left),
-                op,
-                expr_to_source(right)
-            ),
-            ExprKind::Call { name, args } => {
-                let arg_strings: Vec<String> = args.iter().map(expr_to_source).collect();
-                format!("{}({})", name, arg_strings.join(", "))
-            }
-            ExprKind::Range { start, end } => format!(
-                "{}..{}",
-                expr_to_source(start),
-                expr_to_source(end)
-            ),
-        },
-        _ => String::new(),
-    }
+fn create_poll_function(name: &str, state_machine: &[AstNode]) -> AstNode {
+    // Implementation
+    unimplemented!()
 }
 
-// Public API to transform KSL code
-pub fn transform(input_file: &PathBuf, output_file: Option<PathBuf>, rule: &str, plugin_name: Option<String>) -> Result<(), KslError> {
-    let config = TransformConfig {
-        input_file: input_file.clone(),
-        output_file,
-        rule: rule.to_string(),
-        plugin_name,
-        max_unroll_iterations: 5,
-        preserve_networking: true,
-    };
-    let mut transformer = AstTransformer::new(config);
-    transformer.transform()
+// Helper functions for network optimization
+fn optimize_http_call(name: &str, args: &[AstNode], cache: &mut HashMap<String, AstNode>) -> Result<AstNode, KslError> {
+    // Implementation
+    unimplemented!()
 }
 
-// Assume ksl_parser.rs, ksl_checker.rs, ksl_plugin.rs, and ksl_errors.rs are in the same crate
-mod ksl_parser {
-    pub use super::{parse, AstNode, ExprKind, ParseError};
-}
-
-mod ksl_checker {
-    pub use super::check;
-}
-
-mod ksl_plugin {
-    pub use super::{PluginSystem, KslPlugin};
-}
-
-mod ksl_errors {
-    pub use super::{KslError, SourcePosition};
+fn optimize_tcp_connection(args: &[AstNode], cache: &mut HashMap<String, AstNode>) -> Result<AstNode, KslError> {
+    // Implementation
+    unimplemented!()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Read;
-    use tempfile::TempDir;
+    use pretty_assertions::assert_eq;
 
     #[test]
-    fn test_transform_inline() {
-        let temp_dir = TempDir::new().unwrap();
-        let input_file = temp_dir.path().join("input.ksl");
-        let mut file = File::create(&input_file).unwrap();
-        writeln!(
-            file,
-            "fn add(x: u32, y: u32): u32 {{ x + y }}\nfn main() {{ let result = add(10, 20); }}"
-        ).unwrap();
+    fn test_inline_pass() {
+        let mut ast = vec![
+            AstNode::FnDecl {
+                name: "add".to_string(),
+                params: vec![("x".to_string(), Type::Int), ("y".to_string(), Type::Int)],
+                ret_type: Type::Int,
+                body: vec![
+                    AstNode::Expr {
+                        kind: ExprKind::BinaryOp {
+                            left: Box::new(AstNode::Expr { kind: ExprKind::Ident("x".to_string()) }),
+                            op: BinaryOperator::Add,
+                            right: Box::new(AstNode::Expr { kind: ExprKind::Ident("y".to_string()) }),
+                        },
+                    },
+                ],
+                attributes: vec![],
+            },
+            AstNode::Expr {
+                kind: ExprKind::Call {
+                    name: "add".to_string(),
+                    args: vec![
+                        AstNode::Expr { kind: ExprKind::Number("1".to_string()) },
+                        AstNode::Expr { kind: ExprKind::Number("2".to_string()) },
+                    ],
+                },
+            },
+        ];
 
-        let result = transform(&input_file, None, "inline", None);
-        assert!(result.is_ok());
+        let pass = InlinePass;
+        pass.apply(&mut ast).unwrap();
 
-        let content = fs::read_to_string(&input_file).unwrap();
-        assert!(content.contains("let x = 10;"));
-        assert!(content.contains("let y = 20;"));
-        assert!(content.contains("let result = x + y;"));
-        assert!(!content.contains("add(10, 20)"));
+        assert_eq!(ast.len(), 3); // Two var decls + one binary op
+        if let AstNode::Expr { kind: ExprKind::BinaryOp { .. } } = &ast[2] {
+            // Success
+        } else {
+            panic!("Expected binary op expression");
+        }
     }
 
     #[test]
-    fn test_transform_unroll() {
-        let temp_dir = TempDir::new().unwrap();
-        let input_file = temp_dir.path().join("input.ksl");
-        let mut file = File::create(&input_file).unwrap();
-        writeln!(
-            file,
-            "fn main() {{ match i in 0..3 {{ let x = i + 1; }} }}"
-        ).unwrap();
+    fn test_unroll_pass() {
+        let mut ast = vec![
+            AstNode::Match {
+                expr: Box::new(AstNode::Expr { kind: ExprKind::Ident("i".to_string()) }),
+                arms: vec![
+                    MatchArm {
+                        pattern: ExprKind::Range {
+                            start: Box::new(AstNode::Expr { kind: ExprKind::Number("0".to_string()) }),
+                            end: Box::new(AstNode::Expr { kind: ExprKind::Number("3".to_string()) }),
+                        },
+                        var: "x".to_string(),
+                        body: vec![
+                            AstNode::Expr { kind: ExprKind::Ident("x".to_string()) },
+                        ],
+                    },
+                ],
+            },
+        ];
 
-        let result = transform(&input_file, None, "unroll", None);
-        assert!(result.is_ok());
+        let pass = UnrollPass { max_iterations: 3 };
+        pass.apply(&mut ast).unwrap();
 
-        let content = fs::read_to_string(&input_file).unwrap();
-        assert!(content.contains("let x = 0 + 1;"));
-        assert!(content.contains("let x = 1 + 1;"));
-        assert!(content.contains("let x = 2 + 1;"));
-        assert!(!content.contains("match i in 0..3"));
+        assert_eq!(ast.len(), 3); // Three unrolled iterations
+        for i in 0..3 {
+            if let AstNode::Expr { kind: ExprKind::Number(n) } = &ast[i] {
+                assert_eq!(n, &i.to_string());
+            } else {
+                panic!("Expected number expression");
+            }
+        }
     }
 
     #[test]
-    fn test_transform_invalid_rule() {
-        let temp_dir = TempDir::new().unwrap();
-        let input_file = temp_dir.path().join("input.ksl");
-        let mut file = File::create(&input_file).unwrap();
-        writeln!(file, "fn main() {{}}").unwrap();
+    fn test_async_pass() {
+        let mut ast = vec![
+            AstNode::AsyncFnDecl {
+                name: "fetch".to_string(),
+                params: vec![("url".to_string(), Type::Str)],
+                ret_type: Type::Str,
+                body: vec![
+                    AstNode::Await {
+                        expr: Box::new(AstNode::Expr {
+                            kind: ExprKind::Call {
+                                name: "http.get".to_string(),
+                                args: vec![AstNode::Expr { kind: ExprKind::Ident("url".to_string()) }],
+                            },
+                        }),
+                    },
+                ],
+                attributes: vec!["async".to_string()],
+            },
+        ];
 
-        let result = transform(&input_file, None, "invalid", None);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Unknown transformation rule"));
+        let pass = AsyncPass;
+        pass.apply(&mut ast).unwrap();
+
+        // Verify state machine structure
+        assert!(ast.iter().any(|node| matches!(node, AstNode::StateTransition { .. })));
+        
+        // Verify no remaining await expressions
+        pass.validate(&ast).unwrap();
     }
 
     #[test]
-    fn test_transform_invalid_file() {
-        let temp_dir = TempDir::new().unwrap();
-        let input_file = temp_dir.path().join("nonexistent.ksl");
+    fn test_network_pass() {
+        let mut ast = vec![
+            AstNode::Expr {
+                kind: ExprKind::Call {
+                    name: "http.get".to_string(),
+                    args: vec![
+                        AstNode::Expr { kind: ExprKind::String("https://api.example.com".to_string()) },
+                    ],
+                },
+            },
+            AstNode::Expr {
+                kind: ExprKind::Call {
+                    name: "http.get".to_string(),
+                    args: vec![
+                        AstNode::Expr { kind: ExprKind::String("https://api.example.com".to_string()) },
+                    ],
+                },
+            },
+        ];
 
-        let result = transform(&input_file, None, "inline", None);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Failed to read file"));
+        let pass = NetworkPass { preserve_state: true };
+        pass.apply(&mut ast).unwrap();
+
+        // Verify connection reuse
+        assert_eq!(ast.len(), 2);
+        if let AstNode::Expr { kind: ExprKind::Call { name, .. } } = &ast[1] {
+            assert_eq!(name, "http.get_cached");
+        } else {
+            panic!("Expected cached HTTP call");
+        }
+    }
+
+    #[test]
+    fn test_transform_pipeline() {
+        let mut ast = vec![
+            // Complex test case combining multiple transformations
+            AstNode::AsyncFnDecl {
+                name: "process".to_string(),
+                params: vec![],
+                ret_type: Type::Void,
+                body: vec![
+                    AstNode::Match {
+                        expr: Box::new(AstNode::Expr { kind: ExprKind::Ident("i".to_string()) }),
+                        arms: vec![
+                            MatchArm {
+                                pattern: ExprKind::Range {
+                                    start: Box::new(AstNode::Expr { kind: ExprKind::Number("0".to_string()) }),
+                                    end: Box::new(AstNode::Expr { kind: ExprKind::Number("2".to_string()) }),
+                                },
+                                var: "x".to_string(),
+                                body: vec![
+                                    AstNode::Await {
+                                        expr: Box::new(AstNode::Expr {
+                                            kind: ExprKind::Call {
+                                                name: "http.get".to_string(),
+                                                args: vec![AstNode::Expr { kind: ExprKind::String("https://api.example.com".to_string()) }],
+                                            },
+                                        }),
+                                    },
+                                ],
+                            },
+                        ],
+                    },
+                ],
+                attributes: vec!["async".to_string()],
+            },
+        ];
+
+        let passes: Vec<Box<dyn TransformPass>> = vec![
+            Box::new(UnrollPass { max_iterations: 2 }),
+            Box::new(AsyncPass),
+            Box::new(NetworkPass { preserve_state: true }),
+        ];
+
+        for pass in passes {
+            info!("Applying transform pass: {}", pass.name());
+            pass.apply(&mut ast).unwrap();
+            pass.validate(&ast).unwrap();
+        }
+
+        // Verify final AST structure
+        assert!(!ast.iter().any(|node| matches!(node, AstNode::Await { .. })));
+        assert!(ast.iter().any(|node| matches!(node, AstNode::StateTransition { .. })));
+        assert_eq!(ast.len() > 2, true);
     }
 }

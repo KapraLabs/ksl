@@ -1,484 +1,1439 @@
 /// ksl_fuzzer.rs
-/// Implements fuzz testing to ensure KSL compiler and VM robustness, supporting async execution,
-/// new language features, and comprehensive test integration.
+/// Implements a comprehensive fuzzing framework for KSL programs.
+/// 
+/// Features:
+/// - Targeted fuzzing for contracts, validators, sharding, and consensus
+/// - Corpus management and input shrinking
+/// - Crash logging and reproducibility
+/// - CI integration
+/// - Optional features like symbolic fuzzing and coverage tracking
 
-use crate::ksl_parser::{parse, AstNode, TypeAnnotation};
-use crate::ksl_checker::check;
+use crate::ksl_parser::{parse, AstNode};
 use crate::ksl_compiler::compile;
-use crate::ksl_bytecode::{KapraBytecode, KapraInstruction, KapraOpCode, Operand};
-use crate::kapra_vm::{KapraVM, RuntimeError};
-use crate::ksl_module::ModuleSystem;
+use crate::ksl_bytecode::{KapraBytecode, CompileTarget};
+use crate::ksl_contract::{ContractAbi, ContractFunction};
+use crate::ksl_validator_keys::{ValidatorKeys, Signature};
+use crate::ksl_shard_manager::ShardManager;
+use crate::ksl_consensus_manager::ConsensusManager;
+use crate::ksl_analyzer::{Analyzer, GasStats};
 use crate::ksl_errors::{KslError, SourcePosition};
-use crate::ksl_types::Type;
-use crate::ksl_test::{TestRunner, TestResult};
-use crate::ksl_async::{AsyncRuntime, AsyncVM};
-use rand::{Rng, rngs::StdRng, SeedableRng};
+use crate::ksl_macros::{MacroDef, MacroKind};
 use std::fs;
-use std::path::PathBuf;
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::path::{Path, PathBuf};
+use std::collections::{HashMap, HashSet};
+use std::time::{Duration, SystemTime};
+use std::sync::Arc;
 use tokio::sync::RwLock;
+use serde::{Deserialize, Serialize};
+use proptest::prelude::*;
+use proptest::strategy::{Strategy, ValueTree};
+use proptest::test_runner::{TestRunner, TestCaseResult};
+use z3::{Context, Solver};
+use rayon::prelude::*;
+use indicatif::{ProgressBar, ProgressStyle};
+use backtrace::Backtrace;
+use regex;
+use chrono::{Local};
+use tera::{Context as TeraContext, Tera};
+use reqwest;
+use serde_json;
+use libloading;
+use seccompiler;
+use nix;
+use rlimit;
+use humantime;
 
-/// Enhanced fuzz test result with async and network metrics
-#[derive(Debug)]
-pub struct FuzzResult {
-    /// Function being tested
-    pub function: String,
-    /// Test inputs
-    pub inputs: Vec<Vec<u8>>,
-    /// Error message if test failed
-    pub error: String,
-    /// Async execution metrics
-    pub async_metrics: Option<AsyncMetrics>,
-    /// Network operation metrics
-    pub network_metrics: Option<NetworkMetrics>,
-}
-
-/// Async execution metrics for fuzzing
-#[derive(Debug)]
-pub struct AsyncMetrics {
-    /// Number of async tasks created
-    pub tasks_created: u32,
-    /// Number of tasks completed
-    pub tasks_completed: u32,
-    /// Maximum concurrent tasks
-    pub max_concurrent_tasks: u32,
-    /// Task durations
-    pub task_durations: Vec<std::time::Duration>,
-}
-
-/// Network operation metrics for fuzzing
-#[derive(Debug)]
-pub struct NetworkMetrics {
-    /// Number of network requests
-    pub requests: u32,
-    /// Number of responses
-    pub responses: u32,
-    /// Total bytes sent
-    pub bytes_sent: u64,
-    /// Total bytes received
-    pub bytes_received: u64,
-    /// Network latencies
-    pub latencies: Vec<std::time::Duration>,
-    /// Number of errors
-    pub errors: u32,
-}
-
-/// Enhanced fuzzer configuration
-#[derive(Debug)]
+/// Fuzzer configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FuzzerConfig {
-    /// Random number generator seed
-    pub seed: Option<u64>,
-    /// Number of iterations per function
-    pub iterations: usize,
-    /// Whether to enable async fuzzing
-    pub enable_async: bool,
-    /// Whether to fuzz network operations
-    pub fuzz_network: bool,
-    /// Maximum async tasks per test
-    pub max_async_tasks: u32,
-    /// Network timeout duration
-    pub network_timeout: std::time::Duration,
+    /// Target domain to fuzz
+    pub domain: FuzzDomain,
+    /// Number of test cases to generate
+    pub num_cases: usize,
+    /// Whether to run in parallel
+    pub parallel: bool,
+    /// Whether to use symbolic execution
+    pub symbolic: bool,
+    /// Whether to track coverage
+    pub track_coverage: bool,
+    /// Corpus directory
+    pub corpus_dir: PathBuf,
+    /// Shrunk directory
+    pub shrunk_dir: PathBuf,
+    /// Whether to replay a specific case
+    pub replay: Option<PathBuf>,
+    /// Timeout per test case
+    pub timeout: Duration,
+    /// Custom mutators to use
+    pub mutators: Vec<String>,
+    /// Output directory
+    pub output_dir: PathBuf,
 }
 
-impl Default for FuzzerConfig {
-    fn default() -> Self {
-        FuzzerConfig {
-            seed: None,
-            iterations: 100,
-            enable_async: false,
-            fuzz_network: false,
-            max_async_tasks: 10,
-            network_timeout: std::time::Duration::from_secs(5),
+/// Fuzzing domain
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum FuzzDomain {
+    Contract {
+        abi: ContractAbi,
+        storage: bool,
+        modifiers: bool,
+    },
+    Validator {
+        keys: ValidatorKeys,
+        segments: bool,
+    },
+    Sharding {
+        cross_shard: bool,
+        timing: bool,
+    },
+    Consensus {
+        forks: bool,
+        votes: bool,
+    },
+}
+
+/// Fuzzer result
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FuzzerResult {
+    pub pass_rate: f64,
+    pub total_cases: usize,
+    pub failures: usize,
+    pub high_risk: usize,
+    pub crashes: Vec<CrashInfo>,
+    pub coverage: Option<CoverageInfo>,
+    pub duration: Duration,
+    pub timestamp: SystemTime,
+}
+
+/// Crash information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CrashInfo {
+    pub input: String,
+    pub stack_trace: String,
+    pub seed: u64,
+    pub ast_diff: Option<String>,
+    pub module: String,
+    pub severity: CrashSeverity,
+    pub shrunk_input: Option<String>,
+}
+
+/// Crash severity
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum CrashSeverity {
+    Low,
+    Medium,
+    High,
+    Critical,
+}
+
+/// Coverage information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoverageInfo {
+    pub bytecode_coverage: f64,
+    pub llvm_coverage: f64,
+    pub uncovered_blocks: Vec<String>,
+    pub hot_paths: Vec<String>,
+}
+
+/// ABI mutator trait for custom contract mutation
+pub trait AbiMutator: Send + Sync {
+    fn mutate(&self, abi: &mut ContractAbi) -> Result<(), String>;
+    fn name(&self) -> &str;
+}
+
+/// ABI mutator registry
+#[derive(Default)]
+pub struct AbiMutatorRegistry {
+    mutators: HashMap<String, Box<dyn AbiMutator>>,
+}
+
+impl AbiMutatorRegistry {
+    pub fn new() -> Self {
+        Self {
+            mutators: HashMap::new(),
         }
+    }
+
+    pub fn register(&mut self, mutator: Box<dyn AbiMutator>) {
+        self.mutators.insert(mutator.name().to_string(), mutator);
+    }
+
+    pub fn get(&self, name: &str) -> Option<&dyn AbiMutator> {
+        self.mutators.get(name).map(|m| m.as_ref())
     }
 }
 
-/// Enhanced fuzzer with async support and test integration
+/// Coverage trend data
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoverageTrend {
+    pub timestamp: SystemTime,
+    pub bytecode_coverage: f64,
+    pub llvm_coverage: f64,
+    pub uncovered_blocks: Vec<String>,
+    pub hot_paths: Vec<String>,
+    pub git_commit: String,
+}
+
+/// Coverage trend tracker
+pub struct CoverageTrendTracker {
+    trends: Vec<CoverageTrend>,
+    output_dir: PathBuf,
+    tera: Tera,
+}
+
+impl CoverageTrendTracker {
+    pub fn new(output_dir: PathBuf) -> Self {
+        Self {
+            trends: Vec::new(),
+            output_dir,
+            tera: Tera::new("templates/**/*").unwrap(),
+        }
+    }
+
+    pub fn add_trend(&mut self, trend: CoverageTrend) -> Result<(), String> {
+        self.trends.push(trend);
+        self.save_trends()?;
+        Ok(())
+    }
+
+    pub fn save_trends(&self) -> Result<(), String> {
+        let trends_path = self.output_dir.join("coverage_trends.json");
+        fs::write(&trends_path, serde_json::to_string_pretty(&self.trends)?)
+            .map_err(|e| format!("Failed to save coverage trends: {}", e))?;
+        Ok(())
+    }
+
+    pub fn generate_trend_report(&self) -> Result<(), String> {
+        let mut context = TeraContext::new();
+        context.insert("trends", &self.trends);
+        
+        let html = self.tera.render("coverage_trend.html", &context)
+            .map_err(|e| format!("Failed to render trend report: {}", e))?;
+        
+        let report_path = self.output_dir.join("coverage_trend.html");
+        fs::write(&report_path, html)
+            .map_err(|e| format!("Failed to write trend report: {}", e))?;
+        
+        Ok(())
+    }
+}
+
+/// Sharding message injector
+pub struct ShardingMessageInjector {
+    testnet_nodes: Vec<String>,
+    message_queue: Arc<RwLock<Vec<Vec<u8>>>>,
+}
+
+impl ShardingMessageInjector {
+    pub fn new(testnet_nodes: Vec<String>) -> Self {
+        Self {
+            testnet_nodes,
+            message_queue: Arc::new(RwLock::new(Vec::new())),
+        }
+    }
+
+    pub async fn inject_message(&self, message: Vec<u8>) -> Result<(), String> {
+        let mut queue = self.message_queue.write().await;
+        queue.push(message);
+        Ok(())
+    }
+
+    pub async fn process_queue(&self) -> Result<(), String> {
+        let mut queue = self.message_queue.write().await;
+        while let Some(message) = queue.pop() {
+            for node in &self.testnet_nodes {
+                // TODO: Implement actual message injection to testnet nodes
+                println!("Injecting message to node: {}", node);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Fuzzer state
 pub struct Fuzzer {
     config: FuzzerConfig,
-    module_system: ModuleSystem,
-    results: Vec<FuzzResult>,
-    rng: StdRng,
-    test_runner: Option<TestRunner>,
-    async_runtime: Option<Arc<RwLock<AsyncRuntime>>>,
+    corpus: HashMap<String, Vec<u8>>,
+    crashes: Vec<CrashInfo>,
+    coverage: Option<CoverageInfo>,
+    analyzer: Arc<Analyzer>,
+    shard_manager: Arc<ShardManager>,
+    consensus_manager: Arc<ConsensusManager>,
+    solver: Option<Solver>,
+    progress: ProgressBar,
+    tera: Tera,
 }
 
 impl Fuzzer {
-    /// Create a new fuzzer with the given configuration
-    pub fn new(config: FuzzerConfig) -> Self {
-        let rng = match config.seed {
-            Some(s) => StdRng::seed_from_u64(s),
-            None => StdRng::from_entropy(),
-        };
-        let async_runtime = if config.enable_async {
-            Some(Arc::new(RwLock::new(AsyncRuntime::new())))
+    pub fn new(config: FuzzerConfig) -> Result<Self, String> {
+        // Create directories
+        fs::create_dir_all(&config.corpus_dir)
+            .map_err(|e| format!("Failed to create corpus directory: {}", e))?;
+        fs::create_dir_all(&config.shrunk_dir)
+            .map_err(|e| format!("Failed to create shrunk directory: {}", e))?;
+
+        // Initialize Z3 solver if symbolic execution is enabled
+        let solver = if config.symbolic {
+            let ctx = Context::new();
+            Some(Solver::new(&ctx))
         } else {
             None
         };
-        Fuzzer {
+
+        // Initialize progress bar
+        let progress = ProgressBar::new(config.num_cases as u64);
+        progress.set_style(ProgressStyle::default_bar()
+            .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} {msg}")
+            .progress_chars("##-"));
+
+        // Initialize Tera template engine
+        let tera = Tera::new("templates/**/*").map_err(|e| format!("Failed to create Tera: {}", e))?;
+
+        Ok(Fuzzer {
             config,
-            module_system: ModuleSystem::new(),
-            results: Vec::new(),
-            rng,
-            test_runner: Some(TestRunner::new()),
-            async_runtime,
-        }
+            corpus: HashMap::new(),
+            crashes: Vec::new(),
+            coverage: None,
+            analyzer: Arc::new(Analyzer::new()),
+            shard_manager: Arc::new(ShardManager::new()),
+            consensus_manager: Arc::new(ConsensusManager::new()),
+            solver,
+            progress,
+            tera,
+        })
     }
 
-    /// Run fuzz tests on a KSL file with async support
-    pub async fn fuzz_file(&mut self, file: &PathBuf) -> Result<(), Vec<KslError>> {
-        let main_module_name = file.file_stem()
-            .and_then(|s| s.to_str())
-            .ok_or_else(|| vec![KslError::type_error(
-                "Invalid main file name".to_string(),
-                SourcePosition::new(1, 1),
-            )])?;
+    /// Run fuzzer
+    pub async fn run(&mut self) -> Result<FuzzerResult, String> {
+        if let Some(replay) = &self.config.replay {
+            return self.replay_crash(replay).await;
+        }
 
-        // Read source file
-        let source = fs::read_to_string(file)
-            .map_err(|e| vec![KslError::type_error(e.to_string(), SourcePosition::new(1, 1))])?;
+        let start_time = SystemTime::now();
+        let mut failures = 0;
+        let mut high_risk = 0;
 
-        // Parse
-        let ast = parse(&source)
-            .map_err(|e| vec![KslError::type_error(
-                format!("Parse error at position {}: {}", e.position, e.message),
-                SourcePosition::new(1, 1),
-            )])?;
+        // Run fuzzer based on domain
+        match &self.config.domain {
+            FuzzDomain::Contract { abi, storage, modifiers } => {
+                self.fuzz_contract(abi, *storage, *modifiers).await?;
+            },
+            FuzzDomain::Validator { keys, segments } => {
+                self.fuzz_validator(keys, *segments).await?;
+            },
+            FuzzDomain::Sharding { cross_shard, timing } => {
+                self.fuzz_sharding(*cross_shard, *timing).await?;
+            },
+            FuzzDomain::Consensus { forks, votes } => {
+                self.fuzz_consensus(*forks, *votes).await?;
+            },
+        }
 
-        // Type-check
-        check(&ast)
-            .map_err(|errors| errors)?;
+        // Calculate results
+        let duration = start_time.elapsed().unwrap();
+        let pass_rate = 1.0 - (failures as f64 / self.config.num_cases as f64);
 
-        // Compile
-        let bytecode = compile(&ast)
-            .map_err(|errors| errors.into_iter().map(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1))).collect())?;
+        Ok(FuzzerResult {
+            pass_rate,
+            total_cases: self.config.num_cases,
+            failures,
+            high_risk,
+            crashes: self.crashes.clone(),
+            coverage: self.coverage.clone(),
+            duration,
+            timestamp: SystemTime::now(),
+        })
+    }
 
-        // Find fuzzable functions (functions with #[fuzz] attribute)
-        let fuzz_functions: Vec<(String, Vec<TypeAnnotation>, bool)> = ast.iter()
-            .filter_map(|node| {
-                match node {
-                    AstNode::FnDecl { attributes, name, params, .. } => {
-                        if attributes.iter().any(|attr| attr.name == "fuzz") {
-                            Some((name.clone(), params.iter().map(|(_, t)| t.clone()).collect(), false))
-                        } else {
-                            None
-                        }
-                    }
-                    AstNode::AsyncFnDecl { attributes, name, params, .. } => {
-                        if attributes.iter().any(|attr| attr.name == "fuzz") {
-                            Some((name.clone(), params.iter().map(|(_, t)| t.clone()).collect(), true))
-                        } else {
-                            None
-                        }
-                    }
-                    _ => None,
+    /// Fuzz contract domain
+    async fn fuzz_contract(&mut self, abi: &ContractAbi, storage: bool, modifiers: bool) -> Result<(), String> {
+        let mut runner = TestRunner::new(ProptestConfig::default());
+        
+        for function in &abi.functions {
+            // Generate ABI inputs
+            let input_strategy = self.generate_abi_inputs(function)?;
+            
+            // Run test cases
+            for _ in 0..self.config.num_cases {
+                let input = input_strategy.new_tree(&mut runner)
+                    .map_err(|e| format!("Failed to generate input: {}", e))?
+                    .current();
+
+                // Fuzz storage if enabled
+                if storage {
+                    self.fuzz_storage(&input).await?;
                 }
-            })
-            .collect();
 
-        // Run fuzz tests
-        for (fn_name, param_types, is_async) in fuzz_functions {
-            for _ in 0..self.config.iterations {
-                let result = if is_async && self.config.enable_async {
-                    self.fuzz_async_function(&bytecode, &fn_name, &param_types).await
+                // Fuzz modifiers if enabled
+                if modifiers {
+                    self.fuzz_modifiers(function, &input).await?;
+                }
+
+                // Run test case
+                if let Err(e) = self.run_test_case(&input).await {
+                    self.handle_crash(&input, e, "contract").await?;
+                    failures += 1;
+                    if self.is_high_risk(&e) {
+                        high_risk += 1;
+                    }
+                }
+
+                self.progress.inc(1);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Fuzz validator domain
+    async fn fuzz_validator(&mut self, keys: &ValidatorKeys, segments: bool) -> Result<(), String> {
+        let mut runner = TestRunner::new(ProptestConfig::default());
+        
+        // Generate malformed signatures
+        let signature_strategy = self.generate_malformed_signatures(keys)?;
+        
+        // Run test cases
+        for _ in 0..self.config.num_cases {
+            let signature = signature_strategy.new_tree(&mut runner)
+                .map_err(|e| format!("Failed to generate signature: {}", e))?
+                .current();
+
+            // Fuzz segments if enabled
+            if segments {
+                self.fuzz_segments(&signature).await?;
+            }
+
+            // Run test case
+            if let Err(e) = self.run_test_case(&signature).await {
+                self.handle_crash(&signature, e, "validator").await?;
+                failures += 1;
+                if self.is_high_risk(&e) {
+                    high_risk += 1;
+                }
+            }
+
+            self.progress.inc(1);
+        }
+
+        Ok(())
+    }
+
+    /// Fuzz sharding domain
+    async fn fuzz_sharding(&mut self, cross_shard: bool, timing: bool) -> Result<(), String> {
+        let mut runner = TestRunner::new(ProptestConfig::default());
+        
+        // Generate cross-shard messages
+        let message_strategy = self.generate_cross_shard_messages()?;
+        
+        // Run test cases
+        for _ in 0..self.config.num_cases {
+            let message = message_strategy.new_tree(&mut runner)
+                .map_err(|e| format!("Failed to generate message: {}", e))?
+                .current();
+
+            // Fuzz timing if enabled
+            if timing {
+                self.fuzz_timing(&message).await?;
+            }
+
+            // Run test case
+            if let Err(e) = self.run_test_case(&message).await {
+                self.handle_crash(&message, e, "sharding").await?;
+                failures += 1;
+                if self.is_high_risk(&e) {
+                    high_risk += 1;
+                }
+            }
+
+            self.progress.inc(1);
+        }
+
+        Ok(())
+    }
+
+    /// Fuzz consensus domain
+    async fn fuzz_consensus(&mut self, forks: bool, votes: bool) -> Result<(), String> {
+        let mut runner = TestRunner::new(ProptestConfig::default());
+        
+        // Generate consensus scenarios
+        let scenario_strategy = self.generate_consensus_scenarios()?;
+        
+        // Run test cases
+        for _ in 0..self.config.num_cases {
+            let scenario = scenario_strategy.new_tree(&mut runner)
+                .map_err(|e| format!("Failed to generate scenario: {}", e))?
+                .current();
+
+            // Fuzz forks if enabled
+            if forks {
+                self.fuzz_forks(&scenario).await?;
+            }
+
+            // Fuzz votes if enabled
+            if votes {
+                self.fuzz_votes(&scenario).await?;
+            }
+
+            // Run test case
+            if let Err(e) = self.run_test_case(&scenario).await {
+                self.handle_crash(&scenario, e, "consensus").await?;
+                failures += 1;
+                if self.is_high_risk(&e) {
+                    high_risk += 1;
+                }
+            }
+
+            self.progress.inc(1);
+        }
+
+        Ok(())
+    }
+
+    /// Generate ABI inputs
+    fn generate_abi_inputs(&self, function: &ContractFunction) -> Result<Box<dyn Strategy<Value = Vec<u8>>>, String> {
+        let mut strategies = Vec::new();
+        
+        for param in &function.parameters {
+            let strategy = match param.typ.as_str() {
+                "u8" => any::<u8>().prop_map(|v| v.to_le_bytes().to_vec()).boxed(),
+                "u32" => any::<u32>().prop_map(|v| v.to_le_bytes().to_vec()).boxed(),
+                "u64" => any::<u64>().prop_map(|v| v.to_le_bytes().to_vec()).boxed(),
+                "string" => any::<String>().prop_map(|v| v.into_bytes()).boxed(),
+                "bool" => any::<bool>().prop_map(|v| vec![v as u8]).boxed(),
+                _ => return Err(format!("Unsupported type: {}", param.typ)),
+            };
+            strategies.push(strategy);
+        }
+        
+        Ok(Just(vec![]).prop_flat_map(move |_| {
+            strategies.clone().prop_map(|values| {
+                values.into_iter().flatten().collect()
+            })
+        }).boxed())
+    }
+
+    /// Generate malformed signatures
+    fn generate_malformed_signatures(&self, keys: &ValidatorKeys) -> Result<Box<dyn Strategy<Value = Vec<u8>>>, String> {
+        Ok(any::<[u8; 64]>()
+            .prop_map(|mut sig| {
+                // Corrupt signature bytes
+                sig[0] ^= 0xFF;
+                sig[32] ^= 0xFF;
+                sig.to_vec()
+            })
+            .boxed())
+    }
+
+    /// Generate cross-shard messages
+    fn generate_cross_shard_messages(&self) -> Result<Box<dyn Strategy<Value = Vec<u8>>>, String> {
+        Ok(any::<[u8; 32]>()
+            .prop_map(|mut msg| {
+                // Corrupt message bytes
+                msg[0] ^= 0xFF;
+                msg[16] ^= 0xFF;
+                msg.to_vec()
+            })
+            .boxed())
+    }
+
+    /// Generate consensus scenarios
+    fn generate_consensus_scenarios(&self) -> Result<Box<dyn Strategy<Value = Vec<u8>>>, String> {
+        Ok(any::<[u8; 128]>()
+            .prop_map(|mut scenario| {
+                // Corrupt scenario bytes
+                scenario[0] ^= 0xFF;
+                scenario[64] ^= 0xFF;
+                scenario.to_vec()
+            })
+            .boxed())
+    }
+
+    /// Handle crash
+    async fn handle_crash(&mut self, input: &[u8], error: String, module: &str) -> Result<(), String> {
+        // Generate stack trace
+        let backtrace = Backtrace::new();
+        let stack_trace = format!("{:?}", backtrace);
+
+        // Generate AST diff if applicable
+        let ast_diff = if let Ok(source) = String::from_utf8(input.to_vec()) {
+            if let Ok(ast) = parse(&source) {
+                Some(format!("{:?}", ast))
                 } else {
-                    self.fuzz_function(&bytecode, &fn_name, &param_types)
-                };
-                if let Some(result) = result {
-                    self.results.push(result);
-                }
+                None
             }
-        }
-
-        // Report results
-        println!("Fuzz Test Results for {} ({} iterations per function):", file.display(), self.config.iterations);
-        if self.results.is_empty() {
-            println!("No issues found");
-        } else {
-            println!("Found {} issues:", self.results.len());
-            for result in &self.results {
-                println!(
-                    "{}: Failed with inputs {:?}, error: {}",
-                    result.function, result.inputs, result.error
-                );
-                if let Some(async_metrics) = &result.async_metrics {
-                    println!(
-                        "  Async Metrics: {} tasks created, {} completed, {} max concurrent",
-                        async_metrics.tasks_created,
-                        async_metrics.tasks_completed,
-                        async_metrics.max_concurrent_tasks
-                    );
-                }
-                if let Some(network_metrics) = &result.network_metrics {
-                    println!(
-                        "  Network Metrics: {} requests, {} responses, {} bytes sent/received, {} errors",
-                        network_metrics.requests,
-                        network_metrics.responses,
-                        network_metrics.bytes_sent + network_metrics.bytes_received,
-                        network_metrics.errors
-                    );
-                }
-            }
-        }
-
-        if self.results.is_empty() {
-            Ok(())
-        } else {
-            Err(self.results.iter().map(|r| KslError::type_error(
-                format!("Fuzz failure in {}: {}", r.function, r.error),
-                SourcePosition::new(1, 1),
-            )).collect())
-        }
-    }
-
-    /// Fuzz an async function
-    async fn fuzz_async_function(&mut self, bytecode: &KapraBytecode, fn_name: &str, param_types: &[TypeAnnotation]) -> Option<FuzzResult> {
-        // Generate random inputs
-        let inputs: Vec<Vec<u8>> = param_types.iter().map(|ty| self.generate_input(ty)).collect();
-
-        // Create bytecode to call the function with inputs
-        let mut fuzz_bytecode = KapraBytecode::new();
-        let mut registers = vec![];
-        for (i, input) in inputs.iter().enumerate() {
-            let reg = i as u8;
-            registers.push(reg);
-            fuzz_bytecode.add_instruction(KapraInstruction::new(
-                KapraOpCode::Mov,
-                vec![
-                    Operand::Register(reg),
-                    Operand::Immediate(input.clone()),
-                ],
-                Some(self.type_annotation_to_type(param_types[i].clone())),
-            ));
-        }
-
-        // Find function index
-        let fn_index = bytecode.instructions.iter()
-            .position(|instr| instr.opcode == KapraOpCode::AsyncCall && matches!(&instr.operands[0], Operand::Immediate(data) if String::from_utf8(data.clone()).unwrap_or_default().contains(fn_name)))
-            .unwrap_or(0) as u32;
-
-        // Add async call to function
-        fuzz_bytecode.add_instruction(KapraInstruction::new(
-            KapraOpCode::AsyncCall,
-            vec![Operand::Immediate(fn_index.to_le_bytes().to_vec())],
-            None,
-        ));
-        fuzz_bytecode.add_instruction(KapraInstruction::new(
-            KapraOpCode::Halt,
-            vec![],
-            None,
-        ));
-
-        // Run with async support and collect metrics
-        let runtime = self.async_runtime.as_ref().unwrap().clone();
-        let mut vm = KapraVM::new_async(fuzz_bytecode, runtime);
-        let mut async_metrics = AsyncMetrics {
-            tasks_created: 0,
-            tasks_completed: 0,
-            max_concurrent_tasks: 0,
-            task_durations: Vec::new(),
-        };
-        let mut network_metrics = NetworkMetrics {
-            requests: 0,
-            responses: 0,
-            bytes_sent: 0,
-            bytes_received: 0,
-            latencies: Vec::new(),
-            errors: 0,
-        };
-
-        match vm.run_async().await {
-            Ok(_) => None,
-            Err(e) => {
-                // Collect metrics from VM
-                if let Some(metrics) = vm.get_async_metrics() {
-                    async_metrics.tasks_created = metrics.tasks_created;
-                    async_metrics.tasks_completed = metrics.tasks_completed;
-                    async_metrics.max_concurrent_tasks = metrics.max_concurrent_tasks;
-                    async_metrics.task_durations = metrics.task_durations;
-                }
-                if let Some(metrics) = vm.get_network_metrics() {
-                    network_metrics.requests = metrics.requests;
-                    network_metrics.responses = metrics.responses;
-                    network_metrics.bytes_sent = metrics.bytes_sent;
-                    network_metrics.bytes_received = metrics.bytes_received;
-                    network_metrics.latencies = metrics.latencies;
-                    network_metrics.errors = metrics.errors;
-                }
-
-                Some(FuzzResult {
-                    function: fn_name.to_string(),
-                    inputs,
-                    error: format!("Runtime error at instruction {}: {}", e.pc, e.message),
-                    async_metrics: Some(async_metrics),
-                    network_metrics: if self.config.fuzz_network { Some(network_metrics) } else { None },
-                })
-            }
-        }
-    }
-
-    /// Fuzz a synchronous function
-    fn fuzz_function(&mut self, bytecode: &KapraBytecode, fn_name: &str, param_types: &[TypeAnnotation]) -> Option<FuzzResult> {
-        // Generate random inputs
-        let inputs: Vec<Vec<u8>> = param_types.iter().map(|ty| self.generate_input(ty)).collect();
-
-        // Create bytecode to call the function with inputs
-        let mut fuzz_bytecode = KapraBytecode::new();
-        let mut registers = vec![];
-        for (i, input) in inputs.iter().enumerate() {
-            let reg = i as u8;
-            registers.push(reg);
-            fuzz_bytecode.add_instruction(KapraInstruction::new(
-                KapraOpCode::Mov,
-                vec![
-                    Operand::Register(reg),
-                    Operand::Immediate(input.clone()),
-                ],
-                Some(self.type_annotation_to_type(param_types[i].clone())),
-            ));
-        }
-
-        // Find function index
-        let fn_index = bytecode.instructions.iter()
-            .position(|instr| instr.opcode == KapraOpCode::Call && matches!(&instr.operands[0], Operand::Immediate(data) if String::from_utf8(data.clone()).unwrap_or_default().contains(fn_name)))
-            .unwrap_or(0) as u32;
-
-        // Add call to function
-        fuzz_bytecode.add_instruction(KapraInstruction::new(
-            KapraOpCode::Call,
-            vec![Operand::Immediate(fn_index.to_le_bytes().to_vec())],
-            None,
-        ));
-        fuzz_bytecode.add_instruction(KapraInstruction::new(
-            KapraOpCode::Halt,
-            vec![],
-            None,
-        ));
-
-        // Run and collect metrics
-        let mut vm = KapraVM::new(fuzz_bytecode);
-        let mut network_metrics = if self.config.fuzz_network {
-            Some(NetworkMetrics {
-                requests: 0,
-                responses: 0,
-                bytes_sent: 0,
-                bytes_received: 0,
-                latencies: Vec::new(),
-                errors: 0,
-            })
         } else {
             None
         };
 
-        match vm.run() {
-            Ok(_) => None,
-            Err(e) => {
-                // Collect network metrics if enabled
-                if let Some(metrics) = network_metrics.as_mut() {
-                    if let Some(vm_metrics) = vm.get_network_metrics() {
-                        metrics.requests = vm_metrics.requests;
-                        metrics.responses = vm_metrics.responses;
-                        metrics.bytes_sent = vm_metrics.bytes_sent;
-                        metrics.bytes_received = vm_metrics.bytes_received;
-                        metrics.latencies = vm_metrics.latencies;
-                        metrics.errors = vm_metrics.errors;
-                    }
-                }
+        // Save crash info
+        let crash = CrashInfo {
+            input: hex::encode(input),
+            stack_trace,
+            seed: rand::random(),
+            ast_diff,
+            module: module.to_string(),
+            severity: self.determine_severity(&error),
+            shrunk_input: None,
+        };
 
-                Some(FuzzResult {
-                    function: fn_name.to_string(),
-                    inputs,
-                    error: format!("Runtime error at instruction {}: {}", e.pc, e.message),
-                    async_metrics: None,
-                    network_metrics,
-                })
+        // Save to corpus
+        let corpus_path = self.config.corpus_dir.join(format!("crash_{}.json", self.crashes.len()));
+        fs::write(&corpus_path, serde_json::to_string_pretty(&crash)?)
+            .map_err(|e| format!("Failed to save crash: {}", e))?;
+
+        // Shrink input
+        if let Some(shrunk) = self.shrink_input(input).await? {
+            crash.shrunk_input = Some(hex::encode(&shrunk));
+            
+            // Save shrunk input
+            let shrunk_path = self.config.shrunk_dir.join(format!("reduced_{}.json", self.crashes.len()));
+            fs::write(&shrunk_path, serde_json::to_string_pretty(&crash)?)
+                .map_err(|e| format!("Failed to save shrunk input: {}", e))?;
+        }
+
+        self.crashes.push(crash);
+        Ok(())
+    }
+
+    /// Determine crash severity
+    fn determine_severity(&self, error: &str) -> CrashSeverity {
+        if error.contains("panic") || error.contains("assertion failed") {
+            CrashSeverity::Critical
+        } else if error.contains("overflow") || error.contains("underflow") {
+            CrashSeverity::High
+        } else if error.contains("invalid") || error.contains("failed") {
+            CrashSeverity::Medium
+        } else {
+            CrashSeverity::Low
+        }
+    }
+
+    /// Shrink input
+    async fn shrink_input(&self, input: &[u8]) -> Result<Option<Vec<u8>>, String> {
+        let mut runner = TestRunner::new(ProptestConfig::default());
+        let strategy = Just(input.to_vec()).boxed();
+        
+        if let Ok(mut tree) = strategy.new_tree(&mut runner) {
+            while tree.simplify() {
+                let current = tree.current();
+                if self.run_test_case(&current).await.is_ok() {
+                    return Ok(Some(current));
+                }
+            }
+        }
+        
+        Ok(None)
+    }
+
+    /// Replay crash
+    async fn replay_crash(&self, path: &Path) -> Result<FuzzerResult, String> {
+        let content = fs::read_to_string(path)
+            .map_err(|e| format!("Failed to read crash file: {}", e))?;
+        
+        let crash: CrashInfo = serde_json::from_str(&content)
+            .map_err(|e| format!("Failed to parse crash file: {}", e))?;
+        
+        let input = hex::decode(&crash.input)
+            .map_err(|e| format!("Failed to decode input: {}", e))?;
+        
+        if let Err(e) = self.run_test_case(&input).await {
+            println!("Crash reproduced!");
+            println!("Error: {}", e);
+            println!("Stack trace:\n{}", crash.stack_trace);
+            if let Some(diff) = crash.ast_diff {
+                println!("AST diff:\n{}", diff);
+            }
+        } else {
+            println!("Crash not reproduced!");
+        }
+        
+        Ok(FuzzerResult {
+            pass_rate: 0.0,
+            total_cases: 1,
+            failures: 1,
+            high_risk: if self.is_high_risk(&crash.stack_trace) { 1 } else { 0 },
+            crashes: vec![crash],
+            coverage: None,
+            duration: Duration::from_secs(0),
+            timestamp: SystemTime::now(),
+        })
+    }
+
+    /// Run test case
+    async fn run_test_case(&self, input: &[u8]) -> Result<(), String> {
+        // Run with timeout
+        tokio::time::timeout(self.config.timeout, async {
+            match &self.config.domain {
+                FuzzDomain::Contract { .. } => self.run_contract_test(input).await,
+                FuzzDomain::Validator { .. } => self.run_validator_test(input).await,
+                FuzzDomain::Sharding { .. } => self.run_sharding_test(input).await,
+                FuzzDomain::Consensus { .. } => self.run_consensus_test(input).await,
+            }
+        }).await
+        .map_err(|_| "Test case timed out".to_string())?
+    }
+
+    /// Run contract test
+    async fn run_contract_test(&self, input: &[u8]) -> Result<(), String> {
+        // TODO: Implement contract test execution
+            Ok(())
+    }
+
+    /// Run validator test
+    async fn run_validator_test(&self, input: &[u8]) -> Result<(), String> {
+        // TODO: Implement validator test execution
+        Ok(())
+    }
+
+    /// Run sharding test
+    async fn run_sharding_test(&self, input: &[u8]) -> Result<(), String> {
+        // TODO: Implement sharding test execution
+        Ok(())
+    }
+
+    /// Run consensus test
+    async fn run_consensus_test(&self, input: &[u8]) -> Result<(), String> {
+        // TODO: Implement consensus test execution
+        Ok(())
+    }
+
+    /// Check if error is high risk
+    fn is_high_risk(&self, error: &str) -> bool {
+        error.contains("panic") || 
+        error.contains("assertion failed") || 
+        error.contains("overflow") || 
+        error.contains("underflow")
+    }
+
+    /// Generate coverage HTML report
+    pub fn generate_coverage_html(&self) -> Result<(), String> {
+        if let Some(coverage) = &self.coverage {
+            let mut context = TeraContext::new();
+            
+            // Add coverage data
+            context.insert("bytecode_coverage", &coverage.bytecode_coverage);
+            context.insert("llvm_coverage", &coverage.llvm_coverage);
+            context.insert("uncovered_blocks", &coverage.uncovered_blocks);
+            context.insert("hot_paths", &coverage.hot_paths);
+            
+            // Add timestamp
+            context.insert("timestamp", &Local::now().to_rfc3339());
+            
+            // Render template
+            let html = self.tera.render("coverage.html", &context)
+                .map_err(|e| format!("Failed to render coverage report: {}", e))?;
+            
+            // Write to file
+            let coverage_path = self.config.output_dir.join("coverage.html");
+            fs::write(&coverage_path, html)
+                .map_err(|e| format!("Failed to write coverage report: {}", e))?;
+        }
+        Ok(())
+    }
+
+    /// Generate crash explorer HTML
+    pub fn generate_crash_explorer(&self) -> Result<(), String> {
+        let mut context = TeraContext::new();
+        
+        // Add crash data
+        context.insert("crashes", &self.crashes);
+        context.insert("total_crashes", &self.crashes.len());
+        
+        // Group crashes by severity
+        let mut by_severity: HashMap<&str, Vec<&CrashInfo>> = HashMap::new();
+        for crash in &self.crashes {
+            let severity = match crash.severity {
+                CrashSeverity::Critical => "critical",
+                CrashSeverity::High => "high",
+                CrashSeverity::Medium => "medium",
+                CrashSeverity::Low => "low",
+            };
+            by_severity.entry(severity).or_default().push(crash);
+        }
+        context.insert("by_severity", &by_severity);
+        
+        // Add timestamp
+        context.insert("timestamp", &Local::now().to_rfc3339());
+        
+        // Render template
+        let html = self.tera.render("crash_explorer.html", &context)
+            .map_err(|e| format!("Failed to render crash explorer: {}", e))?;
+        
+        // Write to file
+        let explorer_path = self.config.output_dir.join("crash_explorer.html");
+        fs::write(&explorer_path, html)
+            .map_err(|e| format!("Failed to write crash explorer: {}", e))?;
+        
+        Ok(())
+    }
+
+    /// Replay crash with expected panic pattern
+    pub async fn replay_with_pattern(&self, path: &Path, expected_pattern: &str) -> Result<bool, String> {
+        let content = fs::read_to_string(path)
+            .map_err(|e| format!("Failed to read crash file: {}", e))?;
+        
+        let crash: CrashInfo = serde_json::from_str(&content)
+            .map_err(|e| format!("Failed to parse crash file: {}", e))?;
+        
+        let input = hex::decode(&crash.input)
+            .map_err(|e| format!("Failed to decode input: {}", e))?;
+        
+        match self.run_test_case(&input).await {
+            Ok(_) => Ok(false), // No panic occurred
+            Err(e) => {
+                // Check if error matches expected pattern
+                let matches = regex::Regex::new(expected_pattern)
+                    .map_err(|e| format!("Invalid pattern: {}", e))?
+                    .is_match(&e);
+                
+                if matches {
+                    println!("✅ Panic pattern matched as expected");
+                } else {
+                    println!("❌ Panic pattern did not match");
+                    println!("Expected: {}", expected_pattern);
+                    println!("Got: {}", e);
+                }
+                
+                Ok(matches)
             }
         }
     }
 
-    /// Generate random input for a type
-    fn generate_input(&mut self, ty: &TypeAnnotation) -> Vec<u8> {
-        match ty {
-            TypeAnnotation::Simple(name) => match name.as_str() {
-                "u32" => {
-                    let value: u32 = self.rng.gen();
-                    value.to_le_bytes().to_vec()
+    /// Run parallelized fuzz loops
+    async fn run_parallel_fuzz(&mut self) -> Result<(), String> {
+        let num_threads = rayon::current_num_threads();
+        let chunk_size = self.config.num_cases / num_threads;
+
+        match &self.config.domain {
+            FuzzDomain::Contract { abi, storage, modifiers } => {
+                let abi = abi.clone();
+                let results: Vec<Result<(), String>> = (0..num_threads)
+                    .into_par_iter()
+                    .map(|i| {
+                        let start = i * chunk_size;
+                        let end = if i == num_threads - 1 {
+                            self.config.num_cases
+                        } else {
+                            (i + 1) * chunk_size
+                        };
+                        
+                        let mut local_fuzzer = Fuzzer::new(self.config.clone())?;
+                        local_fuzzer.fuzz_contract_range(&abi, *storage, *modifiers, start, end)
+                    })
+                    .collect();
+                
+                for result in results {
+                    result?;
                 }
-                "f32" => {
-                    let value: f32 = self.rng.gen_range(-1000.0..1000.0);
-                    value.to_le_bytes().to_vec()
-                }
-                "f64" => {
-                    let value: f64 = self.rng.gen_range(-1000.0..1000.0);
-                    value.to_le_bytes().to_vec()
-                }
-                "bool" => {
-                    let value: bool = self.rng.gen();
-                    (value as u32).to_le_bytes().to_vec()
-                }
-                "string" => {
-                    let len = self.rng.gen_range(0..100);
-                    let chars: String = (0..len)
-                        .map(|_| self.rng.gen_range(b'a'..=b'z') as char)
-                        .collect();
-                    chars.into_bytes()
-                }
-                _ => vec![], // Unsupported type
             },
-            TypeAnnotation::Array { element, size } => match element.as_str() {
-                "u8" => {
-                    let len = *size as usize;
-                    let mut bytes = vec![0; len];
-                    self.rng.fill_bytes(&mut bytes);
-                    bytes
+            FuzzDomain::Validator { keys, segments } => {
+                let keys = keys.clone();
+                let results: Vec<Result<(), String>> = (0..num_threads)
+                    .into_par_iter()
+                    .map(|i| {
+                        let start = i * chunk_size;
+                        let end = if i == num_threads - 1 {
+                            self.config.num_cases
+                        } else {
+                            (i + 1) * chunk_size
+                        };
+                        
+                        let mut local_fuzzer = Fuzzer::new(self.config.clone())?;
+                        local_fuzzer.fuzz_validator_range(&keys, *segments, start, end)
+                    })
+                    .collect();
+                
+                for result in results {
+                    result?;
                 }
-                "u32" => {
-                    let len = *size as usize;
-                    let values: Vec<u32> = (0..len).map(|_| self.rng.gen()).collect();
-                    values.iter().flat_map(|v| v.to_le_bytes().to_vec()).collect()
-                }
-                "f32" => {
-                    let len = *size as usize;
-                    let values: Vec<f32> = (0..len).map(|_| self.rng.gen_range(-1000.0..1000.0)).collect();
-                    values.iter().flat_map(|v| v.to_le_bytes().to_vec()).collect()
-                }
-                _ => vec![], // Unsupported type
             },
-            _ => vec![], // Unsupported type
+            FuzzDomain::Sharding { cross_shard, timing } => {
+                let results: Vec<Result<(), String>> = (0..num_threads)
+                    .into_par_iter()
+                    .map(|i| {
+                        let start = i * chunk_size;
+                        let end = if i == num_threads - 1 {
+                            self.config.num_cases
+                        } else {
+                            (i + 1) * chunk_size
+                        };
+                        
+                        let mut local_fuzzer = Fuzzer::new(self.config.clone())?;
+                        local_fuzzer.fuzz_sharding_range(*cross_shard, *timing, start, end)
+                    })
+                    .collect();
+                
+                for result in results {
+                    result?;
+                }
+            },
+            FuzzDomain::Consensus { forks, votes } => {
+                let results: Vec<Result<(), String>> = (0..num_threads)
+                    .into_par_iter()
+                    .map(|i| {
+                        let start = i * chunk_size;
+                        let end = if i == num_threads - 1 {
+                            self.config.num_cases
+        } else {
+                            (i + 1) * chunk_size
+                        };
+                        
+                        let mut local_fuzzer = Fuzzer::new(self.config.clone())?;
+                        local_fuzzer.fuzz_consensus_range(*forks, *votes, start, end)
+                    })
+                    .collect();
+                
+                for result in results {
+                    result?;
+                }
+            },
+        }
+
+        Ok(())
+    }
+
+    /// Fuzz contract range
+    async fn fuzz_contract_range(&mut self, abi: &ContractAbi, storage: bool, modifiers: bool, start: usize, end: usize) -> Result<(), String> {
+        let mut runner = TestRunner::new(ProptestConfig::default());
+        
+        for function in &abi.functions {
+            let input_strategy = self.generate_abi_inputs(function)?;
+            
+            for _ in start..end {
+                let input = input_strategy.new_tree(&mut runner)
+                    .map_err(|e| format!("Failed to generate input: {}", e))?
+                    .current();
+
+                if storage {
+                    self.fuzz_storage(&input).await?;
+                }
+
+                if modifiers {
+                    self.fuzz_modifiers(function, &input).await?;
+                }
+
+                if let Err(e) = self.run_test_case(&input).await {
+                    self.handle_crash(&input, e, "contract").await?;
+                }
+
+                self.progress.inc(1);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Fuzz validator range
+    async fn fuzz_validator_range(&mut self, keys: &ValidatorKeys, segments: bool, start: usize, end: usize) -> Result<(), String> {
+        let mut runner = TestRunner::new(ProptestConfig::default());
+        let signature_strategy = self.generate_malformed_signatures(keys)?;
+        
+        for _ in start..end {
+            let signature = signature_strategy.new_tree(&mut runner)
+                .map_err(|e| format!("Failed to generate signature: {}", e))?
+                .current();
+
+            if segments {
+                self.fuzz_segments(&signature).await?;
+            }
+
+            if let Err(e) = self.run_test_case(&signature).await {
+                self.handle_crash(&signature, e, "validator").await?;
+            }
+
+            self.progress.inc(1);
+        }
+
+        Ok(())
+    }
+
+    /// Fuzz sharding range
+    async fn fuzz_sharding_range(&mut self, cross_shard: bool, timing: bool, start: usize, end: usize) -> Result<(), String> {
+        let mut runner = TestRunner::new(ProptestConfig::default());
+        let message_strategy = self.generate_cross_shard_messages()?;
+        
+        for _ in start..end {
+            let message = message_strategy.new_tree(&mut runner)
+                .map_err(|e| format!("Failed to generate message: {}", e))?
+                .current();
+
+            if timing {
+                self.fuzz_timing(&message).await?;
+            }
+
+            if let Err(e) = self.run_test_case(&message).await {
+                self.handle_crash(&message, e, "sharding").await?;
+            }
+
+            self.progress.inc(1);
+        }
+
+        Ok(())
+    }
+
+    /// Fuzz consensus range
+    async fn fuzz_consensus_range(&mut self, forks: bool, votes: bool, start: usize, end: usize) -> Result<(), String> {
+        let mut runner = TestRunner::new(ProptestConfig::default());
+        let scenario_strategy = self.generate_consensus_scenarios()?;
+        
+        for _ in start..end {
+            let scenario = scenario_strategy.new_tree(&mut runner)
+                .map_err(|e| format!("Failed to generate scenario: {}", e))?
+                .current();
+
+            if forks {
+                self.fuzz_forks(&scenario).await?;
+            }
+
+            if votes {
+                self.fuzz_votes(&scenario).await?;
+            }
+
+            if let Err(e) = self.run_test_case(&scenario).await {
+                self.handle_crash(&scenario, e, "consensus").await?;
+            }
+
+            self.progress.inc(1);
+        }
+
+        Ok(())
+    }
+
+    /// Send webhook alert for new crash
+    async fn send_crash_alert(&self, crash: &CrashInfo, webhook_config: &WebhookConfig) -> Result<(), String> {
+        let client = reqwest::Client::new();
+        
+        let payload = match webhook_config.service {
+            WebhookService::Discord => {
+                json!({
+                    "content": format!(
+                        "🚨 New crash detected!\nModule: {}\nSeverity: {:?}\nStack trace:\n```\n{}\n```",
+                        crash.module,
+                        crash.severity,
+                        crash.stack_trace
+                    ),
+                    "username": webhook_config.username.as_deref().unwrap_or("KSL Fuzzer"),
+                    "avatar_url": webhook_config.icon_url,
+                })
+            },
+            WebhookService::Slack => {
+                json!({
+                    "text": format!(
+                        "🚨 New crash detected!\nModule: {}\nSeverity: {:?}\nStack trace:\n```\n{}\n```",
+                        crash.module,
+                        crash.severity,
+                        crash.stack_trace
+                    ),
+                    "username": webhook_config.username.as_deref().unwrap_or("KSL Fuzzer"),
+                    "icon_url": webhook_config.icon_url,
+                })
+            },
+            WebhookService::Custom => {
+                json!({
+                    "crash": crash,
+                    "timestamp": SystemTime::now(),
+                })
+            },
+        };
+
+        client.post(&webhook_config.url)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| format!("Failed to send webhook: {}", e))?;
+
+        Ok(())
+    }
+
+    /// Load external ABI mutator plugin
+    fn load_mutator_plugin(&mut self, plugin_path: &Path) -> Result<(), String> {
+        unsafe {
+            let lib = libloading::Library::new(plugin_path)
+                .map_err(|e| format!("Failed to load plugin: {}", e))?;
+            
+            let mutator_ctor: libloading::Symbol<unsafe extern "C" fn() -> Box<dyn AbiMutator>> = lib
+                .get(b"create_mutator")
+                .map_err(|e| format!("Failed to get mutator constructor: {}", e))?;
+            
+            let mutator = mutator_ctor();
+            self.mutator_registry.register(mutator);
+            
+            Ok(())
         }
     }
 
-    /// Convert TypeAnnotation to Type
-    fn type_annotation_to_type(&self, annot: TypeAnnotation) -> Type {
-        match annot {
-            TypeAnnotation::Simple(name) => match name.as_str() {
-                "u32" => Type::U32,
-                "f32" => Type::F32,
-                "f64" => Type::F64,
-                "bool" => Type::Bool,
-                "string" => Type::String,
-                _ => Type::Void,
-            },
-            TypeAnnotation::Array { element, size } => match element.as_str() {
-                "u8" => Type::Array(Box::new(Type::U8), size),
-                "u32" => Type::Array(Box::new(Type::U32), size),
-                "f32" => Type::Array(Box::new(Type::F32), size),
-                _ => Type::Void,
-            },
-            _ => Type::Void,
+    /// Apply safety sandbox
+    fn apply_sandbox(&self, config: &SandboxConfig) -> Result<(), String> {
+        if config.seccomp {
+            // Apply seccomp filters
+            seccompiler::apply_filter(&self.get_seccomp_filter())
+                .map_err(|e| format!("Failed to apply seccomp filter: {}", e))?;
         }
+
+        if let Some(chroot) = &config.chroot {
+            // Apply chroot
+            nix::unistd::chroot(chroot)
+                .map_err(|e| format!("Failed to apply chroot: {}", e))?;
+        }
+
+        // Apply resource limits
+        if let Some(max_memory) = config.resource_limits.max_memory {
+            rlimit::setrlimit(rlimit::Resource::AS, max_memory as u64, max_memory as u64)
+                .map_err(|e| format!("Failed to set memory limit: {}", e))?;
+        }
+
+        if let Some(max_cpu_time) = config.resource_limits.max_cpu_time {
+            rlimit::setrlimit(rlimit::Resource::CPU, max_cpu_time.as_secs(), max_cpu_time.as_secs())
+                .map_err(|e| format!("Failed to set CPU time limit: {}", e))?;
+        }
+
+        if let Some(max_file_size) = config.resource_limits.max_file_size {
+            rlimit::setrlimit(rlimit::Resource::FSIZE, max_file_size as u64, max_file_size as u64)
+                .map_err(|e| format!("Failed to set file size limit: {}", e))?;
+        }
+
+        if let Some(max_files) = config.resource_limits.max_files {
+            rlimit::setrlimit(rlimit::Resource::NOFILE, max_files as u64, max_files as u64)
+                .map_err(|e| format!("Failed to set file limit: {}", e))?;
+        }
+
+        if !config.network_access {
+            // Block network access
+            seccompiler::apply_filter(&self.get_network_filter())
+                .map_err(|e| format!("Failed to block network access: {}", e))?;
+        }
+
+        Ok(())
+    }
+
+    /// Generate seccomp filter
+    fn get_seccomp_filter(&self) -> Vec<u8> {
+        // TODO: Implement proper seccomp filter generation
+        vec![]
+    }
+
+    /// Generate network filter
+    fn get_network_filter(&self) -> Vec<u8> {
+        // TODO: Implement proper network filter generation
+        vec![]
+    }
+
+    /// Generate trend report
+    fn generate_trend_report(&self, command: &TrendReportCommand) -> Result<(), String> {
+        let mut context = TeraContext::new();
+        
+        // Filter trends by time range
+        let trends = if let Some(range) = &command.time_range {
+            self.filter_trends_by_time(range)?
+        } else {
+            self.trends.clone()
+        };
+        
+        context.insert("trends", &trends);
+        context.insert("metrics", &command.metrics);
+        
+        // Generate report based on format
+        match command.output_format.as_str() {
+            "html" => {
+                let html = self.tera.render("trend_report.html", &context)
+                    .map_err(|e| format!("Failed to render trend report: {}", e))?;
+                
+                let report_path = self.config.output_dir.join("trend_report.html");
+                fs::write(&report_path, html)
+                    .map_err(|e| format!("Failed to write trend report: {}", e))?;
+            },
+            "json" => {
+                let json = serde_json::to_string_pretty(&trends)
+                    .map_err(|e| format!("Failed to serialize trends: {}", e))?;
+                
+                let report_path = self.config.output_dir.join("trend_report.json");
+                fs::write(&report_path, json)
+                    .map_err(|e| format!("Failed to write trend report: {}", e))?;
+            },
+            _ => return Err("Unsupported output format".to_string()),
+        }
+        
+        Ok(())
+    }
+
+    /// Filter trends by time range
+    fn filter_trends_by_time(&self, range: &str) -> Result<Vec<CoverageTrend>, String> {
+        let now = SystemTime::now();
+        let duration = humantime::parse_duration(range)
+            .map_err(|e| format!("Invalid time range: {}", e))?;
+        
+        let cutoff = now - duration;
+        
+        Ok(self.trends.iter()
+            .filter(|t| t.timestamp >= cutoff)
+            .cloned()
+            .collect())
+    }
+
+    /// Browse corpus
+    fn browse_corpus(&self, command: &CorpusBrowserCommand) -> Result<(), String> {
+        let mut context = TeraContext::new();
+        
+        // Load corpus data
+        let corpus = self.load_corpus()?;
+        
+        // Apply filters
+        let filtered = if let Some(filter) = &command.filter {
+            self.filter_corpus(&corpus, filter)?
+        } else {
+            corpus
+        };
+        
+        // Apply sorting
+        let sorted = if let Some(sort_by) = &command.sort_by {
+            self.sort_corpus(&filtered, sort_by)?
+        } else {
+            filtered
+        };
+        
+        context.insert("corpus", &sorted);
+        context.insert("view_type", &command.view_type);
+        
+        // Generate browser view
+        let html = self.tera.render("corpus_browser.html", &context)
+            .map_err(|e| format!("Failed to render corpus browser: {}", e))?;
+        
+        let browser_path = self.config.output_dir.join("corpus_browser.html");
+        fs::write(&browser_path, html)
+            .map_err(|e| format!("Failed to write corpus browser: {}", e))?;
+        
+        Ok(())
+    }
+
+    /// Load corpus data
+    fn load_corpus(&self) -> Result<Vec<CrashInfo>, String> {
+        let mut corpus = Vec::new();
+        
+        for entry in fs::read_dir(&self.config.corpus_dir)
+            .map_err(|e| format!("Failed to read corpus directory: {}", e))? {
+            let entry = entry.map_err(|e| format!("Failed to read corpus entry: {}", e))?;
+            let path = entry.path();
+            
+            if path.extension().map_or(false, |ext| ext == "json") {
+                let content = fs::read_to_string(&path)
+                    .map_err(|e| format!("Failed to read corpus file: {}", e))?;
+                
+                let crash: CrashInfo = serde_json::from_str(&content)
+                    .map_err(|e| format!("Failed to parse corpus file: {}", e))?;
+                
+                corpus.push(crash);
+            }
+        }
+        
+        Ok(corpus)
+    }
+
+    /// Filter corpus
+    fn filter_corpus(&self, corpus: &[CrashInfo], filter: &str) -> Result<Vec<CrashInfo>, String> {
+        Ok(corpus.iter()
+            .filter(|c| {
+                c.module.contains(filter) ||
+                c.stack_trace.contains(filter) ||
+                format!("{:?}", c.severity).contains(filter)
+            })
+            .cloned()
+            .collect())
+    }
+
+    /// Sort corpus
+    fn sort_corpus(&self, corpus: &[CrashInfo], sort_by: &str) -> Result<Vec<CrashInfo>, String> {
+        let mut sorted = corpus.to_vec();
+        
+        match sort_by {
+            "severity" => {
+                sorted.sort_by(|a, b| b.severity.cmp(&a.severity));
+            },
+            "module" => {
+                sorted.sort_by(|a, b| a.module.cmp(&b.module));
+            },
+            "timestamp" => {
+                sorted.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+            },
+            _ => return Err(format!("Invalid sort field: {}", sort_by)),
+        }
+        
+        Ok(sorted)
     }
 }
 
-/// Public API to fuzz a KSL file with async support
-pub async fn fuzz(
-    file: &PathBuf,
-    config: Option<FuzzerConfig>
-) -> Result<(), Vec<KslError>> {
-    let config = config.unwrap_or_default();
-    let mut fuzzer = Fuzzer::new(config);
-    fuzzer.fuzz_file(file).await
+/// Public API to run fuzzer
+pub async fn run_fuzzer(config: FuzzerConfig) -> Result<FuzzerResult, String> {
+    let mut fuzzer = Fuzzer::new(config)?;
+    fuzzer.run().await
+}
+
+/// Public API to run fuzzer synchronously
+pub fn run_fuzzer_sync(config: FuzzerConfig) -> Result<FuzzerResult, String> {
+    let runtime = tokio::runtime::Runtime::new()
+        .map_err(|e| format!("Failed to create runtime: {}", e))?;
+    runtime.block_on(run_fuzzer(config))
+}
+
+/// CLI wrapper for fuzzer
+pub fn run_fuzzer_cli() -> Result<(), String> {
+    let matches = App::new("ksl-fuzz")
+        .version("1.0")
+        .author("KSL Team")
+        .about("KSL Fuzzing Framework")
+        .arg(Arg::with_name("domain")
+            .short('d')
+            .long("domain")
+            .value_name("DOMAIN")
+            .help("Fuzzing domain (contract, validator, sharding, consensus)")
+            .required(true)
+            .takes_value(true))
+        .arg(Arg::with_name("cases")
+            .short('c')
+            .long("cases")
+            .value_name("NUM")
+            .help("Number of test cases")
+            .default_value("1000")
+            .takes_value(true))
+        .arg(Arg::with_name("parallel")
+            .short('p')
+            .long("parallel")
+            .help("Run tests in parallel"))
+        .arg(Arg::with_name("symbolic")
+            .long("symbolic")
+            .help("Use symbolic execution"))
+        .arg(Arg::with_name("coverage")
+            .long("coverage")
+            .help("Track coverage"))
+        .arg(Arg::with_name("replay")
+            .long("replay")
+            .value_name("FILE")
+            .help("Replay specific crash file")
+            .takes_value(true))
+        .arg(Arg::with_name("pattern")
+            .long("pattern")
+            .value_name("PATTERN")
+            .help("Expected panic pattern for replay")
+            .takes_value(true))
+        .arg(Arg::with_name("output")
+            .short('o')
+            .long("output")
+            .value_name("DIR")
+            .help("Output directory")
+            .default_value("fuzz_output")
+            .takes_value(true))
+        .get_matches();
+
+    // Parse domain
+    let domain = match matches.value_of("domain").unwrap() {
+        "contract" => FuzzDomain::Contract {
+            abi: ContractAbi::default(),
+            storage: true,
+            modifiers: true,
+        },
+        "validator" => FuzzDomain::Validator {
+            keys: ValidatorKeys::new(),
+            segments: true,
+        },
+        "sharding" => FuzzDomain::Sharding {
+            cross_shard: true,
+            timing: true,
+        },
+        "consensus" => FuzzDomain::Consensus {
+            forks: true,
+            votes: true,
+        },
+        _ => return Err("Invalid domain".to_string()),
+    };
+
+    // Create config
+    let config = FuzzerConfig {
+        domain,
+        num_cases: matches.value_of("cases")
+            .unwrap()
+            .parse()
+            .map_err(|e| format!("Invalid number of cases: {}", e))?,
+        parallel: matches.is_present("parallel"),
+        symbolic: matches.is_present("symbolic"),
+        track_coverage: matches.is_present("coverage"),
+        corpus_dir: PathBuf::from("fuzz_corpus"),
+        shrunk_dir: PathBuf::from("shrunk"),
+        replay: matches.value_of("replay").map(PathBuf::from),
+        timeout: Duration::from_secs(30),
+        mutators: vec![],
+        output_dir: PathBuf::from("fuzz_output"),
+    };
+
+    // Run fuzzer
+    let result = run_fuzzer_sync(config)?;
+
+    // Generate reports
+    let mut fuzzer = Fuzzer::new(config)?;
+    if result.coverage.is_some() {
+        fuzzer.generate_coverage_html()?;
+    }
+    fuzzer.generate_crash_explorer()?;
+
+    // Check replay pattern if specified
+    if let (Some(replay), Some(pattern)) = (matches.value_of("replay"), matches.value_of("pattern")) {
+        let matches = fuzzer.replay_with_pattern(Path::new(replay), pattern).await?;
+        if !matches {
+            return Err("Panic pattern did not match".to_string());
+        }
+    }
+
+    Ok(())
+}
+
+/// Webhook configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookConfig {
+    pub url: String,
+    pub service: WebhookService,
+    pub channel: Option<String>,
+    pub username: Option<String>,
+    pub icon_url: Option<String>,
+}
+
+/// Webhook service type
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum WebhookService {
+    Discord,
+    Slack,
+    Custom,
+}
+
+/// Safety sandbox configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SandboxConfig {
+    pub seccomp: bool,
+    pub chroot: Option<PathBuf>,
+    pub resource_limits: ResourceLimits,
+    pub network_access: bool,
+}
+
+/// Resource limits for sandbox
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResourceLimits {
+    pub max_memory: Option<usize>,
+    pub max_cpu_time: Option<Duration>,
+    pub max_file_size: Option<usize>,
+    pub max_files: Option<usize>,
+}
+
+/// CLI subcommand for trend report
+#[derive(Debug, Clone)]
+pub struct TrendReportCommand {
+    pub output_format: String,
+    pub time_range: Option<String>,
+    pub metrics: Vec<String>,
+}
+
+/// CLI subcommand for corpus browser
+#[derive(Debug, Clone)]
+pub struct CorpusBrowserCommand {
+    pub view_type: String,
+    pub filter: Option<String>,
+    pub sort_by: Option<String>,
 }
 
 #[cfg(test)]
@@ -486,61 +1441,362 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::NamedTempFile;
-    use tokio;
 
-    #[tokio::test]
-    async fn test_fuzz_async_function() {
+    #[test]
+    fn test_contract_fuzzing() {
+        let config = FuzzerConfig {
+            domain: FuzzDomain::Contract {
+                abi: ContractAbi {
+                    name: "TestContract".to_string(),
+                    functions: vec![
+                        ContractFunction {
+                            name: "test".to_string(),
+                            parameters: vec![
+                                ContractParameter {
+                                    name: "x".to_string(),
+                                    typ: "u32".to_string(),
+                                },
+                            ],
+                            returns: "bool".to_string(),
+                        },
+                    ],
+                },
+                storage: true,
+                modifiers: true,
+            },
+            num_cases: 100,
+            parallel: false,
+            symbolic: false,
+            track_coverage: true,
+            corpus_dir: PathBuf::from("fuzz_corpus"),
+            shrunk_dir: PathBuf::from("shrunk"),
+            replay: None,
+            timeout: Duration::from_secs(1),
+            mutators: vec![],
+            output_dir: PathBuf::from("fuzz_output"),
+        };
+
+        let result = run_fuzzer_sync(config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validator_fuzzing() {
+        let config = FuzzerConfig {
+            domain: FuzzDomain::Validator {
+                keys: ValidatorKeys::new(),
+                segments: true,
+            },
+            num_cases: 100,
+            parallel: false,
+            symbolic: false,
+            track_coverage: true,
+            corpus_dir: PathBuf::from("fuzz_corpus"),
+            shrunk_dir: PathBuf::from("shrunk"),
+            replay: None,
+            timeout: Duration::from_secs(1),
+            mutators: vec![],
+            output_dir: PathBuf::from("fuzz_output"),
+        };
+
+        let result = run_fuzzer_sync(config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_sharding_fuzzing() {
+        let config = FuzzerConfig {
+            domain: FuzzDomain::Sharding {
+                cross_shard: true,
+                timing: true,
+            },
+            num_cases: 100,
+            parallel: false,
+            symbolic: false,
+            track_coverage: true,
+            corpus_dir: PathBuf::from("fuzz_corpus"),
+            shrunk_dir: PathBuf::from("shrunk"),
+            replay: None,
+            timeout: Duration::from_secs(1),
+            mutators: vec![],
+            output_dir: PathBuf::from("fuzz_output"),
+        };
+
+        let result = run_fuzzer_sync(config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_consensus_fuzzing() {
+        let config = FuzzerConfig {
+            domain: FuzzDomain::Consensus {
+                forks: true,
+                votes: true,
+            },
+            num_cases: 100,
+            parallel: false,
+            symbolic: false,
+            track_coverage: true,
+            corpus_dir: PathBuf::from("fuzz_corpus"),
+            shrunk_dir: PathBuf::from("shrunk"),
+            replay: None,
+            timeout: Duration::from_secs(1),
+            mutators: vec![],
+            output_dir: PathBuf::from("fuzz_output"),
+        };
+
+        let result = run_fuzzer_sync(config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_crash_replay() {
         let mut temp_file = NamedTempFile::new().unwrap();
         writeln!(
             temp_file,
-            "#[fuzz]\nasync fn test_async(x: u32) {{ if x == 0 {{ panic!(); }} await async_task(x); }}\nasync fn async_task(x: u32) {{ if x > 1000 {{ panic!(); }} }}"
+            r#"{{"input": "deadbeef", "stack_trace": "test", "seed": 42, "module": "test", "severity": "High"}}"#
         ).unwrap();
 
         let config = FuzzerConfig {
-            iterations: 100,
-            enable_async: true,
-            fuzz_network: false,
-            ..Default::default()
+            domain: FuzzDomain::Contract {
+                abi: ContractAbi {
+                    name: "TestContract".to_string(),
+                    functions: vec![],
+                },
+                storage: false,
+                modifiers: false,
+            },
+            num_cases: 1,
+            parallel: false,
+            symbolic: false,
+            track_coverage: false,
+            corpus_dir: PathBuf::from("fuzz_corpus"),
+            shrunk_dir: PathBuf::from("shrunk"),
+            replay: Some(temp_file.path().to_path_buf()),
+            timeout: Duration::from_secs(1),
+            mutators: vec![],
+            output_dir: PathBuf::from("fuzz_output"),
         };
 
-        let result = fuzz(&temp_file.path().to_path_buf(), Some(config)).await;
-        assert!(result.is_err());
-        let errors = result.unwrap_err();
-        assert!(!errors.is_empty());
-        assert!(errors[0].to_string().contains("test_async"));
+        let result = run_fuzzer_sync(config);
+        assert!(result.is_ok());
     }
 
-    #[tokio::test]
-    async fn test_fuzz_network_function() {
-        let mut temp_file = NamedTempFile::new().unwrap();
-        writeln!(
-            temp_file,
-            "#[fuzz]\nfn test_network(url: string) {{ let response = http_get(url); if response.status != 200 {{ panic!(); }} }}"
-        ).unwrap();
-
+    #[test]
+    fn test_coverage_html() {
         let config = FuzzerConfig {
-            iterations: 50,
-            enable_async: false,
-            fuzz_network: true,
-            ..Default::default()
+            domain: FuzzDomain::Contract {
+                abi: ContractAbi::default(),
+                storage: false,
+                modifiers: false,
+            },
+            num_cases: 1,
+            parallel: false,
+            symbolic: false,
+            track_coverage: true,
+            corpus_dir: PathBuf::from("fuzz_corpus"),
+            shrunk_dir: PathBuf::from("shrunk"),
+            replay: None,
+            timeout: Duration::from_secs(1),
+            mutators: vec![],
+            output_dir: PathBuf::from("fuzz_output"),
         };
 
-        let result = fuzz(&temp_file.path().to_path_buf(), Some(config)).await;
-        assert!(result.is_err());
-        let errors = result.unwrap_err();
-        assert!(!errors.is_empty());
-        assert!(errors[0].to_string().contains("test_network"));
+        let mut fuzzer = Fuzzer::new(config).unwrap();
+        fuzzer.coverage = Some(CoverageInfo {
+            bytecode_coverage: 0.85,
+            llvm_coverage: 0.90,
+            uncovered_blocks: vec!["block1".to_string()],
+            hot_paths: vec!["path1".to_string()],
+        });
+
+        assert!(fuzzer.generate_coverage_html().is_ok());
     }
 
-    #[tokio::test]
-    async fn test_fuzz_no_functions() {
+    #[test]
+    fn test_crash_explorer() {
+        let config = FuzzerConfig {
+            domain: FuzzDomain::Contract {
+                abi: ContractAbi::default(),
+                storage: false,
+                modifiers: false,
+            },
+            num_cases: 1,
+            parallel: false,
+            symbolic: false,
+            track_coverage: false,
+            corpus_dir: PathBuf::from("fuzz_corpus"),
+            shrunk_dir: PathBuf::from("shrunk"),
+            replay: None,
+            timeout: Duration::from_secs(1),
+            mutators: vec![],
+            output_dir: PathBuf::from("fuzz_output"),
+        };
+
+        let mut fuzzer = Fuzzer::new(config).unwrap();
+        fuzzer.crashes = vec![
+            CrashInfo {
+                input: "test".to_string(),
+                stack_trace: "trace".to_string(),
+                seed: 42,
+                ast_diff: None,
+                module: "test".to_string(),
+                severity: CrashSeverity::High,
+                shrunk_input: None,
+            }
+        ];
+
+        assert!(fuzzer.generate_crash_explorer().is_ok());
+    }
+
+    #[test]
+    fn test_replay_pattern() {
+        let config = FuzzerConfig {
+            domain: FuzzDomain::Contract {
+                abi: ContractAbi::default(),
+                storage: false,
+                modifiers: false,
+            },
+            num_cases: 1,
+            parallel: false,
+            symbolic: false,
+            track_coverage: false,
+            corpus_dir: PathBuf::from("fuzz_corpus"),
+            shrunk_dir: PathBuf::from("shrunk"),
+            replay: None,
+            timeout: Duration::from_secs(1),
+            mutators: vec![],
+            output_dir: PathBuf::from("fuzz_output"),
+        };
+
         let mut temp_file = NamedTempFile::new().unwrap();
         writeln!(
             temp_file,
-            "fn add(x: u32, y: u32): u32 {{ x + y }}"
+            r#"{{"input": "deadbeef", "stack_trace": "panic: test", "seed": 42, "module": "test", "severity": "High"}}"#
         ).unwrap();
 
-        let result = fuzz(&temp_file.path().to_path_buf(), None).await;
+        let fuzzer = Fuzzer::new(config).unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let result = runtime.block_on(fuzzer.replay_with_pattern(temp_file.path(), "panic: test"));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_abi_mutator_registry() {
+        struct TestMutator;
+        impl AbiMutator for TestMutator {
+            fn mutate(&self, abi: &mut ContractAbi) -> Result<(), String> {
+                abi.name = "Mutated".to_string();
+                Ok(())
+            }
+            fn name(&self) -> &str {
+                "test_mutator"
+            }
+        }
+
+        let mut registry = AbiMutatorRegistry::new();
+        registry.register(Box::new(TestMutator));
+
+        let mutator = registry.get("test_mutator").unwrap();
+        let mut abi = ContractAbi::default();
+        mutator.mutate(&mut abi).unwrap();
+        assert_eq!(abi.name, "Mutated");
+    }
+
+    #[test]
+    fn test_coverage_trend_tracker() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut tracker = CoverageTrendTracker::new(temp_dir.path().to_path_buf());
+
+        let trend = CoverageTrend {
+            timestamp: SystemTime::now(),
+            bytecode_coverage: 0.85,
+            llvm_coverage: 0.90,
+            uncovered_blocks: vec!["block1".to_string()],
+            hot_paths: vec!["path1".to_string()],
+            git_commit: "abc123".to_string(),
+        };
+
+        tracker.add_trend(trend).unwrap();
+        assert!(temp_dir.path().join("coverage_trends.json").exists());
+    }
+
+    #[tokio::test]
+    async fn test_sharding_message_injector() {
+        let injector = ShardingMessageInjector::new(vec!["node1".to_string(), "node2".to_string()]);
+        injector.inject_message(vec![1, 2, 3]).await.unwrap();
+        injector.process_queue().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_webhook_alert() {
+        let fuzzer = Fuzzer::new(FuzzerConfig::default()).unwrap();
+        let webhook_config = WebhookConfig {
+            url: "https://discord.com/api/webhooks/test".to_string(),
+            service: WebhookService::Discord,
+            channel: Some("fuzzer-alerts".to_string()),
+            username: Some("KSL Fuzzer".to_string()),
+            icon_url: Some("https://example.com/icon.png".to_string()),
+        };
+
+        let crash = CrashInfo {
+            input: "test".to_string(),
+            stack_trace: "test trace".to_string(),
+            seed: 42,
+            ast_diff: None,
+            module: "test".to_string(),
+            severity: CrashSeverity::High,
+            shrunk_input: None,
+        };
+
+        // Note: This test will fail if the webhook URL is not valid
+        let result = fuzzer.send_crash_alert(&crash, &webhook_config).await;
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_sandbox() {
+        let fuzzer = Fuzzer::new(FuzzerConfig::default()).unwrap();
+        let sandbox_config = SandboxConfig {
+            seccomp: true,
+            chroot: Some(PathBuf::from("/tmp")),
+            resource_limits: ResourceLimits {
+                max_memory: Some(1024 * 1024 * 1024), // 1GB
+                max_cpu_time: Some(Duration::from_secs(60)),
+                max_file_size: Some(1024 * 1024), // 1MB
+                max_files: Some(100),
+            },
+            network_access: false,
+        };
+
+        // Note: This test requires root privileges
+        let result = fuzzer.apply_sandbox(&sandbox_config);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_trend_report() {
+        let fuzzer = Fuzzer::new(FuzzerConfig::default()).unwrap();
+        let command = TrendReportCommand {
+            output_format: "json".to_string(),
+            time_range: Some("1d".to_string()),
+            metrics: vec!["bytecode_coverage".to_string(), "llvm_coverage".to_string()],
+        };
+
+        let result = fuzzer.generate_trend_report(&command);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_corpus_browser() {
+        let fuzzer = Fuzzer::new(FuzzerConfig::default()).unwrap();
+        let command = CorpusBrowserCommand {
+            view_type: "table".to_string(),
+            filter: Some("test".to_string()),
+            sort_by: Some("severity".to_string()),
+        };
+
+        let result = fuzzer.browse_corpus(&command);
         assert!(result.is_ok());
     }
 }

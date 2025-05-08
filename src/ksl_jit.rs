@@ -1,422 +1,452 @@
 // ksl_jit.rs
-// Just-In-Time (JIT) compilation for KSL to enable dynamic performance optimization
-// Uses the new program's JIT backend (e.g., Cranelift) for code generation
+// JIT compiler with speculative optimizations and profile-guided recompilation
 
-use crate::ksl_bytecode::{KapraBytecode, KapraOpCode};
+use crate::ksl_ast::{AstNode, Expr, Function};
 use crate::ksl_errors::{KslError, SourcePosition};
+use crate::ksl_llvm::LLVMCodegen;
+use crate::ksl_analyzer::PerformanceMetrics;
+use inkwell::context::Context;
+use inkwell::execution_engine::{ExecutionEngine, JitFunction};
+use inkwell::module::Module;
+use inkwell::OptimizationLevel;
+use inkwell::targets::{InitializationConfig, Target};
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+use log::{debug, info, warn};
+use std::path::PathBuf;
 
-/// Represents KSL bytecode with networking support.
+/// Threshold for considering a function "hot"
+const HOT_FUNCTION_THRESHOLD: u64 = 1000;
+/// Time between profiling checks
+const PROFILING_INTERVAL: Duration = Duration::from_secs(60);
+
+type GenericJitFunction = unsafe extern "C" fn() -> i64;
+
+/// Profile data for a function
 #[derive(Debug, Clone)]
-pub struct Bytecode {
-    instructions: Vec<u8>,
-    constants: Vec<Constant>,
-    networking_ops: Vec<NetworkingOp>, // Track networking operations
+struct FunctionProfile {
+    call_count: u64,
+    total_time: Duration,
+    avg_time: Duration,
+    last_compiled: Instant,
+    speculation_success: u64,
+    speculation_failure: u64,
 }
 
-impl Bytecode {
-    /// Creates a new bytecode instance.
-    pub fn new(instructions: Vec<u8>, constants: Vec<Constant>) -> Self {
-        Bytecode {
-            instructions,
-            constants,
-            networking_ops: Vec::new(),
+impl FunctionProfile {
+    fn new() -> Self {
+        FunctionProfile {
+            call_count: 0,
+            total_time: Duration::new(0, 0),
+            avg_time: Duration::new(0, 0),
+            last_compiled: Instant::now(),
+            speculation_success: 0,
+            speculation_failure: 0,
         }
     }
 
-    /// Returns the bytecode instructions.
-    pub fn instructions(&self) -> &Vec<u8> {
-        &self.instructions
+    fn update(&mut self, execution_time: Duration) {
+        self.call_count += 1;
+        self.total_time += execution_time;
+        self.avg_time = self.total_time / self.call_count as u32;
     }
 
-    /// Returns the constants pool.
-    pub fn constants(&self) -> &Vec<Constant> {
-        &self.constants
+    fn is_hot(&self) -> bool {
+        self.call_count > HOT_FUNCTION_THRESHOLD
     }
 
-    /// Returns the networking operations.
-    pub fn networking_ops(&self) -> &Vec<NetworkingOp> {
-        &self.networking_ops
-    }
-}
-
-/// Represents a constant in the bytecode.
-#[derive(Debug, Clone)]
-pub enum Constant {
-    String(String),
-    U64(u64),
-    NetworkEndpoint(String), // Network endpoint (e.g., URL, IP:port)
-    NetworkHeaders(HashMap<String, String>), // HTTP headers
-}
-
-/// Represents a networking operation in the bytecode.
-#[derive(Debug, Clone)]
-pub struct NetworkingOp {
-    op_type: NetworkingOpType,
-    endpoint: String,
-    headers: Option<HashMap<String, String>>,
-    data: Option<Vec<u8>>,
-}
-
-/// Types of networking operations.
-#[derive(Debug, Clone)]
-pub enum NetworkingOpType {
-    HttpGet,
-    HttpPost,
-    TcpConnect,
-    TcpSend,
-    TcpReceive,
-}
-
-/// Represents profiling data for JIT optimization.
-#[derive(Debug, Clone)]
-pub struct ProfileData {
-    hot_paths: HashMap<usize, u32>,
-    networking_paths: HashMap<usize, u32>, // Track hot networking paths
-}
-
-impl ProfileData {
-    pub fn new() -> Self {
-        ProfileData {
-            hot_paths: HashMap::new(),
-            networking_paths: HashMap::new(),
-        }
+    fn should_recompile(&self) -> bool {
+        self.is_hot() && self.last_compiled.elapsed() > PROFILING_INTERVAL
     }
 
-    pub fn record_execution(&mut self, instruction_index: usize, is_networking: bool) {
-        if is_networking {
-            *self.networking_paths.entry(instruction_index).or_insert(0) += 1;
+    fn record_speculation(&mut self, success: bool) {
+        if success {
+            self.speculation_success += 1;
         } else {
-            *self.hot_paths.entry(instruction_index).or_insert(0) += 1;
+            self.speculation_failure += 1;
         }
     }
 
-    pub fn is_hot(&self, instruction_index: usize, threshold: u32) -> bool {
-        self.hot_paths.get(&instruction_index).map_or(false, |count| *count >= threshold)
-    }
-
-    pub fn is_networking_hot(&self, instruction_index: usize, threshold: u32) -> bool {
-        self.networking_paths.get(&instruction_index).map_or(false, |count| *count >= threshold)
-    }
-}
-
-/// Represents the new program's JIT backend.
-pub struct JitBackend {
-    // Implementation details of the new JIT backend
-    // This would be replaced with actual backend types (e.g., Cranelift)
-}
-
-impl JitBackend {
-    pub fn new() -> Self {
-        JitBackend {
-            // Initialize the new JIT backend
+    fn speculation_success_rate(&self) -> f64 {
+        let total = self.speculation_success + self.speculation_failure;
+        if total == 0 {
+            0.0
+        } else {
+            self.speculation_success as f64 / total as f64
         }
     }
-
-    pub fn compile_ir(&self, ir: &JitIR) -> Result<MachineCode, KslError> {
-        // Implementation using the new JIT backend
-        Ok(MachineCode::new(vec![])) // Placeholder
-    }
 }
 
-/// Represents JIT IR (Intermediate Representation).
-pub struct JitIR {
-    instructions: Vec<JitInstruction>,
-    networking_ops: Vec<NetworkingOp>,
-}
-
-/// Represents a JIT instruction.
-pub enum JitInstruction {
-    LoadConst(usize),
-    LoadDirect(u64),
-    Add,
-    Network(NetworkingOp),
-    // Other instructions
-}
-
-/// Represents machine code (simplified abstraction for JIT output).
-#[derive(Debug, Clone)]
-pub struct MachineCode {
-    code: Vec<u8>, // Native machine code (simplified as a byte vector)
-}
-
-impl MachineCode {
-    pub fn new(code: Vec<u8>) -> Self {
-        MachineCode { code }
-    }
-
-    pub fn execute(&self, vm: &mut KapraVM) -> Result<(), String> {
-        // Simplified execution: in a real JIT, this would invoke the native code
-        vm.execute_native(&self.code)
-    }
-}
-
-/// Represents the Kapra VM (aligned with kapra_vm.rs).
+/// Speculative optimization for a function
 #[derive(Debug)]
-pub struct KapraVM {
-    stack: Vec<u64>, // Simplified stack for VM execution
-    jit_enabled: bool, // Whether JIT is enabled
+enum SpeculativeOpt {
+    Inline {
+        callee: String,
+        success_rate: f64,
+    },
+    LoopUnroll {
+        loop_id: usize,
+        unroll_factor: usize,
+        success_rate: f64,
+    },
 }
 
-impl KapraVM {
-    pub fn new(jit_enabled: bool) -> Self {
-        KapraVM {
-            stack: vec![],
-            jit_enabled,
-        }
-    }
-
-    pub fn execute_bytecode(&mut self, bytecode: &Bytecode, profile: &mut ProfileData) -> Result<(), String> {
-        let instructions = bytecode.instructions();
-        for ip in 0..instructions.len() {
-            // Record profiling data
-            profile.record_execution(ip, false);
-
-            // Execute the instruction (simplified interpreter)
-            match instructions[ip] {
-                OPCODE_PUSH => {
-                    if ip + 1 < instructions.len() {
-                        let value = instructions[ip + 1] as u64;
-                        self.stack.push(value);
-                    }
-                }
-                OPCODE_ADD => {
-                    if self.stack.len() >= 2 {
-                        let a = self.stack.pop().unwrap();
-                        let b = self.stack.pop().unwrap();
-                        self.stack.push(a + b);
-                    }
-                }
-                _ => {} // Other opcodes
-            }
-        }
-        Ok(())
-    }
-
-    pub fn execute_native(&mut self, code: &Vec<u8>) -> Result<(), String> {
-        // Simplified: In a real JIT, this would execute the machine code directly
-        // For this example, we'll simulate execution by manipulating the stack
-        if code.len() > 0 {
-            self.stack.push(code[0] as u64); // Dummy operation
-        }
-        Ok(())
-    }
-}
-
-/// Represents an optimization pass (aligned with ksl_optimizer.rs).
-#[derive(Debug, Clone)]
-pub struct Optimizer {
-    // Placeholder for optimization configuration
-}
-
-impl Optimizer {
-    pub fn new() -> Self {
-        Optimizer {}
-    }
-
-    pub fn optimize(&self, bytecode: &mut Bytecode) -> Result<(), String> {
-        // Simplified optimization: constant propagation, loop unrolling, etc.
-        let mut optimized_instructions = bytecode.instructions.clone();
-
-        // Example: Replace constant loads with direct values (constant propagation)
-        for i in 0..optimized_instructions.len() {
-            if optimized_instructions[i] == OPCODE_LOAD_CONST {
-                if i + 1 < optimized_instructions.len() {
-                    let const_idx = optimized_instructions[i + 1] as usize;
-                    if const_idx < bytecode.constants.len() {
-                        // Replace with a direct value (simplified)
-                        optimized_instructions[i] = OPCODE_LOAD_DIRECT;
-                    }
-                }
-            }
-        }
-
-        bytecode.instructions = optimized_instructions;
-        Ok(())
-    }
-}
-
-/// JIT Compiler for KSL.
+/// JIT compiler with profiling and speculative optimizations
 pub struct JITCompiler {
-    vm: KapraVM,
-    optimizer: Optimizer,
-    profile: ProfileData,
-    hot_path_threshold: u32,
-    jit_backend: JitBackend,
+    context: Context,
+    execution_engine: ExecutionEngine,
+    function_cache: HashMap<String, JitFunction<GenericJitFunction>>,
+    profile_data: Arc<Mutex<HashMap<String, FunctionProfile>>>,
+    speculative_opts: HashMap<String, Vec<SpeculativeOpt>>,
+    metrics: PerformanceMetrics,
+    debug_mode: bool,
+    debugger: Option<Arc<Mutex<Debugger>>>,
 }
 
 impl JITCompiler {
-    /// Creates a new JIT compiler instance.
-    pub fn new(jit_enabled: bool) -> Self {
-        JITCompiler {
-            vm: KapraVM::new(jit_enabled),
-            optimizer: Optimizer::new(),
-            profile: ProfileData::new(),
-            hot_path_threshold: 1000,
-            jit_backend: JitBackend::new(),
+    /// Creates a new JIT compiler
+    pub fn new(debug_mode: bool) -> Result<Self, KslError> {
+        // Initialize LLVM targets
+        Target::initialize_native(&InitializationConfig::default())
+            .map_err(|e| KslError::type_error(
+                format!("Failed to initialize LLVM targets: {}", e),
+                SourcePosition::new(1, 1),
+            ))?;
+
+        let context = Context::create();
+        let module = context.create_module("ksl_jit");
+        let execution_engine = module.create_jit_execution_engine(OptimizationLevel::Aggressive)
+            .map_err(|e| KslError::type_error(
+                format!("Failed to create execution engine: {}", e),
+                SourcePosition::new(1, 1),
+            ))?;
+
+        let debugger = if debug_mode {
+            Some(Arc::new(Mutex::new(Debugger::new(
+                &PathBuf::from("jit_debug.ksl")
+            )?)))
+        } else {
+            None
+        };
+
+        Ok(JITCompiler {
+            context,
+            execution_engine,
+            function_cache: HashMap::new(),
+            profile_data: Arc::new(Mutex::new(HashMap::new())),
+            speculative_opts: HashMap::new(),
+            metrics: PerformanceMetrics::default(),
+            debug_mode,
+            debugger,
+        })
+    }
+
+    /// Compiles and executes a function with profiling and debug support
+    pub fn run_function(&mut self, function: &Function) -> Result<i64, KslError> {
+        let start_time = Instant::now();
+
+        // If in debug mode, notify debugger before execution
+        if self.debug_mode {
+            if let Some(debugger) = &self.debugger {
+                let mut debugger = debugger.lock().unwrap();
+                debugger.notify_function_entry(&function.name)?;
+            }
+        }
+
+        let result = self.run_function_internal(function)?;
+        let execution_time = start_time.elapsed();
+
+        // Update profile data
+        let mut profiles = self.profile_data.lock().unwrap();
+        let profile = profiles.entry(function.name.clone()).or_insert_with(FunctionProfile::new);
+        profile.update(execution_time);
+
+        // Check if function needs recompilation
+        if profile.should_recompile() {
+            debug!("Recompiling hot function: {}", function.name);
+            self.recompile_function(function)?;
+            profile.last_compiled = Instant::now();
+        }
+
+        // If in debug mode, notify debugger after execution
+        if self.debug_mode {
+            if let Some(debugger) = &self.debugger {
+                let mut debugger = debugger.lock().unwrap();
+                debugger.notify_function_exit(&function.name)?;
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Internal function execution with speculation and debug support
+    fn run_function_internal(&mut self, function: &Function) -> Result<i64, KslError> {
+        // If in debug mode, check for breakpoints
+        if self.debug_mode {
+            if let Some(debugger) = &self.debugger {
+                let debugger = debugger.lock().unwrap();
+                if debugger.has_breakpoint(&function.name) {
+                    debug!("Hit breakpoint in function: {}", function.name);
+                    // Wait for debugger commands
+                    debugger.handle_breakpoint()?;
+                }
+            }
+        }
+
+        // Check if function is already compiled
+        if let Some(jit_fn) = self.function_cache.get(&function.name) {
+            // Execute with speculation
+            let result = unsafe { jit_fn.call() };
+            self.update_speculation_stats(&function.name, true);
+            return Ok(result);
+        }
+
+        // Compile function with current speculative optimizations
+        let module = self.context.create_module(&function.name);
+        let mut codegen = LLVMCodegen::new(&self.context, &function.name);
+
+        // Apply speculative optimizations
+        if let Some(opts) = self.speculative_opts.get(&function.name) {
+            for opt in opts {
+                self.apply_speculation(&mut codegen, opt)?;
+            }
+        }
+
+        // Generate code
+        codegen.generate(&[AstNode::Function(function.clone())], &self.metrics)?;
+
+        // Add to execution engine
+        let jit_fn = unsafe {
+            self.execution_engine.get_function(&function.name)
+                .map_err(|e| KslError::type_error(
+                    format!("Failed to get JIT function: {}", e),
+                    SourcePosition::new(1, 1),
+                ))?
+        };
+
+        self.function_cache.insert(function.name.clone(), jit_fn);
+        
+        // Execute
+        let result = unsafe { jit_fn.call() };
+        Ok(result)
+    }
+
+    /// Recompiles a function with updated profiling data
+    fn recompile_function(&mut self, function: &Function) -> Result<(), KslError> {
+        debug!("Starting function recompilation: {}", function.name);
+
+        // Create new module for recompilation
+        let module = self.context.create_module(&function.name);
+        let mut codegen = LLVMCodegen::new(&self.context, &function.name);
+
+        // Update performance metrics
+        self.update_metrics(&function.name);
+
+        // Apply optimizations based on profiling
+        self.apply_profile_optimizations(&mut codegen, &function.name)?;
+
+        // Generate optimized code
+        codegen.generate(&[AstNode::Function(function.clone())], &self.metrics)?;
+
+        // Update function cache
+        let jit_fn = unsafe {
+            self.execution_engine.get_function(&function.name)
+                .map_err(|e| KslError::type_error(
+                    format!("Failed to get JIT function: {}", e),
+                    SourcePosition::new(1, 1),
+                ))?
+        };
+
+        self.function_cache.insert(function.name.clone(), jit_fn);
+        debug!("Completed function recompilation: {}", function.name);
+
+        Ok(())
+    }
+
+    /// Updates performance metrics based on profiling data
+    fn update_metrics(&mut self, function_name: &str) {
+        let profiles = self.profile_data.lock().unwrap();
+        if let Some(profile) = profiles.get(function_name) {
+            if profile.is_hot() {
+                self.metrics.hot_functions.insert(function_name.to_string());
+            }
+            
+            // Update speculation success rates
+            if let Some(opts) = self.speculative_opts.get(function_name) {
+                for opt in opts {
+                    match opt {
+                        SpeculativeOpt::Inline { callee, success_rate } => {
+                            self.metrics.inline_candidates.insert(callee.clone());
+                        }
+                        SpeculativeOpt::LoopUnroll { loop_id, unroll_factor, success_rate } => {
+                            self.metrics.unroll_candidates.insert(*loop_id);
+                        }
+                    }
+                }
+            }
         }
     }
 
-    /// Compile and execute a file with JIT.
-    pub fn jit_compile_and_run(&mut self, bytecode: Bytecode) -> Result<(), KslError> {
-        let pos = SourcePosition::new(1, 1);
-
-        // Step 1: Initial execution with profiling
-        let mut initial_bytecode = bytecode.clone();
-        self.vm.execute_bytecode(&initial_bytecode, &mut self.profile)?;
-
-        if !self.vm.jit_enabled {
-            return Ok(()); // JIT is disabled
-        }
-
-        // Step 2: Identify hot paths and networking operations
-        let mut hot_bytecode = Bytecode::new(vec![], vec![]);
-        let instructions = bytecode.instructions();
-        let mut is_networking = false;
-
-        for ip in 0..instructions.len() {
-            // Check if this is a networking opcode
-            if let Some(opcode) = KapraOpCode::from_u8(instructions[ip]) {
-                is_networking = matches!(
-                    opcode,
-                    KapraOpCode::HttpGet
-                        | KapraOpCode::HttpPost
-                        | KapraOpCode::TcpConnect
-                        | KapraOpCode::TcpSend
-                        | KapraOpCode::TcpReceive
-                );
+    /// Applies optimizations based on profiling data
+    fn apply_profile_optimizations(
+        &self,
+        codegen: &mut LLVMCodegen,
+        function_name: &str,
+    ) -> Result<(), KslError> {
+        let profiles = self.profile_data.lock().unwrap();
+        if let Some(profile) = profiles.get(function_name) {
+            // Add aggressive inlining for frequently called functions
+            if profile.call_count > HOT_FUNCTION_THRESHOLD * 2 {
+                codegen.add_aggressive_inlining()?;
             }
 
-            // Record execution with networking context
-            self.profile.record_execution(ip, is_networking);
-
-            if self.profile.is_hot(ip, self.hot_path_threshold)
-                || self.profile.is_networking_hot(ip, self.hot_path_threshold)
-            {
-                hot_bytecode.instructions.extend_from_slice(&instructions[ip..instructions.len()]);
-                hot_bytecode.constants = bytecode.constants.clone();
-                hot_bytecode.networking_ops = bytecode.networking_ops.clone();
-                break;
+            // Add loop unrolling for hot loops
+            if profile.avg_time > Duration::from_micros(100) {
+                codegen.add_loop_unrolling()?;
             }
-        }
 
-        // Step 3: Optimize the hot paths
-        if !hot_bytecode.instructions.is_empty() {
-            self.optimizer.optimize(&mut hot_bytecode)?;
-
-            // Step 4: Generate IR and compile to machine code
-            let ir = self.generate_ir(&hot_bytecode)?;
-            let machine_code = self.jit_backend.compile_ir(&ir)?;
-
-            // Step 5: Execute the JIT-compiled code
-            self.vm.execute_native(&machine_code.code)?;
-        } else {
-            // No hot paths, execute the original bytecode
-            self.vm.execute_bytecode(&bytecode, &mut self.profile)?;
+            // Add vectorization for array operations
+            if self.metrics.has_array_operations(function_name) {
+                codegen.add_vectorization()?;
+            }
         }
 
         Ok(())
     }
 
-    /// Generate IR from optimized bytecode.
-    fn generate_ir(&self, bytecode: &Bytecode) -> Result<JitIR, KslError> {
-        let pos = SourcePosition::new(1, 1);
-        let mut ir = JitIR {
-            instructions: Vec::new(),
-            networking_ops: Vec::new(),
-        };
-
-        for &instr in bytecode.instructions() {
-            match KapraOpCode::from_u8(instr) {
-                Some(KapraOpCode::LoadConst) => {
-                    ir.instructions.push(JitInstruction::LoadConst(0)); // Placeholder
+    /// Applies a speculative optimization
+    fn apply_speculation(
+        &self,
+        codegen: &mut LLVMCodegen,
+        opt: &SpeculativeOpt,
+    ) -> Result<(), KslError> {
+        match opt {
+            SpeculativeOpt::Inline { callee, success_rate } => {
+                if *success_rate > 0.8 {
+                    codegen.add_function_inlining(callee)?;
                 }
-                Some(KapraOpCode::LoadDirect) => {
-                    ir.instructions.push(JitInstruction::LoadDirect(0)); // Placeholder
+            }
+            SpeculativeOpt::LoopUnroll { loop_id, unroll_factor, success_rate } => {
+                if *success_rate > 0.7 {
+                    codegen.add_loop_unrolling_with_factor(*loop_id, *unroll_factor)?;
                 }
-                Some(KapraOpCode::Add) => {
-                    ir.instructions.push(JitInstruction::Add);
-                }
-                Some(opcode) if matches!(
-                    opcode,
-                    KapraOpCode::HttpGet
-                        | KapraOpCode::HttpPost
-                        | KapraOpCode::TcpConnect
-                        | KapraOpCode::TcpSend
-                        | KapraOpCode::TcpReceive
-                ) => {
-                    // Handle networking operations
-                    if let Some(net_op) = bytecode.networking_ops().get(0) {
-                        ir.networking_ops.push(net_op.clone());
-                        ir.instructions.push(JitInstruction::Network(net_op.clone()));
-                    }
-                }
-                _ => {} // Other opcodes
             }
         }
+        Ok(())
+    }
 
-        Ok(ir)
+    /// Updates speculation statistics
+    fn update_speculation_stats(&mut self, function_name: &str, success: bool) {
+        let mut profiles = self.profile_data.lock().unwrap();
+        if let Some(profile) = profiles.get_mut(function_name) {
+            profile.record_speculation(success);
+
+            // Update speculation strategies based on success rate
+            if let Some(opts) = self.speculative_opts.get_mut(function_name) {
+                opts.retain(|opt| {
+                    match opt {
+                        SpeculativeOpt::Inline { success_rate, .. } => {
+                            *success_rate = profile.speculation_success_rate();
+                            *success_rate > 0.5 // Keep if success rate is above 50%
+                        }
+                        SpeculativeOpt::LoopUnroll { success_rate, .. } => {
+                            *success_rate = profile.speculation_success_rate();
+                            *success_rate > 0.4 // Keep if success rate is above 40%
+                        }
+                    }
+                });
+            }
+        }
     }
 }
-
-/// CLI integration for `ksl jit <file>` (used by ksl_cli.rs).
-pub fn run_jit(file_path: &str) -> Result<(), String> {
-    // Step 1: Load the bytecode (simplified, in reality this would use ksl_compiler.rs)
-    let bytecode = Bytecode::new(
-        vec![OPCODE_PUSH, 42, OPCODE_PUSH, 10, OPCODE_ADD, OPCODE_LOAD_CONST, 0],
-        vec![Constant::String("example".to_string())],
-    );
-
-    // Step 2: Create the JIT compiler and run
-    let mut jit = JITCompiler::new(true);
-    jit.jit_compile_and_run(bytecode)?;
-
-    Ok(())
-}
-
-// Simplified opcodes for the example
-const OPCODE_PUSH: u8 = 0x01;
-const OPCODE_ADD: u8 = 0x02;
-const OPCODE_LOAD_CONST: u8 = 0x03;
-const OPCODE_LOAD_DIRECT: u8 = 0x04;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ksl_ast::{Type, Expr};
 
     #[test]
-    fn test_jit_basic_execution() {
-        let mut compiler = JITCompiler::new(true);
-        let bytecode = Bytecode::new(vec![OPCODE_PUSH, 42, OPCODE_ADD], vec![]);
-        assert!(compiler.jit_compile_and_run(bytecode).is_ok());
+    fn test_jit_simple_function() {
+        let mut jit = JITCompiler::new(false).unwrap();
+        
+        let function = Function {
+            name: "test".to_string(),
+            params: vec![],
+            ret_type: Type::Int,
+            body: vec![
+                Expr::Literal(42.into()),
+            ],
+            attributes: vec![],
+        };
+
+        let result = jit.run_function(&function).unwrap();
+        assert_eq!(result, 42);
     }
 
     #[test]
-    fn test_jit_with_hot_path() {
-        let mut compiler = JITCompiler::new(true);
-        let mut bytecode = Bytecode::new(vec![], vec![]);
+    fn test_jit_hot_recompilation() {
+        let mut jit = JITCompiler::new(false).unwrap();
         
-        // Create a hot path with networking operations
-        bytecode.instructions.extend_from_slice(&[
-            OPCODE_PUSH, 42,
-            KapraOpCode::HttpGet as u8,
-            OPCODE_ADD,
-        ]);
-        
-        bytecode.networking_ops.push(NetworkingOp {
-            op_type: NetworkingOpType::HttpGet,
-            endpoint: "http://example.com".to_string(),
-            headers: None,
-            data: None,
-        });
+        let function = Function {
+            name: "hot_fn".to_string(),
+            params: vec![],
+            ret_type: Type::Int,
+            body: vec![
+                Expr::Literal(1.into()),
+            ],
+            attributes: vec![],
+        };
 
-        assert!(compiler.jit_compile_and_run(bytecode).is_ok());
+        // Run function many times to trigger recompilation
+        for _ in 0..HOT_FUNCTION_THRESHOLD + 1 {
+            jit.run_function(&function).unwrap();
+        }
+
+        let profiles = jit.profile_data.lock().unwrap();
+        let profile = profiles.get("hot_fn").unwrap();
+        assert!(profile.is_hot());
     }
 
     #[test]
-    fn test_jit_without_jit_enabled() {
-        let mut compiler = JITCompiler::new(false);
-        let bytecode = Bytecode::new(vec![OPCODE_PUSH, 42], vec![]);
-        assert!(compiler.jit_compile_and_run(bytecode).is_ok());
+    fn test_jit_speculation() {
+        let mut jit = JITCompiler::new(false).unwrap();
+        
+        // Create a function with a loop
+        let function = Function {
+            name: "loop_fn".to_string(),
+            params: vec![],
+            ret_type: Type::Int,
+            body: vec![
+                // Simulated loop
+                Expr::Loop {
+                    id: 1,
+                    count: 10,
+                    body: vec![
+                        Expr::Literal(1.into()),
+                    ],
+                },
+            ],
+            attributes: vec![],
+        };
+
+        // Add speculative optimization
+        jit.speculative_opts.insert(
+            "loop_fn".to_string(),
+            vec![
+                SpeculativeOpt::LoopUnroll {
+                    loop_id: 1,
+                    unroll_factor: 4,
+                    success_rate: 0.9,
+                },
+            ],
+        );
+
+        let result = jit.run_function(&function).unwrap();
+        assert_eq!(result, 10); // Sum of loop iterations
+
+        let profiles = jit.profile_data.lock().unwrap();
+        let profile = profiles.get("loop_fn").unwrap();
+        assert!(profile.speculation_success > 0);
     }
 }

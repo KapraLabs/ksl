@@ -1,0 +1,83 @@
+{
+    "name": "ksl-scaffold",
+    "displayName": "KSL Scaffold",
+    "description": "KSL Scaffold System Integration for VS Code",
+    "version": "0.1.0",
+    "icon": "resources/KapraLabs_KSL.webp",
+    "engines": {
+        "vscode": "^1.60.0"
+    },
+    "categories": [
+        "Other"
+    ],
+    "activationEvents": [
+        "onCommand:ksl.scaffold",
+        "onView:kslScaffoldExplorer",
+        "onCommand:ksl.scaffold.selectTemplate",
+        "onCommand:ksl.scaffold.refresh",
+        "onCommand:ksl.scaffold.startSimulator",
+        "onCommand:ksl.scaffold.stopSimulator"
+    ],
+    "main": "./out/extension.js",
+    "contributes": {
+        "commands": [
+            {
+                "command": "ksl.scaffold",
+                "title": "KSL: Scaffold Project/Component"
+            },
+            {
+                "command": "ksl.scaffold.selectTemplate",
+                "title": "KSL: Select Template"
+            },
+            {
+                "command": "ksl.scaffold.refresh",
+                "title": "KSL: Refresh Templates"
+            },
+            {
+                "command": "ksl.scaffold.startSimulator",
+                "title": "KSL: Start Simulator"
+            },
+            {
+                "command": "ksl.scaffold.stopSimulator",
+                "title": "KSL: Stop Simulator"
+            }
+        ],
+        "views": {
+            "explorer": [
+                {
+                    "id": "kslScaffoldExplorer",
+                    "name": "KSL Scaffold",
+                    "icon": "resources/KapraLabs_KSL.webp"
+                }
+            ]
+        },
+        "viewsWelcome": [
+            {
+                "view": "kslScaffoldExplorer",
+                "contents": "Welcome to KSL Scaffold Explorer!\n[Start Scaffolding](command:ksl.scaffold)"
+            }
+        ]
+    },
+    "scripts": {
+        "vscode:prepublish": "npm run compile",
+        "compile": "tsc -p ./",
+        "watch": "tsc -watch -p ./",
+        "pretest": "npm run compile && npm run lint",
+        "lint": "eslint src --ext ts",
+        "test": "node ./out/test/runTest.js",
+        "package": "vsce package"
+    },
+    "devDependencies": {
+        "@types/vscode": "^1.60.0",
+        "@types/node": "^16.11.7",
+        "@types/mocha": "^9.1.0",
+        "@types/glob": "^7.2.0",
+        "@typescript-eslint/eslint-plugin": "^5.30.0",
+        "@typescript-eslint/parser": "^5.30.0",
+        "@vscode/test-electron": "^2.1.3",
+        "eslint": "^8.13.0",
+        "glob": "^7.2.0",
+        "mocha": "^9.2.2",
+        "typescript": "^4.7.2"
+    }
+}

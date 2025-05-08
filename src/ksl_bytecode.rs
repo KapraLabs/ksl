@@ -3,6 +3,7 @@
 
 use crate::ksl_types::Type;
 use std::fmt;
+use std::collections::HashMap;
 
 // Assume ksl_jit.rs provides JitCompiler
 mod ksl_jit {
@@ -587,77 +588,235 @@ impl KapraInstruction {
     }
 }
 
+/// Configuration for bytecode generation
+#[derive(Debug, Clone)]
+pub struct BytecodeConfig {
+    /// Whether to skip bytecode generation for LLVM compilation
+    pub skip_for_llvm: bool,
+    /// Whether to enable micro-VM optimizations
+    pub enable_micro_vm: bool,
+    /// Whether to generate LLVM IR
+    pub generate_llvm_ir: bool,
+    /// Target architecture for micro-VM
+    pub micro_vm_target: Option<String>,
+}
+
+impl Default for BytecodeConfig {
+    fn default() -> Self {
+        BytecodeConfig {
+            skip_for_llvm: false,
+            enable_micro_vm: false,
+            generate_llvm_ir: false,
+            micro_vm_target: None,
+        }
+    }
+}
+
 /// Bytecode program structure.
 #[derive(Debug, PartialEq)]
 pub struct KapraBytecode {
     pub instructions: Vec<KapraInstruction>,
+    pub config: BytecodeConfig,
+    pub llvm_ir: Option<String>,
+    pub micro_vm_optimizations: Option<MicroVMOptimizations>,
+}
+
+/// Micro-VM specific optimizations
+#[derive(Debug, Clone)]
+pub struct MicroVMOptimizations {
+    pub register_usage: HashMap<u8, usize>,
+    pub hot_paths: Vec<Vec<usize>>,
+    pub constant_pool: Vec<Vec<u8>>,
+    pub instruction_cache: HashMap<KapraOpCode, usize>,
 }
 
 impl KapraBytecode {
-    /// Creates a new bytecode program.
-    /// @returns A new `KapraBytecode` instance.
-    /// @example
-    /// ```ksl
-    /// let program = KapraBytecode::new();
-    /// ```
-    pub fn new() -> Self {
+    /// Creates a new bytecode program with configuration
+    pub fn new_with_config(config: BytecodeConfig) -> Self {
         KapraBytecode {
             instructions: Vec::new(),
+            config,
+            llvm_ir: None,
+            micro_vm_optimizations: None,
         }
     }
 
-    /// Adds an instruction to the program.
-    /// @param instruction The instruction to add.
-    /// @example
-    /// ```ksl
-    /// let mut program = KapraBytecode::new();
-    /// program.add_instruction(KapraInstruction::new(
-    ///     KapraOpCode::Halt,
-    ///     vec![],
-    ///     None
-    /// ));
-    /// ```
+    /// Creates a new bytecode program with default configuration
+    pub fn new() -> Self {
+        Self::new_with_config(BytecodeConfig::default())
+    }
+
+    /// Adds an instruction to the program with micro-VM optimizations
     pub fn add_instruction(&mut self, instruction: KapraInstruction) {
-        self.instructions.push(instruction);
+        if self.config.skip_for_llvm {
+            return;
+        }
+
+        self.instructions.push(instruction.clone());
+
+        if self.config.enable_micro_vm {
+            self.apply_micro_vm_optimizations(&instruction);
+        }
     }
 
-    /// Encodes the entire program to bytes.
-    /// @returns A vector of bytes representing the program.
-    /// @example
-    /// ```ksl
-    /// let mut program = KapraBytecode::new();
-    /// program.add_instruction(KapraInstruction::new(
-    ///     KapraOpCode::Halt,
-    ///     vec![],
-    ///     None
-    /// ));
-    /// let bytes = program.encode();
-    /// ```
-    pub fn encode(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        for instruction in &self.instructions {
-            bytes.extend(instruction.encode());
+    /// Applies micro-VM specific optimizations
+    fn apply_micro_vm_optimizations(&mut self, instruction: &KapraInstruction) {
+        if self.micro_vm_optimizations.is_none() {
+            self.micro_vm_optimizations = Some(MicroVMOptimizations {
+                register_usage: HashMap::new(),
+                hot_paths: Vec::new(),
+                constant_pool: Vec::new(),
+                instruction_cache: HashMap::new(),
+            });
         }
-        bytes
+
+        if let Some(optimizations) = &mut self.micro_vm_optimizations {
+            // Track register usage
+            for operand in &instruction.operands {
+                if let Operand::Register(reg) = operand {
+                    *optimizations.register_usage.entry(*reg).or_insert(0) += 1;
+                }
+            }
+
+            // Track instruction frequency
+            *optimizations.instruction_cache.entry(instruction.opcode.clone()).or_insert(0) += 1;
+
+            // Track constants
+            for operand in &instruction.operands {
+                if let Operand::Immediate(data) = operand {
+                    if !optimizations.constant_pool.contains(data) {
+                        optimizations.constant_pool.push(data.clone());
+                    }
+                }
+            }
+        }
     }
 
-    /// Decodes a program from bytes.
-    /// @param bytes The input byte slice.
-    /// @returns An `Option` containing the decoded program, or `None` if invalid.
-    /// @example
-    /// ```ksl
-    /// let bytes = vec![0x05];
-    /// let program = KapraBytecode::decode(&bytes).unwrap();
-    /// assert_eq!(program.instructions[0].opcode, KapraOpCode::Halt);
-    /// ```
-    pub fn decode(bytes: &[u8]) -> Option<Self> {
-        let mut instructions = Vec::new();
-        let mut offset = 0;
-        while offset < bytes.len() {
-            let instruction = KapraInstruction::decode(bytes, &mut offset)?;
-            instructions.push(instruction);
+    /// Generates LLVM IR for the program
+    pub fn generate_llvm_ir(&mut self) -> Result<String, String> {
+        if !self.config.generate_llvm_ir {
+            return Ok(String::new());
         }
-        Some(KapraBytecode { instructions })
+
+        let mut ir = String::new();
+        ir.push_str("; ModuleID = 'ksl_module'\n");
+        ir.push_str("target triple = \"x86_64-unknown-linux-gnu\"\n\n");
+
+        // Generate function declarations
+        ir.push_str("declare i32 @printf(i8*, ...)\n");
+        ir.push_str("declare void @llvm.memcpy.p0i8.p0i8.i64(i8*, i8*, i64, i1)\n\n");
+
+        // Generate main function
+        ir.push_str("define i32 @main() {\n");
+        ir.push_str("entry:\n");
+
+        // Generate instructions
+        for (i, instr) in self.instructions.iter().enumerate() {
+            ir.push_str(&format!("  ; Instruction {}\n", i));
+            ir.push_str(&format!("  {}\n", instr.to_jit_ir()));
+        }
+
+        ir.push_str("  ret i32 0\n");
+        ir.push_str("}\n");
+
+        self.llvm_ir = Some(ir.clone());
+        Ok(ir)
+    }
+
+    /// Optimizes the bytecode for micro-VM execution
+    pub fn optimize_for_micro_vm(&mut self) -> Result<(), String> {
+        if !self.config.enable_micro_vm {
+            return Ok(());
+        }
+
+        // Apply register allocation optimization
+        self.optimize_register_allocation()?;
+
+        // Apply constant folding
+        self.optimize_constant_folding()?;
+
+        // Apply instruction reordering
+        self.optimize_instruction_order()?;
+
+        Ok(())
+    }
+
+    /// Optimizes register allocation for micro-VM
+    fn optimize_register_allocation(&mut self) -> Result<(), String> {
+        if let Some(optimizations) = &self.micro_vm_optimizations {
+            let mut register_map = HashMap::new();
+            let mut next_reg = 0;
+
+            // Map frequently used registers to lower numbers
+            let mut register_usage: Vec<_> = optimizations.register_usage.iter().collect();
+            register_usage.sort_by(|a, b| b.1.cmp(a.1));
+
+            for (reg, _) in register_usage {
+                register_map.insert(*reg, next_reg);
+                next_reg += 1;
+            }
+
+            // Update instructions with new register numbers
+            for instr in &mut self.instructions {
+                for operand in &mut instr.operands {
+                    if let Operand::Register(reg) = operand {
+                        *reg = register_map[reg];
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Optimizes constant folding for micro-VM
+    fn optimize_constant_folding(&mut self) -> Result<(), String> {
+        let mut i = 0;
+        while i < self.instructions.len() {
+            let instr = &self.instructions[i];
+            match instr.opcode {
+                KapraOpCode::Add | KapraOpCode::Sub | KapraOpCode::Mul => {
+                    if let [Operand::Register(dst), Operand::Immediate(a), Operand::Immediate(b)] = &instr.operands {
+                        let a_val = u32::from_le_bytes(a.as_slice().try_into().map_err(|_| "Invalid immediate value")?);
+                        let b_val = u32::from_le_bytes(b.as_slice().try_into().map_err(|_| "Invalid immediate value")?);
+                        let result = match instr.opcode {
+                            KapraOpCode::Add => a_val + b_val,
+                            KapraOpCode::Sub => a_val - b_val,
+                            KapraOpCode::Mul => a_val * b_val,
+                            _ => unreachable!(),
+                        };
+                        self.instructions[i] = KapraInstruction::new(
+                            KapraOpCode::Mov,
+                            vec![Operand::Register(*dst), Operand::Immediate(result.to_le_bytes().to_vec())],
+                            instr.type_info.clone(),
+                        );
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        Ok(())
+    }
+
+    /// Optimizes instruction order for micro-VM
+    fn optimize_instruction_order(&mut self) -> Result<(), String> {
+        if let Some(optimizations) = &self.micro_vm_optimizations {
+            // Group instructions by frequency
+            let mut instruction_groups: HashMap<KapraOpCode, Vec<usize>> = HashMap::new();
+            for (i, instr) in self.instructions.iter().enumerate() {
+                instruction_groups.entry(instr.opcode.clone()).or_default().push(i);
+            }
+
+            // Reorder instructions to minimize cache misses
+            let mut new_instructions = Vec::new();
+            for (opcode, indices) in instruction_groups {
+                for idx in indices {
+                    new_instructions.push(self.instructions[idx].clone());
+                }
+            }
+            self.instructions = new_instructions;
+        }
+        Ok(())
     }
 }
 

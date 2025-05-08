@@ -3,6 +3,7 @@
 
 use std::str::Chars;
 use std::iter::Peekable;
+use std::collections::VecDeque;
 
 // Assume ksl_macros.rs provides MacroExpander
 mod ksl_macros {
@@ -78,13 +79,44 @@ enum AstNode {
     Expr {
         kind: ExprKind,
     },
+    ArrayLiteral {
+        elements: Vec<AstNode>,
+        element_type: TypeAnnotation,
+    },
+    ArrayAccess {
+        array: Box<AstNode>,
+        index: Box<AstNode>,
+    },
+    ShardBlock {
+        attributes: Vec<Attribute>,
+        params: Vec<(String, TypeAnnotation)>,
+        body: Vec<AstNode>,
+    },
+    ValidatorBlock {
+        attributes: Vec<Attribute>,
+        params: Vec<(String, TypeAnnotation)>,
+        body: Vec<AstNode>,
+    },
+    ContractBlock {
+        attributes: Vec<Attribute>,
+        name: String,
+        state: Vec<(String, TypeAnnotation)>,
+        methods: Vec<AstNode>,
+    },
 }
 
 /// Type annotations for variables and parameters.
 #[derive(Debug, PartialEq, Clone)]
 enum TypeAnnotation {
     Simple(String),            // e.g., "u32"
-    Array { element: String, size: u32 }, // e.g., "array<u8, 32>"
+    Array { 
+        element: Box<TypeAnnotation>, // e.g., "u8" in array<u8, 32>
+        size: u32,             // e.g., 32 in array<u8, 32>
+    },
+    Result {
+        success: Box<TypeAnnotation>,
+        error: Box<TypeAnnotation>,
+    },
 }
 
 /// Expression kinds within AST nodes.
@@ -110,6 +142,10 @@ enum ExprKind {
         name: String,
         args: Vec<AstNode>,
     },
+    ArrayAccess {
+        array: Box<AstNode>,
+        index: Box<AstNode>,
+    },
 }
 
 /// Parser error type.
@@ -119,11 +155,28 @@ pub struct ParseError {
     pub position: usize,
 }
 
-/// Attribute for function declarations
-#[derive(Debug, PartialEq, Clone)]
-struct Attribute {
-    name: String,
-    args: Vec<String>,
+/// Enhanced attribute system for KSL
+#[derive(Debug, Clone, PartialEq)]
+pub struct Attribute {
+    /// Attribute name (e.g., "shard", "validator", "contract")
+    pub name: String,
+    /// Attribute arguments
+    pub args: Vec<AttributeArg>,
+    /// Source position for error reporting
+    pub position: SourcePosition,
+}
+
+/// Attribute argument types
+#[derive(Debug, Clone, PartialEq)]
+pub enum AttributeArg {
+    /// String argument (e.g., name = "main")
+    String(String),
+    /// Number argument (e.g., size = 32)
+    Number(u64),
+    /// Identifier argument (e.g., type = u32)
+    Ident(String),
+    /// Key-value pair (e.g., config = { size = 32 })
+    KeyValue(String, Box<AttributeArg>),
 }
 
 /// Match arm structure
@@ -296,6 +349,22 @@ impl<'a> Parser<'a> {
 
     fn parse_statement(&mut self) -> Result<AstNode, ParseError> {
         match &self.current {
+            Token::Symbol("#".to_string()) => {
+                // Look ahead for block type
+                let attrs = self.parse_attributes()?;
+                match &self.current {
+                    Token::Keyword(k) => match k.as_str() {
+                        "shard" => self.parse_shard_block(),
+                        "validator" => self.parse_validator_block(),
+                        "contract" => self.parse_contract_block(),
+                        _ => self.parse_fn_decl(), // Regular function with attributes
+                    },
+                    _ => Err(ParseError {
+                        message: "Expected block type after attributes".to_string(),
+                        position: self.lexer.position,
+                    }),
+                }
+            }
             Token::Keyword(k) if k == "let" || k == "const" || k == "var" => self.parse_var_decl(),
             Token::Keyword(k) if k == "fn" => self.parse_fn_decl(),
             Token::Keyword(k) if k == "if" => self.parse_if(),
@@ -400,39 +469,108 @@ impl<'a> Parser<'a> {
 
     fn parse_attributes(&mut self) -> Result<Vec<Attribute>, ParseError> {
         let mut attributes = Vec::new();
-        while let Token::Symbol(s) = &self.current {
-            if s == "#" {
-                self.advance()?;
-                self.expect(Token::Symbol("[".to_string()))?;
-                let name = match &self.current {
-                    Token::Ident(name) => name.clone(),
-                    _ => return Err(ParseError {
-                        message: "Expected attribute name".to_string(),
-                        position: self.lexer.position,
-                    }),
-                };
-                self.advance()?;
-                let mut args = Vec::new();
-                if self.current == Token::Symbol("(".to_string()) {
+        let start_pos = self.lexer.position;
+
+        while self.current == Token::Symbol("#".to_string()) {
+            self.advance()?;
+            self.expect(Token::Symbol("[".to_string()))?;
+
+            // Parse attribute name
+            let name = match &self.current {
+                Token::Ident(name) => {
+                    let name = name.clone();
                     self.advance()?;
-                    while self.current != Token::Symbol(")".to_string()) {
-                        if let Token::String(arg) = &self.current {
-                            args.push(arg.clone());
-                            self.advance()?;
-                            if self.current == Token::Symbol(",".to_string()) {
-                                self.advance()?;
-                            }
-                        }
-                    }
-                    self.expect(Token::Symbol(")".to_string()))?;
+                    name
                 }
-                self.expect(Token::Symbol("]".to_string()))?;
-                attributes.push(Attribute { name, args });
-            } else {
-                break;
+                _ => {
+                    // Error recovery: Skip to next attribute or end
+                    self.recover_to(&[Token::Symbol("]".to_string()), Token::Symbol("#".to_string())])?;
+                    continue;
+                }
+            };
+
+            // Parse attribute arguments
+            let mut args = Vec::new();
+            if self.current == Token::Symbol("(".to_string()) {
+                self.advance()?;
+                while self.current != Token::Symbol(")".to_string()) {
+                    if let Ok(arg) = self.parse_attribute_arg() {
+                        args.push(arg);
+                    } else {
+                        // Error recovery: Skip to end of argument
+                        self.recover_to(&[Token::Symbol(",".to_string()), Token::Symbol(")".to_string())])?;
+                    }
+                    
+                    if self.current == Token::Symbol(",".to_string()) {
+                        self.advance()?;
+                    } else {
+                        break;
+                    }
+                }
+                self.expect(Token::Symbol(")".to_string()))?;
             }
+
+            self.expect(Token::Symbol("]".to_string()))?;
+
+            attributes.push(Attribute {
+                name,
+                args,
+                position: SourcePosition::new(start_pos, self.lexer.position),
+            });
         }
+
         Ok(attributes)
+    }
+
+    /// Parses an attribute argument
+    fn parse_attribute_arg(&mut self) -> Result<AttributeArg, ParseError> {
+        match &self.current {
+            Token::String(s) => {
+                let s = s.clone();
+                self.advance()?;
+                Ok(AttributeArg::String(s))
+            }
+            Token::Number(n) => {
+                let n = n.parse().map_err(|_| ParseError {
+                    message: "Invalid number in attribute".to_string(),
+                    position: self.lexer.position,
+                })?;
+                self.advance()?;
+                Ok(AttributeArg::Number(n))
+            }
+            Token::Ident(i) => {
+                let i = i.clone();
+                self.advance()?;
+                if self.current == Token::Symbol("=".to_string()) {
+                    self.advance()?;
+                    let value = self.parse_attribute_arg()?;
+                    Ok(AttributeArg::KeyValue(i, Box::new(value)))
+                } else {
+                    Ok(AttributeArg::Ident(i))
+                }
+            }
+            _ => Err(ParseError {
+                message: format!("Unexpected token in attribute: {:?}", self.current),
+                position: self.lexer.position,
+            }),
+        }
+    }
+
+    /// Enhanced error recovery
+    fn recover_to(&mut self, sync_tokens: &[Token]) -> Result<(), ParseError> {
+        let mut errors = Vec::new();
+        while !sync_tokens.contains(&self.current) && self.current != Token::EOF {
+            errors.push(format!("Skipping unexpected token: {:?}", self.current));
+            self.advance()?;
+        }
+        if !errors.is_empty() {
+            Err(ParseError {
+                message: errors.join("\n"),
+                position: self.lexer.position,
+            })
+        } else {
+            Ok(())
+        }
     }
 
     fn parse_macro_def(&mut self) -> Result<AstNode, ParseError> {
@@ -504,20 +642,13 @@ impl<'a> Parser<'a> {
             Token::Keyword(k) if k == "array" => {
                 self.advance()?;
                 self.expect(Token::Symbol("<".to_string()))?;
-                let element = match &self.current {
-                    Token::Ident(t) => {
-                        let t = t.clone();
-                        self.advance()?;
-                        t
-                    }
-                    _ => {
-                        return Err(ParseError {
-                            message: "Expected element type".to_string(),
-                            position: self.lexer.position,
-                        })
-                    }
-                };
+                
+                // Parse element type recursively
+                let element = Box::new(self.parse_type_annotation()?);
+                
                 self.expect(Token::Symbol(",".to_string()))?;
+                
+                // Parse size
                 let size = match &self.current {
                     Token::Number(n) => {
                         let n = n.parse::<u32>().map_err(|_| ParseError {
@@ -534,6 +665,7 @@ impl<'a> Parser<'a> {
                         })
                     }
                 };
+                
                 self.expect(Token::Symbol(">".to_string()))?;
                 Ok(TypeAnnotation::Array { element, size })
             }
@@ -545,7 +677,7 @@ impl<'a> Parser<'a> {
             _ => Err(ParseError {
                 message: "Expected type annotation".to_string(),
                 position: self.lexer.position,
-            }),
+            })
         }
     }
 
@@ -741,6 +873,107 @@ impl<'a> Parser<'a> {
             kind: ExprKind::AsyncCall { name, args },
         })
     }
+
+    /// Parses a shard block
+    fn parse_shard_block(&mut self) -> Result<AstNode, ParseError> {
+        let attributes = self.parse_attributes()?;
+        self.expect(Token::Keyword("shard".to_string()))?;
+        
+        self.expect(Token::Symbol("(".to_string()))?;
+        let params = self.parse_params()?;
+        self.expect(Token::Symbol(")".to_string()))?;
+
+        self.expect(Token::Symbol("{".to_string()))?;
+        let mut body = Vec::new();
+        while self.current != Token::Symbol("}".to_string()) && self.current != Token::EOF {
+            body.push(self.parse_statement()?);
+        }
+        self.expect(Token::Symbol("}".to_string()))?;
+
+        Ok(AstNode::ShardBlock {
+            attributes,
+            params,
+            body,
+        })
+    }
+
+    /// Parses a validator block
+    fn parse_validator_block(&mut self) -> Result<AstNode, ParseError> {
+        let attributes = self.parse_attributes()?;
+        self.expect(Token::Keyword("validator".to_string()))?;
+        
+        self.expect(Token::Symbol("(".to_string()))?;
+        let params = self.parse_params()?;
+        self.expect(Token::Symbol(")".to_string()))?;
+
+        self.expect(Token::Symbol("{".to_string()))?;
+        let mut body = Vec::new();
+        while self.current != Token::Symbol("}".to_string()) && self.current != Token::EOF {
+            body.push(self.parse_statement()?);
+        }
+        self.expect(Token::Symbol("}".to_string()))?;
+
+        Ok(AstNode::ValidatorBlock {
+            attributes,
+            params,
+            body,
+        })
+    }
+
+    /// Parses a contract block
+    fn parse_contract_block(&mut self) -> Result<AstNode, ParseError> {
+        let attributes = self.parse_attributes()?;
+        self.expect(Token::Keyword("contract".to_string()))?;
+        
+        let name = match &self.current {
+            Token::Ident(name) => {
+                let name = name.clone();
+                self.advance()?;
+                name
+            }
+            _ => return Err(ParseError {
+                message: "Expected contract name".to_string(),
+                position: self.lexer.position,
+            }),
+        };
+
+        self.expect(Token::Symbol("{".to_string()))?;
+        
+        // Parse state variables
+        let mut state = Vec::new();
+        while self.current == Token::Keyword("let".to_string()) {
+            self.advance()?;
+            let var_name = match &self.current {
+                Token::Ident(name) => {
+                    let name = name.clone();
+                    self.advance()?;
+                    name
+                }
+                _ => return Err(ParseError {
+                    message: "Expected state variable name".to_string(),
+                    position: self.lexer.position,
+                }),
+            };
+            self.expect(Token::Symbol(":".to_string()))?;
+            let var_type = self.parse_type_annotation()?;
+            self.expect(Token::Symbol(";".to_string()))?;
+            state.push((var_name, var_type));
+        }
+
+        // Parse methods
+        let mut methods = Vec::new();
+        while self.current != Token::Symbol("}".to_string()) && self.current != Token::EOF {
+            methods.push(self.parse_fn_decl()?);
+        }
+        self.expect(Token::Symbol("}".to_string()))?;
+
+        Ok(AstNode::ContractBlock {
+            attributes,
+            name,
+            state,
+            methods,
+        })
+    }
 }
 
 /// Public API to parse KSL source code into an AST.
@@ -786,7 +1019,7 @@ mod tests {
                 is_mutable: true,
                 name: "msg".to_string(),
                 type_annot: Some(TypeAnnotation::Array {
-                    element: "u8".to_string(),
+                    element: Box::new(TypeAnnotation::Simple("u8".to_string())),
                     size: 32,
                 }),
                 expr: Box::new(AstNode::Expr {
@@ -1007,5 +1240,69 @@ mod tests {
         } else {
             panic!("Expected Match");
         }
+    }
+
+    #[test]
+    fn test_parse_shard_block() {
+        let input = r#"
+            #[shard(size = 32)]
+            shard(account: array<u8, 32>) {
+                let hash = sha3(account);
+                return hash % 32;
+            }
+        "#;
+        let mut parser = Parser::new(input);
+        let result = parser.parse_program();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_validator_block() {
+        let input = r#"
+            #[validator(stake = 1000000)]
+            validator(block: array<u8, 1024>, signature: array<u8, 2420>) {
+                verify_dilithium(block, signature)
+            }
+        "#;
+        let mut parser = Parser::new(input);
+        let result = parser.parse_program();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_contract_block() {
+        let input = r#"
+            #[contract(version = "1.0")]
+            contract Token {
+                let total_supply: u64;
+                let balances: map<address, u64>;
+
+                fn transfer(to: address, amount: u64) -> bool {
+                    if balances[msg.sender] >= amount {
+                        balances[msg.sender] -= amount;
+                        balances[to] += amount;
+                        return true;
+                    }
+                    return false;
+                }
+            }
+        "#;
+        let mut parser = Parser::new(input);
+        let result = parser.parse_program();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_error_recovery() {
+        let input = r#"
+            #[shard(size = )] // Missing value
+            shard(account: array<u8, 32>) {
+                let hash = sha3(account);
+                return hash % 32;
+            }
+        "#;
+        let mut parser = Parser::new(input);
+        let result = parser.parse_program();
+        assert!(result.is_ok()); // Should recover and continue parsing
     }
 }

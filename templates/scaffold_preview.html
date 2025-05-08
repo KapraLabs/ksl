@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>KSL Scaffold Preview</title>
+    <style>
+        :root {
+            --primary-color: #2196F3;
+            --secondary-color: #1976D2;
+            --background-color: #f5f5f5;
+            --text-color: #333;
+            --border-color: #ddd;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: var(--background-color);
+            color: var(--text-color);
+        }
+
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+
+        h1 {
+            color: var(--primary-color);
+            margin-bottom: 20px;
+        }
+
+        .preview-section {
+            margin-bottom: 20px;
+        }
+
+        .preview-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+
+        .preview-title {
+            font-size: 1.1em;
+            font-weight: 500;
+            color: var(--text-color);
+        }
+
+        .preview-toggle {
+            color: var(--primary-color);
+            cursor: pointer;
+            user-select: none;
+        }
+
+        .file-tree, .ignore-preview {
+            font-family: monospace;
+            margin: 10px 0;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 4px;
+            border: 1px solid var(--border-color);
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        .tree-item {
+            margin: 5px 0;
+            padding-left: 20px;
+            position: relative;
+        }
+
+        .tree-item::before {
+            content: "├─";
+            position: absolute;
+            left: 0;
+            color: var(--border-color);
+        }
+
+        .tree-item:last-child::before {
+            content: "└─";
+        }
+
+        .tree-item.directory {
+            font-weight: bold;
+            color: var(--primary-color);
+        }
+
+        .tree-item.file {
+            color: var(--text-color);
+        }
+
+        .tree-item.ignored {
+            color: #999;
+            text-decoration: line-through;
+        }
+
+        .ignore-preview {
+            font-family: monospace;
+            white-space: pre;
+            color: #666;
+        }
+
+        .button-group {
+            display: flex;
+            gap: 10px;
+            margin-top: 20px;
+        }
+
+        button {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: 500;
+            transition: background-color 0.2s;
+        }
+
+        .primary-button {
+            background-color: var(--primary-color);
+            color: white;
+        }
+
+        .primary-button:hover {
+            background-color: var(--secondary-color);
+        }
+
+        .secondary-button {
+            background-color: #e0e0e0;
+            color: var(--text-color);
+        }
+
+        .secondary-button:hover {
+            background-color: #d0d0d0;
+        }
+
+        .diagnostics {
+            margin-top: 20px;
+            padding: 15px;
+            border-radius: 4px;
+        }
+
+        .diagnostics.warning {
+            background-color: #fff3cd;
+            border: 1px solid #ffeeba;
+            color: #856404;
+        }
+
+        .diagnostics.error {
+            background-color: #f8d7da;
+            border: 1px solid #f5c6cb;
+            color: #721c24;
+        }
+
+        .simulator-controls {
+            margin-top: 20px;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 4px;
+            border: 1px solid var(--border-color);
+        }
+
+        .simulator-status {
+            margin-top: 10px;
+            padding: 10px;
+            border-radius: 4px;
+            background: #e9ecef;
+        }
+
+        .simulator-status.running {
+            background: #d4edda;
+            color: #155724;
+        }
+
+        .simulator-status.error {
+            background: #f8d7da;
+            color: #721c24;
+        }
+
+        .template-search {
+            margin-bottom: 20px;
+        }
+
+        .template-search input {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            font-size: 14px;
+        }
+
+        .template-suggestions {
+            position: absolute;
+            background: white;
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            max-height: 200px;
+            overflow-y: auto;
+            width: 100%;
+            z-index: 1000;
+        }
+
+        .template-suggestion {
+            padding: 8px;
+            cursor: pointer;
+        }
+
+        .template-suggestion:hover {
+            background: #f8f9fa;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>KSL Scaffold Preview</h1>
+
+        <div class="template-search">
+            <input type="text" id="template-search" placeholder="Search templates..." oninput="searchTemplates(this.value)">
+            <div id="template-suggestions" class="template-suggestions" style="display: none;"></div>
+        </div>
+        
+        <div class="preview-section">
+            <div class="preview-header">
+                <span class="preview-title">File Tree Preview</span>
+                <span class="preview-toggle" onclick="togglePreview('file-tree')">[Toggle]</span>
+            </div>
+            <div id="file-tree" class="file-tree">
+                <!-- File tree will be populated here -->
+            </div>
+        </div>
+
+        <div class="preview-section">
+            <div class="preview-header">
+                <span class="preview-title">Ignored Files (.kslignore)</span>
+                <span class="preview-toggle" onclick="togglePreview('ignore-preview')">[Toggle]</span>
+            </div>
+            <div id="ignore-preview" class="ignore-preview">
+                <!-- Ignored files will be shown here -->
+            </div>
+        </div>
+
+        <div class="simulator-controls">
+            <div class="preview-header">
+                <span class="preview-title">Test Simulator</span>
+            </div>
+            <button class="primary-button" onclick="startSimulator()">Start Simulator</button>
+            <button class="secondary-button" onclick="stopSimulator()">Stop Simulator</button>
+            <div id="simulator-status" class="simulator-status">Not running</div>
+        </div>
+
+        <div id="diagnostics" class="diagnostics" style="display: none;">
+            <!-- Diagnostics will be shown here -->
+        </div>
+
+        <div class="button-group">
+            <button class="primary-button" onclick="confirmScaffold()">Confirm Scaffold</button>
+            <button class="secondary-button" onclick="cancelScaffold()">Cancel</button>
+        </div>
+    </div>
+
+    <script>
+        // Initialize state
+        let state = {
+            fileTree: [],
+            diagnostics: [],
+            ignoredFiles: [],
+            simulatorRunning: false,
+            templates: []
+        };
+
+        // Update file tree display
+        function updateFileTree(tree) {
+            const container = document.getElementById('file-tree');
+            container.innerHTML = renderTree(tree);
+        }
+
+        // Render tree structure
+        function renderTree(items, level = 0) {
+            return items.map(item => {
+                const indent = '  '.repeat(level);
+                const prefix = level === 0 ? '' : '├─ ';
+                const className = item.type === 'directory' ? 'directory' : 'file';
+                const isIgnored = state.ignoredFiles.includes(item.path);
+                
+                let html = `<div class="tree-item ${className} ${isIgnored ? 'ignored' : ''}">${prefix}${item.name}</div>`;
+                
+                if (item.children) {
+                    html += renderTree(item.children, level + 1);
+                }
+                
+                return html;
+            }).join('');
+        }
+
+        // Update ignored files preview
+        function updateIgnorePreview(ignoredFiles) {
+            const container = document.getElementById('ignore-preview');
+            container.textContent = ignoredFiles.join('\n');
+        }
+
+        // Show diagnostics
+        function showDiagnostics(diagnostics) {
+            const container = document.getElementById('diagnostics');
+            
+            if (diagnostics.length === 0) {
+                container.style.display = 'none';
+                return;
+            }
+
+            const hasErrors = diagnostics.some(d => d.severity === 'error');
+            container.className = `diagnostics ${hasErrors ? 'error' : 'warning'}`;
+            
+            container.innerHTML = diagnostics.map(d => `
+                <div class="diagnostic-item">
+                    <strong>${d.severity.toUpperCase()}:</strong> ${d.message}
+                </div>
+            `).join('');
+            
+            container.style.display = 'block';
+        }
+
+        // Toggle preview section
+        function togglePreview(id) {
+            const element = document.getElementById(id);
+            element.style.display = element.style.display === 'none' ? 'block' : 'none';
+        }
+
+        // Start simulator
+        function startSimulator() {
+            if (state.simulatorRunning) return;
+            
+            vscode.postMessage({ command: 'startSimulator' });
+            state.simulatorRunning = true;
+            
+            const status = document.getElementById('simulator-status');
+            status.className = 'simulator-status running';
+            status.textContent = 'Running...';
+        }
+
+        // Stop simulator
+        function stopSimulator() {
+            if (!state.simulatorRunning) return;
+            
+            vscode.postMessage({ command: 'stopSimulator' });
+            state.simulatorRunning = false;
+            
+            const status = document.getElementById('simulator-status');
+            status.className = 'simulator-status';
+            status.textContent = 'Not running';
+        }
+
+        // Search templates
+        function searchTemplates(query) {
+            if (!query) {
+                document.getElementById('template-suggestions').style.display = 'none';
+                return;
+            }
+
+            const suggestions = state.templates.filter(t => 
+                t.name.toLowerCase().includes(query.toLowerCase()) ||
+                t.description.toLowerCase().includes(query.toLowerCase())
+            );
+
+            const container = document.getElementById('template-suggestions');
+            container.innerHTML = suggestions.map(t => `
+                <div class="template-suggestion" onclick="selectTemplate('${t.id}')">
+                    <strong>${t.name}</strong><br>
+                    ${t.description}
+                </div>
+            `).join('');
+
+            container.style.display = suggestions.length ? 'block' : 'none';
+        }
+
+        // Select template
+        function selectTemplate(templateId) {
+            vscode.postMessage({ 
+                command: 'selectTemplate',
+                templateId
+            });
+            document.getElementById('template-suggestions').style.display = 'none';
+        }
+
+        // Confirm scaffold
+        function confirmScaffold() {
+            vscode.postMessage({ command: 'confirmScaffold' });
+        }
+
+        // Cancel scaffold
+        function cancelScaffold() {
+            vscode.postMessage({ command: 'cancelScaffold' });
+        }
+
+        // Handle messages from extension
+        window.addEventListener('message', event => {
+            const message = event.data;
+            
+            switch (message.command) {
+                case 'updatePreview':
+                    state.fileTree = message.fileTree;
+                    state.diagnostics = message.diagnostics;
+                    state.ignoredFiles = message.ignoredFiles || [];
+                    updateFileTree(state.fileTree);
+                    updateIgnorePreview(state.ignoredFiles);
+                    showDiagnostics(state.diagnostics);
+                    break;
+                case 'updateTemplates':
+                    state.templates = message.templates;
+                    break;
+                case 'simulatorStatus':
+                    const status = document.getElementById('simulator-status');
+                    status.className = `simulator-status ${message.status}`;
+                    status.textContent = message.message;
+                    state.simulatorRunning = message.status === 'running';
+                    break;
+            }
+        });
+    </script>
+</body>
+</html> 

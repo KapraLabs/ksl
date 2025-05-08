@@ -44,6 +44,82 @@ struct AsyncAnalysisRules {
     require_error_handling: bool,
 }
 
+/// Transaction metrics for blockchain operations
+#[derive(Debug)]
+struct TransactionMetrics {
+    /// Transaction latency statistics
+    latency: LatencyStats,
+    /// Validator throughput metrics
+    validator_throughput: ThroughputStats,
+    /// Gas usage statistics
+    gas_stats: GasStats,
+    /// Shard operation metrics
+    shard_metrics: ShardMetrics,
+}
+
+/// Latency statistics for transactions
+#[derive(Debug)]
+struct LatencyStats {
+    /// Average transaction latency
+    avg_latency: Duration,
+    /// Minimum transaction latency
+    min_latency: Duration,
+    /// Maximum transaction latency
+    max_latency: Duration,
+    /// 95th percentile latency
+    p95_latency: Duration,
+    /// Transaction count
+    tx_count: u64,
+}
+
+/// Throughput statistics for validators
+#[derive(Debug)]
+struct ThroughputStats {
+    /// Transactions per second
+    tps: f64,
+    /// Peak TPS observed
+    peak_tps: f64,
+    /// Average block time
+    avg_block_time: Duration,
+    /// Validator count
+    validator_count: u32,
+}
+
+/// Gas usage statistics
+#[derive(Debug)]
+struct GasStats {
+    /// Average gas per transaction
+    avg_gas: u64,
+    /// Total gas used
+    total_gas: u64,
+    /// Gas limit utilization
+    gas_utilization: f64,
+}
+
+/// Shard operation metrics
+#[derive(Debug)]
+struct ShardMetrics {
+    /// Cross-shard transaction count
+    cross_shard_tx_count: u64,
+    /// Shard sync latency
+    shard_sync_latency: Duration,
+    /// Shard count
+    shard_count: u32,
+}
+
+/// Profile-guided optimization data
+#[derive(Debug)]
+struct PgoData {
+    /// Hot functions for optimization
+    hot_functions: HashSet<String>,
+    /// Loop unrolling candidates
+    unroll_candidates: HashSet<u32>,
+    /// Inlining candidates
+    inline_candidates: HashSet<String>,
+    /// Branch prediction stats
+    branch_stats: HashMap<u32, f64>,
+}
+
 /// Analyzer state with async support
 pub struct Analyzer {
     module_system: ModuleSystem,
@@ -100,6 +176,162 @@ impl Analyzer {
             return Err(errors);
         }
         Ok(())
+    }
+
+    /// Collects transaction metrics during execution
+    fn collect_transaction_metrics(&mut self, vm: &KapraVM) -> TransactionMetrics {
+        let mut latencies = Vec::new();
+        let mut tps_samples = Vec::new();
+        let mut gas_usage = Vec::new();
+        let mut cross_shard_txs = 0;
+        let mut shard_sync_times = Vec::new();
+
+        // Process VM execution logs
+        for (timestamp, event) in vm.execution_log.iter() {
+            match event {
+                ExecutionEvent::Transaction { latency, gas, is_cross_shard } => {
+                    latencies.push(*latency);
+                    gas_usage.push(*gas);
+                    if *is_cross_shard {
+                        cross_shard_txs += 1;
+                    }
+                }
+                ExecutionEvent::Block { tx_count, time } => {
+                    let tps = *tx_count as f64 / time.as_secs_f64();
+                    tps_samples.push(tps);
+                }
+                ExecutionEvent::ShardSync { latency } => {
+                    shard_sync_times.push(*latency);
+                }
+            }
+        }
+
+        // Calculate latency statistics
+        latencies.sort();
+        let tx_count = latencies.len() as u64;
+        let avg_latency = if !latencies.is_empty() {
+            Duration::from_secs_f64(
+                latencies.iter().map(|d| d.as_secs_f64()).sum::<f64>() / latencies.len() as f64
+            )
+        } else {
+            Duration::from_secs(0)
+        };
+        let min_latency = latencies.first().cloned().unwrap_or_else(|| Duration::from_secs(0));
+        let max_latency = latencies.last().cloned().unwrap_or_else(|| Duration::from_secs(0));
+        let p95_index = ((latencies.len() as f64 * 0.95) as usize).max(1) - 1;
+        let p95_latency = latencies.get(p95_index).cloned().unwrap_or_else(|| Duration::from_secs(0));
+
+        // Calculate throughput statistics
+        let tps = if !tps_samples.is_empty() {
+            tps_samples.iter().sum::<f64>() / tps_samples.len() as f64
+        } else {
+            0.0
+        };
+        let peak_tps = tps_samples.iter().fold(0.0, |max, &x| max.max(x));
+        let avg_block_time = Duration::from_secs_f64(
+            vm.execution_log.iter()
+                .filter_map(|(_, event)| {
+                    if let ExecutionEvent::Block { time, .. } = event {
+                        Some(time.as_secs_f64())
+                    } else {
+                        None
+                    }
+                })
+                .sum::<f64>() / tps_samples.len().max(1) as f64
+        );
+
+        // Calculate gas statistics
+        let total_gas = gas_usage.iter().sum();
+        let avg_gas = if !gas_usage.is_empty() {
+            total_gas / gas_usage.len() as u64
+        } else {
+            0
+        };
+        let gas_utilization = total_gas as f64 / (vm.gas_limit as f64 * tps_samples.len() as f64);
+
+        // Calculate shard metrics
+        let shard_sync_latency = if !shard_sync_times.is_empty() {
+            Duration::from_secs_f64(
+                shard_sync_times.iter().map(|d| d.as_secs_f64()).sum::<f64>() / shard_sync_times.len() as f64
+            )
+        } else {
+            Duration::from_secs(0)
+        };
+
+        TransactionMetrics {
+            latency: LatencyStats {
+                avg_latency,
+                min_latency,
+                max_latency,
+                p95_latency,
+                tx_count,
+            },
+            validator_throughput: ThroughputStats {
+                tps,
+                peak_tps,
+                avg_block_time,
+                validator_count: vm.validator_count,
+            },
+            gas_stats: GasStats {
+                avg_gas,
+                total_gas,
+                gas_utilization,
+            },
+            shard_metrics: ShardMetrics {
+                cross_shard_tx_count: cross_shard_txs,
+                shard_sync_latency,
+                shard_count: vm.shard_count,
+            },
+        }
+    }
+
+    /// Collects PGO data for compiler optimization
+    fn collect_pgo_data(&self) -> PgoData {
+        let mut pgo_data = PgoData {
+            hot_functions: HashSet::new(),
+            unroll_candidates: HashSet::new(),
+            inline_candidates: HashSet::new(),
+            branch_stats: HashMap::new(),
+        };
+
+        // Identify hot functions
+        for profile in &self.profiles {
+            if profile.calls > 1000 || profile.total_time > Duration::from_millis(100) {
+                pgo_data.hot_functions.insert(profile.name.clone());
+            }
+
+            // Analyze instructions for optimization opportunities
+            for (index, instr) in &profile.instructions {
+                // Identify loop candidates for unrolling
+                if instr.count > 100 {
+                    pgo_data.unroll_candidates.insert(*index);
+                }
+
+                // Collect branch statistics
+                if let Some(branch_taken) = self.get_branch_probability(*index) {
+                    pgo_data.branch_stats.insert(*index, branch_taken);
+                }
+            }
+
+            // Identify inlining candidates
+            if profile.calls > 0 && profile.total_time.as_micros() / profile.calls < 100 {
+                pgo_data.inline_candidates.insert(profile.name.clone());
+            }
+        }
+
+        pgo_data
+    }
+
+    /// Gets branch probability for a given instruction
+    fn get_branch_probability(&self, instr_index: u32) -> Option<f64> {
+        for profile in &self.profiles {
+            if let Some(instr) = profile.instructions.get(&instr_index) {
+                if let Some(branch_data) = profile.branch_data.get(&instr_index) {
+                    return Some(branch_data.taken as f64 / instr.count as f64);
+                }
+            }
+        }
+        None
     }
 
     /// Analyzes a KSL file for both static and dynamic properties
@@ -179,6 +411,12 @@ impl Analyzer {
 
         self.profiles = function_profiles.into_values().collect();
 
+        // Collect transaction metrics
+        let tx_metrics = self.collect_transaction_metrics(&vm);
+
+        // Collect PGO data
+        let pgo_data = self.collect_pgo_data();
+
         // Generate report
         println!("Analysis Report for {}", file.display());
         println!("Total execution time: {:.2?}", total_duration);
@@ -209,6 +447,41 @@ impl Analyzer {
                     index, op, instr.count, instr.total_time
                 );
             }
+        }
+
+        println!("\nTransaction Metrics:");
+        println!("Latency Statistics:");
+        println!("  Average: {:.2?}", tx_metrics.latency.avg_latency);
+        println!("  Min: {:.2?}", tx_metrics.latency.min_latency);
+        println!("  Max: {:.2?}", tx_metrics.latency.max_latency);
+        println!("  P95: {:.2?}", tx_metrics.latency.p95_latency);
+        println!("  Transaction Count: {}", tx_metrics.latency.tx_count);
+
+        println!("\nValidator Throughput:");
+        println!("  TPS: {:.2}", tx_metrics.validator_throughput.tps);
+        println!("  Peak TPS: {:.2}", tx_metrics.validator_throughput.peak_tps);
+        println!("  Average Block Time: {:.2?}", tx_metrics.validator_throughput.avg_block_time);
+        println!("  Validator Count: {}", tx_metrics.validator_throughput.validator_count);
+
+        println!("\nGas Statistics:");
+        println!("  Average Gas: {}", tx_metrics.gas_stats.avg_gas);
+        println!("  Total Gas: {}", tx_metrics.gas_stats.total_gas);
+        println!("  Gas Utilization: {:.2}%", tx_metrics.gas_stats.gas_utilization * 100.0);
+
+        println!("\nShard Metrics:");
+        println!("  Cross-shard Transactions: {}", tx_metrics.shard_metrics.cross_shard_tx_count);
+        println!("  Shard Sync Latency: {:.2?}", tx_metrics.shard_metrics.shard_sync_latency);
+        println!("  Shard Count: {}", tx_metrics.shard_metrics.shard_count);
+
+        println!("\nPGO Data:");
+        println!("  Hot Functions: {}", pgo_data.hot_functions.len());
+        println!("  Loop Unrolling Candidates: {}", pgo_data.unroll_candidates.len());
+        println!("  Inlining Candidates: {}", pgo_data.inline_candidates.len());
+        println!("  Branch Statistics: {} entries", pgo_data.branch_stats.len());
+
+        // Feed PGO data to compiler
+        if let Some(compiler) = self.module_system.get_compiler() {
+            compiler.update_pgo_data(pgo_data);
         }
 
         Ok(())

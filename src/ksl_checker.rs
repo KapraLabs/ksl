@@ -544,6 +544,77 @@ impl TypeChecker {
             }
         }
     }
+
+    fn check_type_annotation(&mut self, annot: &TypeAnnotation, position: usize) -> Result<Type, TypeError> {
+        match annot {
+            TypeAnnotation::Simple(name) => {
+                match name.as_str() {
+                    "u8" | "u16" | "u32" | "u64" | "i8" | "i16" | "i32" | "i64" |
+                    "f32" | "f64" | "bool" | "string" | "void" => Ok(Type::Simple(name.clone())),
+                    _ => Err(TypeError {
+                        message: format!("Unknown type: {}", name),
+                        position,
+                    })
+                }
+            }
+            TypeAnnotation::Array { element, size } => {
+                // Check that size is a valid constant
+                if *size == 0 {
+                    return Err(TypeError {
+                        message: "Array size must be greater than 0".to_string(),
+                        position,
+                    });
+                }
+
+                // Recursively check element type
+                let element_type = self.check_type_annotation(element, position)?;
+                
+                // Validate element type is allowed in arrays
+                match element_type {
+                    Type::Simple(ref name) if matches!(name.as_str(), "u8" | "u16" | "u32" | "u64" | "i8" | "i16" | "i32" | "i64" | "f32" | "f64" | "bool") => {
+                        Ok(Type::Array(Box::new(element_type), *size))
+                    }
+                    _ => Err(TypeError {
+                        message: format!("Invalid array element type: {:?}", element_type),
+                        position,
+                    })
+                }
+            }
+            TypeAnnotation::Result { success, error } => {
+                let success_type = self.check_type_annotation(success, position)?;
+                let error_type = self.check_type_annotation(error, position)?;
+                Ok(Type::Result {
+                    ok: Box::new(success_type),
+                    err: Box::new(error_type),
+                })
+            }
+        }
+    }
+
+    fn check_array_access(&mut self, array: &AstNode, index: &AstNode, position: usize) -> Result<Type, TypeError> {
+        // Check array expression type
+        let array_type = self.check_node(array, position)?;
+        
+        // Check index expression type
+        let index_type = self.check_node(index, position)?;
+        
+        // Verify index is an integer type
+        if !matches!(index_type, Type::Simple(ref name) if matches!(name.as_str(), "u8" | "u16" | "u32" | "u64" | "i8" | "i16" | "i32" | "i64")) {
+            return Err(TypeError {
+                message: "Array index must be an integer type".to_string(),
+                position,
+            });
+        }
+        
+        // Extract element type from array type
+        match array_type {
+            Type::Array(element_type, _) => Ok(*element_type),
+            _ => Err(TypeError {
+                message: "Expected array type".to_string(),
+                position,
+            })
+        }
+    }
 }
 
 /// Public API to check an AST for type safety.

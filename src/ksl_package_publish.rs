@@ -17,6 +17,12 @@ use std::io::Write;
 use std::path::PathBuf;
 use toml;
 use serde::{Deserialize, Serialize};
+use crate::ksl_validator_keys::{ValidatorKeys, Signature};
+use crate::ksl_contract::{ContractAbi, ContractFunction};
+use crate::ksl_analyzer::{Analyzer, GasStats};
+use crate::ksl_package::{PackageLoader, PackageConfig};
+use sha2::{Sha256, Digest};
+use chrono::{DateTime, Utc};
 
 /// Package publish configuration
 #[derive(Debug, Clone)]
@@ -40,182 +46,401 @@ pub struct PublishState {
     pub status_cache: HashMap<String, bool>,
 }
 
+/// Package archive metadata
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PackageArchive {
+    /// Package configuration
+    pub config: PackageConfig,
+    /// Package files
+    pub files: HashMap<PathBuf, Vec<u8>>,
+    /// Package signature
+    pub signature: Option<String>,
+    /// Package hash
+    pub hash: String,
+    /// Package timestamp
+    pub timestamp: DateTime<Utc>,
+}
+
 /// Package publisher
 pub struct PackagePublisher {
-    config: PublishConfig,
-    package_system: PackageSystem,
-    registry_client: RegistryClient,
-    async_runtime: Arc<AsyncRuntime>,
-    state: Arc<RwLock<PublishState>>,
+    /// Package loader
+    loader: Arc<PackageLoader>,
+    /// Validator keys for signing
+    validator_keys: Arc<ValidatorKeys>,
+    /// Analyzer for gas estimation
+    analyzer: Arc<Analyzer>,
+    /// Registry client
+    registry_client: Arc<reqwest::Client>,
+    /// Registry token
+    registry_token: Option<String>,
 }
 
 impl PackagePublisher {
-    /// Creates a new package publisher instance
-    pub fn new(config: PublishConfig) -> Self {
+    /// Create new package publisher
+    pub fn new(loader: Arc<PackageLoader>) -> Self {
         PackagePublisher {
-            config: config.clone(),
-            package_system: PackageSystem::new(),
-            registry_client: RegistryClient::new(),
-            async_runtime: Arc::new(AsyncRuntime::new()),
-            state: Arc::new(RwLock::new(PublishState {
-                last_published: None,
-                status_cache: HashMap::new(),
-            })),
+            loader,
+            validator_keys: Arc::new(ValidatorKeys::new()),
+            analyzer: Arc::new(Analyzer::new()),
+            registry_client: Arc::new(reqwest::Client::new()),
+            registry_token: None,
         }
     }
 
-    /// Publishes a KSL package to the remote registry asynchronously
-    pub async fn publish_async(&mut self) -> AsyncResult<()> {
-        let pos = SourcePosition::new(1, 1);
+    /// Set registry token
+    pub fn set_registry_token(&mut self, token: String) {
+        self.registry_token = Some(token);
+    }
 
-        // Validate package metadata
-        let metadata_file = self.config.package_dir.join("ksl_package.toml");
-        let metadata_content = fs::read_to_string(&metadata_file)
-            .map_err(|e| KslError::type_error(
-                format!("Failed to read metadata file {}: {}", metadata_file.display(), e),
-                pos,
+    /// Create publishable archive
+    pub async fn create_archive(&self, path: &Path) -> AsyncResult<PackageArchive> {
+        // Load package configuration
+        self.loader.load_config(path).await?;
+
+        // Collect package files
+        let mut files = HashMap::new();
+        self.collect_files(path, &mut files)?;
+
+        // Calculate package hash
+        let mut hasher = Sha256::new();
+        for (name, content) in &files {
+            hasher.update(name.to_string_lossy().as_bytes());
+            hasher.update(content);
+        }
+        let hash = format!("{:x}", hasher.finalize());
+
+        // Sign package
+        let signature = if let Some(keys) = self.validator_keys.get_signing_keys() {
+            Some(keys.sign(&hash.as_bytes()))
+        } else {
+            None
+        };
+
+        // Create archive
+        let config = self.loader.config.read().await.clone();
+        Ok(PackageArchive {
+            config,
+            files,
+            signature,
+            hash,
+            timestamp: Utc::now(),
+        })
+    }
+
+    /// Collect package files
+    fn collect_files(&self, path: &Path, files: &mut HashMap<PathBuf, Vec<u8>>) -> Result<(), KslError> {
+        for entry in fs::read_dir(path)
+            .map_err(|e| KslError::io_error(
+                format!("Failed to read directory {}: {}", path.display(), e),
+                SourcePosition::new(1, 1),
+            ))? {
+            let entry = entry
+                .map_err(|e| KslError::io_error(
+                    format!("Failed to read directory entry: {}", e),
+                    SourcePosition::new(1, 1),
+                ))?;
+            let path = entry.path();
+
+            if path.is_dir() {
+                self.collect_files(&path, files)?;
+            } else {
+                let content = fs::read(&path)
+                    .map_err(|e| KslError::io_error(
+                        format!("Failed to read file {}: {}", path.display(), e),
+                        SourcePosition::new(1, 1),
             ))?;
-        let metadata: PackageMetadata = toml::from_str(&metadata_content)
-            .map_err(|e| KslError::type_error(
-                format!("Failed to parse metadata: {}", e),
-                pos,
+                files.insert(path.strip_prefix(path).unwrap().to_path_buf(), content);
+            }
+        }
+        Ok(())
+    }
+
+    /// Create compressed archive
+    pub async fn create_compressed_archive(&self, archive: &PackageArchive) -> AsyncResult<Vec<u8>> {
+        let mut tar_data = Vec::new();
+        let mut builder = Builder::new(&mut tar_data);
+
+        // Add package metadata
+        let metadata = serde_json::to_string(&archive)
+            .map_err(|e| KslError::serialization_error(
+                format!("Failed to serialize package metadata: {}", e),
+                SourcePosition::new(1, 1),
+            ))?;
+        let mut header = Header::new_gnu();
+        header.set_path("metadata.json")
+            .map_err(|e| KslError::io_error(
+                format!("Failed to set metadata path: {}", e),
+                SourcePosition::new(1, 1),
+            ))?;
+        header.set_size(metadata.len() as u64);
+        header.set_mode(0o644);
+        builder.append(&header, metadata.as_bytes())
+            .map_err(|e| KslError::io_error(
+                format!("Failed to append metadata: {}", e),
+                SourcePosition::new(1, 1),
             ))?;
 
-        if metadata.name.is_empty() || metadata.version.is_empty() {
-            return Err(KslError::type_error(
-                "Package metadata must include name and version".to_string(),
-                pos,
+        // Add package files
+        for (path, content) in &archive.files {
+            let mut header = Header::new_gnu();
+            header.set_path(path)
+                .map_err(|e| KslError::io_error(
+                    format!("Failed to set file path: {}", e),
+                    SourcePosition::new(1, 1),
+                ))?;
+            header.set_size(content.len() as u64);
+            header.set_mode(0o644);
+            builder.append(&header, content)
+                .map_err(|e| KslError::io_error(
+                    format!("Failed to append file: {}", e),
+                    SourcePosition::new(1, 1),
+                ))?;
+        }
+
+        builder.finish()
+            .map_err(|e| KslError::io_error(
+                format!("Failed to finish archive: {}", e),
+                SourcePosition::new(1, 1),
+            ))?;
+
+        // Compress archive
+        let mut compress = Compress::new(Compression::best(), false);
+        let mut compressed = Vec::new();
+        let mut buffer = [0; 1024];
+        let mut cursor = std::io::Cursor::new(&tar_data);
+
+        loop {
+            let n = cursor.read(&mut buffer)
+                .map_err(|e| KslError::io_error(
+                    format!("Failed to read archive: {}", e),
+                    SourcePosition::new(1, 1),
+                ))?;
+            if n == 0 {
+                break;
+            }
+
+            let mut out = vec![0; n * 2];
+            let n = compress.compress(&buffer[..n], &mut out, flate2::FlushCompress::None)
+                .map_err(|e| KslError::io_error(
+                    format!("Failed to compress archive: {}", e),
+                    SourcePosition::new(1, 1),
+            ))?;
+            compressed.extend_from_slice(&out[..n]);
+        }
+
+        let mut out = vec![0; 1024];
+        let n = compress.finish(&mut out)
+            .map_err(|e| KslError::io_error(
+                format!("Failed to finish compression: {}", e),
+                SourcePosition::new(1, 1),
+            ))?;
+        compressed.extend_from_slice(&out[..n]);
+
+        Ok(compressed)
+    }
+
+    /// Publish package to registry
+    pub async fn publish_package(&self, path: &Path) -> AsyncResult<()> {
+        // Create archive
+        let archive = self.create_archive(path).await?;
+        let compressed = self.create_compressed_archive(&archive).await?;
+
+        // Verify gas estimates for contracts
+        self.verify_contract_gas(&archive).await?;
+
+        // Lint package
+        self.lint_package(&archive).await?;
+
+        // Generate ABI docs
+        self.generate_abi_docs(&archive).await?;
+
+        // Upload to registry
+        let token = self.registry_token.as_ref()
+            .ok_or_else(|| KslError::validation_error(
+                "No registry token provided".to_string(),
+                SourcePosition::new(1, 1),
+            ))?;
+
+        let response = self.registry_client
+            .post("https://registry.ksl.dev/upload")
+            .header("Authorization", format!("Bearer {}", token))
+            .json(&archive.config)
+            .body(compressed)
+            .send()
+            .await
+            .map_err(|e| KslError::network_error(
+                format!("Failed to upload package: {}", e),
+                SourcePosition::new(1, 1),
+            ))?;
+
+        if !response.status().is_success() {
+            return Err(KslError::network_error(
+                format!("Failed to upload package: {}", response.status()),
+                SourcePosition::new(1, 1),
             ));
         }
-
-        // Resolve dependencies asynchronously
-        self.package_system.resolve_dependencies_async(&self.config.package_dir).await
-            .map_err(|e| KslError::type_error(format!("Dependency resolution failed: {}", e), pos))?;
-
-        // Generate documentation
-        let doc_dir = self.config.package_dir.join("docs");
-        generate_docgen(&metadata.name, "markdown", doc_dir.clone())
-            .map_err(|e| KslError::type_error(format!("Documentation generation failed: {}", e), pos))?;
-
-        // Create tarball
-        let tar_gz = File::create(&self.config.output_tarball)
-            .map_err(|e| KslError::type_error(
-                format!("Failed to create tarball {}: {}", self.config.output_tarball.display(), e),
-                pos,
-            ))?;
-        let enc = GzEncoder::new(tar_gz, Compression::default());
-        let mut tar = Builder::new(enc);
-
-        // Add source files
-        let src_dir = self.config.package_dir.join("src");
-        if src_dir.exists() {
-            for entry in fs::read_dir(&src_dir)
-                .map_err(|e| KslError::type_error(
-                    format!("Failed to read source directory {}: {}", src_dir.display(), e),
-                    pos,
-                ))?
-            {
-                let entry = entry?;
-                if entry.path().extension().map(|ext| ext == "ksl").unwrap_or(false) {
-                    tar.append_path_with_name(&entry.path(), format!("src/{}", entry.file_name().to_string_lossy()))
-                        .map_err(|e| KslError::type_error(
-                            format!("Failed to add source file {} to tarball: {}", entry.path().display(), e),
-                            pos,
-                        ))?;
-                }
-            }
-        }
-
-        // Add documentation
-        if doc_dir.exists() {
-            for entry in fs::read_dir(&doc_dir)
-                .map_err(|e| KslError::type_error(
-                    format!("Failed to read doc directory {}: {}", doc_dir.display(), e),
-                    pos,
-                ))?
-            {
-                let entry = entry?;
-                if entry.path().extension().map(|ext| ext == "md").unwrap_or(false) {
-                    tar.append_path_with_name(&entry.path(), format!("docs/{}", entry.file_name().to_string_lossy()))
-                        .map_err(|e| KslError::type_error(
-                            format!("Failed to add doc file {} to tarball: {}", entry.path().display(), e),
-                            pos,
-                        ))?;
-                }
-            }
-        }
-
-        // Add metadata
-        tar.append_path_with_name(&metadata_file, "ksl_package.toml")
-            .map_err(|e| KslError::type_error(
-                format!("Failed to add metadata to tarball: {}", e),
-                pos,
-            ))?;
-
-        tar.finish()
-            .map_err(|e| KslError::type_error(
-                format!("Failed to finalize tarball: {}", e),
-                pos,
-            ))?;
-
-        // Publish to registry asynchronously
-        let tarball_data = fs::read(&self.config.output_tarball)
-            .map_err(|e| KslError::type_error(
-                format!("Failed to read tarball {}: {}", self.config.output_tarball.display(), e),
-                pos,
-            ))?;
-        let publish_url = format!("{}/publish/{}/{}", self.config.registry_url, metadata.name, metadata.version);
-        
-        if self.config.async_publish {
-            // Schedule async publish task
-            let task_id = format!("publish_{}_{}", metadata.name, metadata.version);
-            let client = self.async_runtime.client.clone();
-            let url = publish_url.clone();
-            let data = tarball_data.clone();
-            self.async_runtime.schedule_task(task_id.clone(), async move {
-                client.post(&url)
-                    .body(data)
-                    .header("Content-Type", "application/gzip")
-                    .send()
-                    .await
-                    .map_err(|e| KslError::type_error(
-                        format!("Failed to publish to registry {}: {}", url, e),
-                        pos,
-                    ))?
-                    .error_for_status()
-                    .map_err(|e| KslError::type_error(
-                        format!("Registry publish failed: {}", e),
-                        pos,
-                    ))?;
-                Ok(())
-            }).await;
-            
-            // Poll for completion
-            self.async_runtime.poll().await?;
-        } else {
-            // Synchronous publish
-            self.registry_client.publish_package(&self.config.package_dir)?;
-        }
-
-        // Update state
-        let mut state = self.state.write().await;
-        state.last_published = Some(metadata.clone());
-        state.status_cache.insert(format!("{}@{}", metadata.name, metadata.version), true);
-
-        // Clean up temporary tarball
-        fs::remove_file(&self.config.output_tarball)
-            .map_err(|e| KslError::type_error(
-                format!("Failed to clean up tarball {}: {}", self.config.output_tarball.display(), e),
-                pos,
-            ))?;
 
         Ok(())
     }
 
-    /// Synchronous wrapper for package publishing
-    pub fn publish(&mut self) -> Result<(), KslError> {
-        let runtime = self.async_runtime.clone();
-        runtime.block_on(self.publish_async())
+    /// Verify gas estimates for contracts
+    async fn verify_contract_gas(&self, archive: &PackageArchive) -> AsyncResult<()> {
+        for (path, content) in &archive.files {
+            if path.extension().map_or(false, |ext| ext == "ksl") {
+                let gas_stats = self.analyzer.analyze_gas_usage_from_source(content).await?;
+                if gas_stats.avg_gas > 1_000_000 {
+                    return Err(KslError::validation_error(
+                        format!("Contract {} exceeds gas limit", path.display()),
+                        SourcePosition::new(1, 1),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Lint package for unsafe or invalid macro combinations
+    async fn lint_package(&self, archive: &PackageArchive) -> AsyncResult<()> {
+        for (path, content) in &archive.files {
+            if path.extension().map_or(false, |ext| ext == "ksl") {
+                // Check for unsafe macro combinations
+                if content.contains("#[validator]") && content.contains("#[async]") {
+                    return Err(KslError::validation_error(
+                        format!("Invalid macro combination in {}", path.display()),
+                        SourcePosition::new(1, 1),
+                    ));
+        }
+
+                // Check for unsafe FFI
+                if content.contains("unsafe") && !content.contains("#[allow(unsafe)]") {
+                    return Err(KslError::validation_error(
+                        format!("Unsafe code in {} without #[allow(unsafe)]", path.display()),
+                        SourcePosition::new(1, 1),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Generate ABI documentation for contracts
+    async fn generate_abi_docs(&self, archive: &PackageArchive) -> AsyncResult<()> {
+        for (path, content) in &archive.files {
+            if path.extension().map_or(false, |ext| ext == "ksl") {
+                if let Some(abi) = self.analyzer.extract_contract_abi(content).await? {
+                    let doc_path = path.with_extension("abi.md");
+                    let doc = self.generate_abi_markdown(&abi);
+                    fs::write(&doc_path, doc)
+                        .map_err(|e| KslError::io_error(
+                            format!("Failed to write ABI docs: {}", e),
+                            SourcePosition::new(1, 1),
+                        ))?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Generate Markdown documentation for contract ABI
+    fn generate_abi_markdown(&self, abi: &ContractAbi) -> String {
+        let mut doc = String::new();
+        doc.push_str("# Contract ABI\n\n");
+        doc.push_str("## Functions\n\n");
+        for func in &abi.functions {
+            doc.push_str(&format!("### {}\n\n", func.name));
+            doc.push_str("```ksl\n");
+            doc.push_str(&format!("fn {}({})", func.name, func.params.join(", ")));
+            if let Some(ret) = &func.return_type {
+                doc.push_str(&format!(" -> {}", ret));
+            }
+            doc.push_str(";\n```\n\n");
+        }
+        doc
+    }
+
+    /// Yank package version
+    pub async fn yank_package(&self, name: &str, version: &str) -> AsyncResult<()> {
+        let token = self.registry_token.as_ref()
+            .ok_or_else(|| KslError::validation_error(
+                "No registry token provided".to_string(),
+                SourcePosition::new(1, 1),
+            ))?;
+
+        let response = self.registry_client
+            .post(format!("https://registry.ksl.dev/packages/{}/{}/yank", name, version))
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+            .await
+            .map_err(|e| KslError::network_error(
+                format!("Failed to yank package: {}", e),
+                SourcePosition::new(1, 1),
+            ))?;
+        
+        if !response.status().is_success() {
+            return Err(KslError::network_error(
+                format!("Failed to yank package: {}", response.status()),
+                SourcePosition::new(1, 1),
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Deprecate package version
+    pub async fn deprecate_package(&self, name: &str, version: &str, reason: &str) -> AsyncResult<()> {
+        let token = self.registry_token.as_ref()
+            .ok_or_else(|| KslError::validation_error(
+                "No registry token provided".to_string(),
+                SourcePosition::new(1, 1),
+            ))?;
+
+        let response = self.registry_client
+            .post(format!("https://registry.ksl.dev/packages/{}/{}/deprecate", name, version))
+            .header("Authorization", format!("Bearer {}", token))
+            .json(&json!({ "reason": reason }))
+                    .send()
+                    .await
+            .map_err(|e| KslError::network_error(
+                format!("Failed to deprecate package: {}", e),
+                SourcePosition::new(1, 1),
+            ))?;
+
+        if !response.status().is_success() {
+            return Err(KslError::network_error(
+                format!("Failed to deprecate package: {}", response.status()),
+                SourcePosition::new(1, 1),
+            ));
+        }
+
+                Ok(())
+    }
+
+    /// Rollback package version
+    pub async fn rollback_package(&self, name: &str, version: &str) -> AsyncResult<()> {
+        let token = self.registry_token.as_ref()
+            .ok_or_else(|| KslError::validation_error(
+                "No registry token provided".to_string(),
+                SourcePosition::new(1, 1),
+            ))?;
+
+        let response = self.registry_client
+            .post(format!("https://registry.ksl.dev/packages/{}/{}/rollback", name, version))
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+            .await
+            .map_err(|e| KslError::network_error(
+                format!("Failed to rollback package: {}", e),
+                SourcePosition::new(1, 1),
+            ))?;
+
+        if !response.status().is_success() {
+            return Err(KslError::network_error(
+                format!("Failed to rollback package: {}", response.status()),
+                SourcePosition::new(1, 1),
+            ));
+        }
+
+        Ok(())
     }
 }
 
@@ -229,8 +454,8 @@ pub fn publish(package_dir: &PathBuf, registry_url: &str, async_publish: bool) -
         output_tarball,
         async_publish,
     };
-    let mut publisher = PackagePublisher::new(config);
-    publisher.publish()
+    let mut publisher = PackagePublisher::new(Arc::new(PackageLoader::new()));
+    publisher.publish_package(&config.package_dir.as_path())
 }
 
 /// Public API to publish a KSL package asynchronously
@@ -243,8 +468,8 @@ pub async fn publish_async(package_dir: &PathBuf, registry_url: &str) -> AsyncRe
         output_tarball,
         async_publish: true,
     };
-    let mut publisher = PackagePublisher::new(config);
-    publisher.publish_async().await
+    let mut publisher = PackagePublisher::new(Arc::new(PackageLoader::new()));
+    publisher.publish_package(&config.package_dir.as_path())
 }
 
 // Assume ksl_package.rs, ksl_registry.rs, ksl_async.rs, and ksl_errors.rs are in the same crate

@@ -13,6 +13,7 @@ use crate::ksl_bytecode::KapraBytecode;
 use crate::kapra_vm::run;
 use crate::ksl_errors::{KslError, SourcePosition};
 use crate::ksl_docgen::generate_docs;
+use crate::ksl_debugger::Debugger;
 
 /// Compilation optimization level
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
@@ -70,6 +71,9 @@ enum Commands {
         /// Enable JIT compilation
         #[arg(short, long)]
         jit: bool,
+        /// Enable debug mode
+        #[arg(short = 'D', long)]
+        debug: bool,
     },
     /// Run a KSL file
     Run {
@@ -82,6 +86,9 @@ enum Commands {
         /// Enable JIT compilation
         #[arg(short, long)]
         jit: bool,
+        /// Enable debug mode
+        #[arg(short = 'D', long)]
+        debug: bool,
     },
     /// Generate documentation
     Doc {
@@ -102,11 +109,11 @@ pub fn run_cli() -> Result<(), KslError> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Compile { file, output, opt_level, target, async, jit } => {
-            compile_file(&file, output.as_ref(), opt_level, target, async, jit)
+        Commands::Compile { file, output, opt_level, target, async, jit, debug } => {
+            compile_file(&file, output.as_ref(), opt_level, target, async, jit, debug)
         }
-        Commands::Run { file, async, jit } => {
-            run_file(&file, async, jit)
+        Commands::Run { file, async, jit, debug } => {
+            run_file(&file, async, jit, debug)
         }
         Commands::Doc { input, output, private } => {
             generate_docs(&input, output.as_ref(), private)
@@ -122,6 +129,7 @@ fn compile_file(
     target: Target,
     async_support: bool,
     jit: bool,
+    debug: bool,
 ) -> Result<(), KslError> {
     // Read source file
     let source = fs::read_to_string(file)
@@ -150,6 +158,14 @@ fn compile_file(
         OptLevel::O3 => bytecode.optimize_max(),
     };
 
+    // Enable debug mode if requested
+    if debug {
+        println!("Debug mode enabled");
+        // Initialize debugger
+        let debugger = Debugger::new(file)?;
+        debugger.attach_bytecode(&bytecode)?;
+    }
+
     // Output bytecode
     match output {
         Some(out_file) => {
@@ -173,7 +189,7 @@ fn compile_file(
 }
 
 /// Run a KSL file with enhanced options
-fn run_file(file: &PathBuf, async_support: bool, jit: bool) -> Result<(), KslError> {
+fn run_file(file: &PathBuf, async_support: bool, jit: bool, debug: bool) -> Result<(), KslError> {
     // Read source file
     let source = fs::read_to_string(file)
         .map_err(|e| KslError::io_error(
@@ -195,9 +211,9 @@ fn run_file(file: &PathBuf, async_support: bool, jit: bool) -> Result<(), KslErr
 
     // Run with options
     if jit {
-        run_jit(bytecode, async_support)
+        run_jit(bytecode, async_support, debug)
     } else {
-        run(bytecode, async_support)
+        run(bytecode, async_support, debug)
     }
 }
 
@@ -230,6 +246,10 @@ mod ksl_docgen {
     pub use super::generate_docs;
 }
 
+mod ksl_debugger {
+    pub use super::Debugger;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,6 +271,7 @@ mod tests {
             Target::Native,
             false,
             false,
+            false,
         );
         assert!(result.is_ok());
     }
@@ -269,6 +290,7 @@ mod tests {
             OptLevel::O2,
             Target::Native,
             true,
+            false,
             false,
         );
         assert!(result.is_ok());
@@ -289,6 +311,7 @@ mod tests {
             Target::Jit,
             false,
             true,
+            false,
         );
         assert!(result.is_ok());
     }
@@ -311,6 +334,7 @@ mod tests {
             Target::Native,
             false,
             false,
+            false,
         );
         assert!(result.is_ok());
         assert!(output_file.path().exists());
@@ -326,7 +350,7 @@ mod tests {
         ).unwrap();
 
         // Run the program
-        let result = run_file(&temp_file.path().to_path_buf(), false, false);
+        let result = run_file(&temp_file.path().to_path_buf(), false, false, false);
         assert!(result.is_ok());
     }
 
@@ -337,7 +361,7 @@ mod tests {
         writeln!(temp_file, "let x: u32 = ;").unwrap();
 
         // Expect parse error
-        let result = run_file(&temp_file.path().to_path_buf(), false, false);
+        let result = run_file(&temp_file.path().to_path_buf(), false, false, false);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Parse error"));
     }

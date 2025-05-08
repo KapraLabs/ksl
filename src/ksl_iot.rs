@@ -293,12 +293,12 @@ impl KapraVM {
                     let sensor_id = self.stack.pop().unwrap() as u32;
                     match self.iot_runtime.read_sensor(sensor_id).await {
                         Ok(data) => {
-                            let const_idx = bytecode.constants.len();
-                            self.stack.push(const_idx as u64);
-                            let mut new_constants = bytecode.constants.clone();
-                            new_constants.push(Constant::ArrayU8(data.len(), data));
-                            let new_bytecode = Bytecode::new(bytecode.instructions.clone(), new_constants);
-                            *bytecode = new_bytecode;
+                    let const_idx = bytecode.constants.len();
+                    self.stack.push(const_idx as u64);
+                    let mut new_constants = bytecode.constants.clone();
+                    new_constants.push(Constant::ArrayU8(data.len(), data));
+                    let new_bytecode = Bytecode::new(bytecode.instructions.clone(), new_constants);
+                    *bytecode = new_bytecode;
                         }
                         Err(e) => return Err(format!("Sensor read error: {:?}", e)),
                     }

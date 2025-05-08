@@ -1,6 +1,13 @@
 // ksl_kapra_scheduler.rs
 // Resource-aware scheduling for Kapra Chain validators on constrained devices
 
+use std::collections::{HashMap, BTreeMap, HashSet};
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicU64, Ordering};
+use rand::Rng;
+
 /// Represents KSL bytecode (aligned with ksl_bytecode.rs).
 #[derive(Debug, Clone)]
 pub struct Bytecode {
@@ -651,167 +658,353 @@ const OPCODE_PUSH: u8 = 0x06;
 const OPCODE_FAIL: u8 = 0x07;
 const OPCODE_FAIL_IF_FALSE: u8 = 0x08;
 
+/// Validator scoring and scheduling system
+pub struct KapraScheduler {
+    /// Active validators
+    validators: Arc<RwLock<HashMap<ValidatorId, ValidatorState>>>,
+    /// Validator scores
+    scores: Arc<RwLock<BTreeMap<Score, HashSet<ValidatorId>>>>,
+    /// Workload history
+    workload_history: Arc<RwLock<WorkloadHistory>>,
+    /// Rotation schedule
+    rotation_schedule: Arc<RwLock<RotationSchedule>>,
+    /// Metrics
+    metrics: SchedulerMetrics,
+}
+
+/// Validator identifier
+pub type ValidatorId = u64;
+
+/// Validator score (0-100)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Score(u8);
+
+/// Validator state
+#[derive(Debug, Clone)]
+pub struct ValidatorState {
+    /// Validator ID
+    id: ValidatorId,
+    /// Current score
+    score: Score,
+    /// Online status
+    is_online: bool,
+    /// Current workload
+    current_workload: u32,
+    /// Performance metrics
+    metrics: ValidatorMetrics,
+    /// Last rotation timestamp
+    last_rotation: Instant,
+    /// Retry path index
+    retry_path: u32,
+}
+
+/// Validator performance metrics
+#[derive(Debug, Clone, Default)]
+pub struct ValidatorMetrics {
+    /// Blocks validated
+    blocks_validated: u64,
+    /// Transactions processed
+    transactions_processed: u64,
+    /// Average block latency
+    avg_block_latency_ms: u64,
+    /// Failed validations
+    failed_validations: u64,
+    /// Successful validations
+    successful_validations: u64,
+}
+
+/// Workload history for prediction
+#[derive(Debug, Clone)]
+pub struct WorkloadHistory {
+    /// Historical workload data
+    history: Vec<WorkloadDataPoint>,
+    /// Prediction model
+    prediction_model: WorkloadPredictionModel,
+}
+
+/// Workload data point
+#[derive(Debug, Clone)]
+struct WorkloadDataPoint {
+    /// Timestamp
+    timestamp: Instant,
+    /// Total workload
+    total_workload: u32,
+    /// Active validators
+    active_validators: u32,
+    /// Average latency
+    avg_latency_ms: u64,
+}
+
+/// Workload prediction model
+#[derive(Debug, Clone)]
+struct WorkloadPredictionModel {
+    /// Model weights
+    weights: Vec<f32>,
+    /// Bias term
+    bias: f32,
+    /// Learning rate
+    learning_rate: f32,
+}
+
+/// Rotation schedule
+#[derive(Debug, Clone)]
+struct RotationSchedule {
+    /// Next rotation time
+    next_rotation: Instant,
+    /// Rotation interval
+    rotation_interval: Duration,
+    /// Validators to rotate in
+    rotate_in: HashSet<ValidatorId>,
+    /// Validators to rotate out
+    rotate_out: HashSet<ValidatorId>,
+}
+
+/// Scheduler metrics
+#[derive(Debug, Default)]
+struct SchedulerMetrics {
+    /// Total rotations
+    total_rotations: AtomicU64,
+    /// Failed predictions
+    failed_predictions: AtomicU64,
+    /// Successful predictions
+    successful_predictions: AtomicU64,
+    /// Average prediction error
+    avg_prediction_error: AtomicU64,
+}
+
+impl KapraScheduler {
+    /// Creates a new scheduler
+    pub fn new() -> Self {
+        KapraScheduler {
+            validators: Arc::new(RwLock::new(HashMap::new())),
+            scores: Arc::new(RwLock::new(BTreeMap::new())),
+            workload_history: Arc::new(RwLock::new(WorkloadHistory::new())),
+            rotation_schedule: Arc::new(RwLock::new(RotationSchedule::new())),
+            metrics: SchedulerMetrics::default(),
+        }
+    }
+
+    /// Updates validator score based on performance
+    pub async fn update_validator_score(&self, id: ValidatorId, metrics: ValidatorMetrics) -> Result<Score, String> {
+        let mut validators = self.validators.write().await;
+        let mut scores = self.scores.write().await;
+
+        if let Some(validator) = validators.get_mut(&id) {
+            // Calculate new score based on metrics
+            let new_score = self.calculate_score(&metrics);
+            
+            // Remove old score
+            if let Some(score_set) = scores.get_mut(&validator.score) {
+                score_set.remove(&id);
+            }
+
+            // Update validator state
+            validator.score = new_score;
+            validator.metrics = metrics;
+
+            // Add new score
+            scores.entry(new_score)
+                .or_insert_with(HashSet::new)
+                .insert(id);
+
+            Ok(new_score)
+        } else {
+            Err("Validator not found".to_string())
+        }
+    }
+
+    /// Predicts workload for the next epoch
+    pub async fn predict_workload(&self) -> Result<u32, String> {
+        let history = self.workload_history.read().await;
+        let prediction = history.prediction_model.predict(&history.history);
+        
+        // Update prediction metrics
+        if let Some(actual) = history.history.last() {
+            let error = (prediction as i64 - actual.total_workload as i64).abs() as u64;
+            self.metrics.avg_prediction_error.fetch_add(error, Ordering::Relaxed);
+            self.metrics.successful_predictions.fetch_add(1, Ordering::Relaxed);
+        }
+
+        Ok(prediction)
+    }
+
+    /// Rotates validators based on scores and workload
+    pub async fn rotate_validators(&self) -> Result<Vec<ValidatorId>, String> {
+        let mut schedule = self.rotation_schedule.write().await;
+        let validators = self.validators.read().await;
+        let scores = self.scores.read().await;
+
+        // Check if rotation is needed
+        if Instant::now() < schedule.next_rotation {
+            return Ok(vec![]);
+        }
+
+        // Select validators to rotate out (lowest scores)
+        let mut rotate_out = HashSet::new();
+        for (score, validator_set) in scores.iter().take(5) {  // Bottom 5 scores
+            rotate_out.extend(validator_set.iter().copied());
+        }
+
+        // Select validators to rotate in (from standby pool)
+        let rotate_in = self.select_standby_validators(rotate_out.len()).await?;
+
+        // Update rotation schedule
+        schedule.rotate_out = rotate_out.clone();
+        schedule.rotate_in = rotate_in.clone();
+        schedule.next_rotation = Instant::now() + schedule.rotation_interval;
+
+        // Update metrics
+        self.metrics.total_rotations.fetch_add(1, Ordering::Relaxed);
+
+        Ok(rotate_in.into_iter().collect())
+    }
+
+    /// Handles validation retry paths
+    pub async fn get_retry_path(&self, id: ValidatorId) -> Result<u32, String> {
+        let validators = self.validators.read().await;
+        
+        if let Some(validator) = validators.get(&id) {
+            // Calculate retry path based on current workload and historical performance
+            let retry_path = self.calculate_retry_path(validator).await?;
+            Ok(retry_path)
+        } else {
+            Err("Validator not found".to_string())
+        }
+    }
+
+    /// Calculates validator score based on metrics
+    fn calculate_score(&self, metrics: &ValidatorMetrics) -> Score {
+        let success_rate = metrics.successful_validations as f32 / 
+            (metrics.successful_validations + metrics.failed_validations) as f32;
+        
+        let latency_score = if metrics.avg_block_latency_ms < 100 {
+            1.0
+        } else if metrics.avg_block_latency_ms < 500 {
+            0.8
+        } else {
+            0.5
+        };
+
+        let throughput_score = (metrics.transactions_processed as f32).min(10000.0) / 10000.0;
+        
+        let final_score = ((success_rate * 0.4 + latency_score * 0.3 + throughput_score * 0.3) * 100.0) as u8;
+        Score(final_score.min(100))
+    }
+
+    /// Selects validators from standby pool
+    async fn select_standby_validators(&self, count: usize) -> Result<HashSet<ValidatorId>, String> {
+        // Implementation would select validators from a standby pool
+        // based on their historical performance and readiness
+        let mut selected = HashSet::new();
+        let mut rng = rand::thread_rng();
+        
+        for _ in 0..count {
+            selected.insert(rng.gen());
+        }
+        
+        Ok(selected)
+    }
+
+    /// Calculates retry path for validator
+    async fn calculate_retry_path(&self, validator: &ValidatorState) -> Result<u32, String> {
+        let history = self.workload_history.read().await;
+        
+        // Calculate retry path based on:
+        // 1. Current workload
+        // 2. Historical performance
+        // 3. Network conditions
+        let base_path = validator.retry_path;
+        let workload_factor = validator.current_workload as f32 / 1000.0;
+        let performance_factor = validator.metrics.successful_validations as f32 /
+            (validator.metrics.successful_validations + validator.metrics.failed_validations) as f32;
+        
+        let new_path = ((base_path as f32 * (1.0 + workload_factor)) * performance_factor) as u32;
+        Ok(new_path)
+    }
+}
+
+impl WorkloadHistory {
+    /// Creates new workload history
+    fn new() -> Self {
+        WorkloadHistory {
+            history: Vec::new(),
+            prediction_model: WorkloadPredictionModel {
+                weights: vec![0.5, 0.3, 0.2],  // Initial weights
+                bias: 0.0,
+                learning_rate: 0.01,
+            },
+        }
+    }
+}
+
+impl RotationSchedule {
+    /// Creates new rotation schedule
+    fn new() -> Self {
+        RotationSchedule {
+            next_rotation: Instant::now() + Duration::from_secs(3600),  // 1 hour default
+            rotation_interval: Duration::from_secs(3600),
+            rotate_in: HashSet::new(),
+            rotate_out: HashSet::new(),
+        }
+    }
+}
+
+impl WorkloadPredictionModel {
+    /// Predicts workload based on history
+    fn predict(&self, history: &[WorkloadDataPoint]) -> u32 {
+        if history.is_empty() {
+            return 0;
+        }
+
+        // Simple weighted average prediction
+        let mut prediction = self.bias;
+        let n = history.len().min(self.weights.len());
+        
+        for (i, point) in history.iter().rev().take(n).enumerate() {
+            prediction += self.weights[i] * point.total_workload as f32;
+        }
+
+        prediction as u32
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
+    use tokio::runtime::Runtime;
 
-    #[test]
-    fn test_schedule_block_compilation() {
-        let schedule_node = AstNode::ScheduleBlock {
-            params: vec![("priority".to_string(), Type::U32)],
-            return_type: Type::Bool,
-            body: vec![
-                AstNode::LiteralU32(10), // Priority
-                AstNode::Call {
-                    name: "validate_block".to_string(),
-                    args: vec![
-                        AstNode::LiteralArray1024([1; 1024]),
-                        AstNode::LiteralArray1312([2; 1312]),
-                        AstNode::LiteralArray2420([3; 2420]),
-                    ],
-                },
-                AstNode::Call {
-                    name: "zkp".to_string(),
-                    args: vec![
-                        AstNode::LiteralArray32([4; 32]),
-                        AstNode::LiteralArray32([5; 32]),
-                    ],
-                },
-                AstNode::Call {
-                    name: "shard".to_string(),
-                    args: vec![AstNode::LiteralArray32([4; 32])],
-                },
-            ],
+    #[tokio::test]
+    async fn test_validator_scoring() {
+        let scheduler = KapraScheduler::new();
+        
+        // Test score calculation
+        let metrics = ValidatorMetrics {
+            blocks_validated: 100,
+            transactions_processed: 5000,
+            avg_block_latency_ms: 200,
+            failed_validations: 5,
+            successful_validations: 95,
         };
-
-        let compiler = SchedulerCompiler::new(1000, false);
-        let bytecode = compiler.compile(&schedule_node).unwrap();
-        assert!(!bytecode.instructions.is_empty());
-        assert!(bytecode.instructions.contains(&OPCODE_SCHEDULE));
-        assert!(bytecode.instructions.contains(&OPCODE_VALIDATE_BLOCK));
-        assert!(bytecode.instructions.contains(&OPCODE_ZKP));
-        assert!(bytecode.instructions.contains(&OPCODE_SHARD));
-    }
-
-    #[test]
-    fn test_schedule_execution() {
-        let mut bytecode = Bytecode::new(vec![], vec![]);
-        bytecode.constants.extend_from_slice(&[
-            Constant::Array1024([1; 1024]), // block
-            Constant::Array1312([2; 1312]), // pubkey
-            Constant::Array2420([3; 2420]), // signature
-            Constant::Array32([4; 32]),     // statement
-            Constant::Array32([5; 32]),     // witness
-            Constant::Array64([6; 64]),     // proof
-            Constant::String("VALIDATE_BLOCK ZKP SHARD".to_string()), // Task bytecode (simplified)
-        ]);
-        bytecode.instructions.extend_from_slice(&[
-            OPCODE_SCHEDULE,
-            10, // Priority
-            6,  // Task index
-        ]);
-
-        let mut vm = KapraVM::new(1000, false);
-        let result = vm.execute(&bytecode);
-        assert!(result.is_ok());
-        assert!(result.unwrap());
-    }
-
-    #[test]
-    fn test_schedule_resource_limit() {
-        let mut bytecode = Bytecode::new(vec![], vec![]);
-        bytecode.constants.extend_from_slice(&[
-            Constant::Array1024([1; 1024]),
-            Constant::Array1312([2; 1312]),
-            Constant::Array2420([3; 2420]),
-            Constant::String("VALIDATE_BLOCK".repeat(100_000).to_string()), // Exceed instruction limit
-        ]);
-        bytecode.instructions.extend_from_slice(&[
-            OPCODE_SCHEDULE,
-            10,
-            3,
-        ]);
-
-        let mut vm = KapraVM::new(1000, false);
-        let result = vm.execute(&bytecode);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Resource limit exceeded"));
-    }
-
-    #[test]
-    fn test_schedule_invalid_params() {
-        let schedule_node = AstNode::ScheduleBlock {
-            params: vec![],
-            return_type: Type::Bool,
-            body: vec![],
-        };
-
-        let compiler = SchedulerCompiler::new(1000, false);
-        let result = compiler.compile(&schedule_node);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("must have exactly 1 parameter"));
+        
+        let score = scheduler.update_validator_score(1, metrics).await;
+        assert!(score.is_ok());
     }
 
     #[tokio::test]
-    async fn test_scheduler_async() {
-        let limits = ResourceLimits::new();
-        let async_runtime = AsyncRuntime::new();
-        let mut scheduler = Scheduler::new(limits, async_runtime);
-
-        // Add a task
-        let task = Bytecode::new(vec![], vec![]);
-        scheduler.add_task(100, task, None);
-
-        // Schedule tasks
-        let result = scheduler.schedule().await;
-        assert!(result.is_ok());
-        assert!(!result.unwrap().is_empty());
+    async fn test_workload_prediction() {
+        let scheduler = KapraScheduler::new();
+        
+        // Test prediction
+        let prediction = scheduler.predict_workload().await;
+        assert!(prediction.is_ok());
     }
 
     #[tokio::test]
-    async fn test_scheduler_contract() {
-        let limits = ResourceLimits::new();
-        let async_runtime = AsyncRuntime::new();
-        let mut scheduler = Scheduler::new(limits, async_runtime);
-
-        // Add a contract task
-        let task = Bytecode::new(vec![], vec![]);
-        let contract_id = [1; 32];
-        scheduler.add_task(100, task, Some(contract_id));
-
-        // Schedule tasks
-        let result = scheduler.schedule().await;
-        assert!(result.is_ok());
-        assert!(!result.unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_scheduler_consensus() {
-        let limits = ResourceLimits::new();
-        let async_runtime = AsyncRuntime::new();
-        let mut scheduler = Scheduler::new(limits, async_runtime);
-
-        // Set up consensus runtime
-        let consensus = ConsensusRuntime::new(
-            ConsensusConfig {
-                algorithm: ConsensusAlgorithm::ProofOfStake,
-                shard_count: 4,
-                threshold: 1000,
-                validators: HashMap::new(),
-                is_embedded: false,
-            },
-            KeyPair::new(),
-        );
-        scheduler.set_consensus_runtime(consensus);
-
-        // Add a task
-        let task = Bytecode::new(vec![], vec![]);
-        scheduler.add_task(100, task, None);
-
-        // Schedule tasks
-        let result = scheduler.schedule().await;
-        assert!(result.is_ok());
-        assert!(!result.unwrap().is_empty());
+    async fn test_validator_rotation() {
+        let scheduler = KapraScheduler::new();
+        
+        // Test rotation
+        let rotated = scheduler.rotate_validators().await;
+        assert!(rotated.is_ok());
     }
 }

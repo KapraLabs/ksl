@@ -34,9 +34,10 @@ use rustyline::error::ReadlineError;
 use rustyline::Editor;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::Write;
 use tokio::runtime::Runtime;
+use wasmtime::*;
 
 /// REPL state
 pub struct Repl {
@@ -48,6 +49,36 @@ pub struct Repl {
     async_runtime: AsyncRuntime,
     debugger: Option<Debugger>,
     is_debug_mode: bool,
+    loaded_modules: HashMap<String, ModuleInfo>, // Track loaded modules
+    wasm_engine: Option<Engine>,
+    wasm_store: Option<Store<()>>,
+    wasm_instances: HashMap<String, Instance>,
+}
+
+/// Module information
+#[derive(Clone, Debug)]
+struct ModuleInfo {
+    name: String,
+    path: PathBuf,
+    module_type: ModuleType,
+    version: String,
+    state: ModuleState,
+    wasm_path: Option<PathBuf>, // Path to .wasm file if available
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum ModuleType {
+    Validator,
+    Contract,
+    Library,
+    WasmContract, // New variant for WASM contracts
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum ModuleState {
+    Active,
+    Paused,
+    Error(String),
 }
 
 impl Repl {
@@ -55,6 +86,9 @@ impl Repl {
     pub fn new() -> Self {
         let bytecode = KapraBytecode::new();
         let vm = KapraVM::new(bytecode.clone());
+        let wasm_engine = Some(Engine::default());
+        let wasm_store = wasm_engine.as_ref().map(|engine| Store::new(engine));
+        
         Repl {
             module_system: ModuleSystem::new(),
             vm,
@@ -64,6 +98,10 @@ impl Repl {
             async_runtime: AsyncRuntime::new(),
             debugger: None,
             is_debug_mode: false,
+            loaded_modules: HashMap::new(),
+            wasm_engine,
+            wasm_store,
+            wasm_instances: HashMap::new(),
         }
     }
 
@@ -103,9 +141,10 @@ impl Repl {
 
     /// Handles REPL commands
     fn handle_command(&mut self, command: &str) -> Result<bool, String> {
-        match command {
-            "quit" | "exit" => Ok(false),
-            "help" => {
+        let parts: Vec<&str> = command.split_whitespace().collect();
+        match parts.get(0).map(|s| *s) {
+            Some("quit") | Some("exit") => Ok(false),
+            Some("help") => {
                 println!("Available commands:");
                 println!("  :help - Show this help message");
                 println!("  :quit - Exit the REPL");
@@ -114,20 +153,94 @@ impl Repl {
                 println!("  :async - Show async tasks");
                 println!("  :vars - Show variables");
                 println!("  :funcs - Show functions");
+                println!("\nModule Management:");
+                println!("  :reload validator - Reload validator module");
+                println!("  :reload contract <name> - Reload contract module");
+                println!("  :patch contract <name> --path <path> - Patch contract from path");
+                println!("  :list modules - List all loaded modules");
+                println!("  :show module <name> - Show module details");
                 Ok(true)
             }
-            "reset" => {
+            Some("reload") => {
+                match parts.get(1).map(|s| *s) {
+                    Some("validator") => {
+                        self.reload_validator()?;
+                        println!("Validator module reloaded successfully");
+                        Ok(true)
+                    }
+                    Some("contract") => {
+                        if let Some(contract_name) = parts.get(2) {
+                            // Check if it's a WASM contract
+                            let wasm_path = PathBuf::from(format!("./build/{}.wasm", contract_name));
+                            if wasm_path.exists() {
+                                self.reload_wasm_contract(contract_name, &wasm_path)?;
+                                println!("WASM contract '{}' reloaded successfully", contract_name);
+                            } else {
+                                self.reload_contract(contract_name)?;
+                                println!("Contract '{}' reloaded successfully", contract_name);
+                            }
+                            Ok(true)
+                        } else {
+                            println!("Usage: :reload contract <name>");
+                            Ok(true)
+                        }
+                    }
+                    _ => {
+                        println!("Usage: :reload [validator|contract <name>]");
+                        Ok(true)
+                    }
+                }
+            }
+            Some("patch") => {
+                if parts.len() >= 5 && parts[1] == "contract" && parts[3] == "--path" {
+                    let contract_name = parts[2];
+                    let path = PathBuf::from(parts[4]);
+                    
+                    // Check if it's a WASM file
+                    if path.extension().map_or(false, |ext| ext == "wasm") {
+                        self.patch_wasm_contract(contract_name, path.clone())?;
+                        println!("WASM contract '{}' patched successfully from {}", contract_name, path.display());
+                    } else {
+                        self.patch_contract(contract_name, path.clone())?;
+                        println!("Contract '{}' patched successfully from {}", contract_name, path.display());
+                    }
+                    Ok(true)
+                } else {
+                    println!("Usage: :patch contract <name> --path <path>");
+                    Ok(true)
+                }
+            }
+            Some("list") => {
+                if parts.get(1) == Some(&"modules") {
+                    self.list_modules();
+                    Ok(true)
+                } else {
+                    println!("Usage: :list modules");
+                    Ok(true)
+                }
+            }
+            Some("show") => {
+                if parts.len() >= 3 && parts[1] == "module" {
+                    let module_name = parts[2];
+                    self.show_module(module_name);
+                    Ok(true)
+                } else {
+                    println!("Usage: :show module <name>");
+                    Ok(true)
+                }
+            }
+            Some("reset") => {
                 *self = Self::new();
                 println!("REPL state reset");
                 Ok(true)
             }
-            "debug" => {
+            Some("debug") => {
                 self.is_debug_mode = true;
                 self.debugger = Some(Debugger::new(&PathBuf::from("repl.ksl"))?);
                 println!("Debug mode enabled");
                 Ok(true)
             }
-            "async" => {
+            Some("async") => {
                 let tasks = self.async_runtime.tasks.lock().await;
                 println!("Active async tasks:");
                 for (id, handle) in &*tasks {
@@ -135,14 +248,14 @@ impl Repl {
                 }
                 Ok(true)
             }
-            "vars" => {
+            Some("vars") => {
                 println!("Variables:");
                 for (name, reg) in &self.variables {
                     println!("  {}: {:?}", name, self.vm.registers[*reg as usize]);
                 }
                 Ok(true)
             }
-            "funcs" => {
+            Some("funcs") => {
                 println!("Functions:");
                 for (name, index) in &self.functions {
                     println!("  {}: instruction {}", name, index);
@@ -151,6 +264,216 @@ impl Repl {
             }
             _ => Err(format!("Unknown command: {}", command)),
         }
+    }
+
+    /// Reload validator module
+    fn reload_validator(&mut self) -> Result<(), String> {
+        // Save validator state
+        if let Some(module) = self.loaded_modules.get("validator") {
+            self.vm.save_contract_state("validator")
+                .map_err(|e| format!("Failed to save validator state: {}", e))?;
+        }
+
+        // Reload validator bytecode
+        let validator_path = PathBuf::from("./build/validator.so");
+        if !validator_path.exists() {
+            return Err("Validator module not found".to_string());
+        }
+
+        // Load and compile new validator code
+        let new_bytecode = self.load_module_bytecode(&validator_path)?;
+        
+        // Update VM with new bytecode
+        self.vm.reload_bytecode(new_bytecode, None, None)
+            .map_err(|e| format!("Failed to reload validator: {}", e))?;
+
+        // Restore validator state
+        if let Some(module) = self.loaded_modules.get("validator") {
+            self.vm.restore_contract_state("validator")
+                .map_err(|e| format!("Failed to restore validator state: {}", e))?;
+        }
+
+        // Update module info
+        self.loaded_modules.insert("validator".to_string(), ModuleInfo {
+            name: "validator".to_string(),
+            path: validator_path,
+            module_type: ModuleType::Validator,
+            version: "latest".to_string(),
+            state: ModuleState::Active,
+            wasm_path: None,
+        });
+
+        Ok(())
+    }
+
+    /// Reload contract module
+    fn reload_contract(&mut self, contract_name: &str) -> Result<(), String> {
+        // Save contract state
+        if let Some(module) = self.loaded_modules.get(contract_name) {
+            self.vm.save_contract_state(contract_name)
+                .map_err(|e| format!("Failed to save contract state: {}", e))?;
+        }
+
+        // Reload contract bytecode
+        let contract_path = PathBuf::from(format!("./build/{}.so", contract_name));
+        if !contract_path.exists() {
+            return Err(format!("Contract {} not found", contract_name));
+        }
+
+        // Load and compile new contract code
+        let new_bytecode = self.load_module_bytecode(&contract_path)?;
+        
+        // Update VM with new bytecode
+        self.vm.reload_bytecode(new_bytecode, None, None)
+            .map_err(|e| format!("Failed to reload contract: {}", e))?;
+
+        // Restore contract state
+        if let Some(module) = self.loaded_modules.get(contract_name) {
+            self.vm.restore_contract_state(contract_name)
+                .map_err(|e| format!("Failed to restore contract state: {}", e))?;
+        }
+
+        // Update module info
+        self.loaded_modules.insert(contract_name.to_string(), ModuleInfo {
+            name: contract_name.to_string(),
+            path: contract_path,
+            module_type: ModuleType::Contract,
+            version: "latest".to_string(),
+            state: ModuleState::Active,
+            wasm_path: None,
+        });
+
+        Ok(())
+    }
+
+    /// Patch contract from path
+    fn patch_contract(&mut self, contract_name: &str, path: PathBuf) -> Result<(), String> {
+        if !path.exists() {
+            return Err(format!("Path not found: {}", path.display()));
+        }
+
+        // Save contract state
+        if let Some(module) = self.loaded_modules.get(contract_name) {
+            self.vm.save_contract_state(contract_name)
+                .map_err(|e| format!("Failed to save contract state: {}", e))?;
+        }
+
+        // Load and compile new contract code
+        let new_bytecode = self.load_module_bytecode(&path)?;
+        
+        // Update VM with new bytecode
+        self.vm.reload_bytecode(new_bytecode, None, None)
+            .map_err(|e| format!("Failed to patch contract: {}", e))?;
+
+        // Restore contract state
+        if let Some(module) = self.loaded_modules.get(contract_name) {
+            self.vm.restore_contract_state(contract_name)
+                .map_err(|e| format!("Failed to restore contract state: {}", e))?;
+        }
+
+        // Update module info
+        self.loaded_modules.insert(contract_name.to_string(), ModuleInfo {
+            name: contract_name.to_string(),
+            path: path.clone(),
+            module_type: ModuleType::Contract,
+            version: "patched".to_string(),
+            state: ModuleState::Active,
+            wasm_path: None,
+        });
+
+        Ok(())
+    }
+
+    /// List all loaded modules
+    fn list_modules(&self) {
+        println!("Loaded modules:");
+        for (name, info) in &self.loaded_modules {
+            let state_str = match &info.state {
+                ModuleState::Active => "active",
+                ModuleState::Paused => "paused",
+                ModuleState::Error(e) => "error",
+            };
+            println!("  {} ({})", name, state_str);
+            println!("    Type: {:?}", info.module_type);
+            println!("    Version: {}", info.version);
+            println!("    Path: {}", info.path.display());
+        }
+    }
+
+    /// Show module details
+    fn show_module(&self, module_name: &str) {
+        if let Some(info) = self.loaded_modules.get(module_name) {
+            println!("Module: {}", info.name);
+            println!("Type: {:?}", info.module_type);
+            println!("Version: {}", info.version);
+            println!("Path: {}", info.path.display());
+            println!("State: {:?}", info.state);
+            
+            match info.module_type {
+                ModuleType::WasmContract => {
+                    println!("\nWASM Contract Info:");
+                    if let Some(wasm_path) = &info.wasm_path {
+                        println!("  WASM file: {}", wasm_path.display());
+                    }
+                    if let Some(instance) = self.wasm_instances.get(module_name) {
+                        println!("  Instance active: yes");
+                        // Add any available exports or memory info
+                        if let Ok(exports) = instance.exports(&self.wasm_store.as_ref().unwrap()) {
+                            println!("  Exports:");
+                            for export in exports {
+                                println!("    {}", export.name());
+                            }
+                        }
+                    }
+                }
+                ModuleType::Validator => {
+                    println!("\nValidator Info:");
+                    if let Ok(globals) = self.vm.get_globals() {
+                        println!("  Active validators: {:?}", globals.get("active_validators"));
+                        println!("  Pending blocks: {:?}", globals.get("pending_blocks"));
+                    }
+                }
+                ModuleType::Contract => {
+                    println!("\nContract Info:");
+                    if let Ok(globals) = self.vm.get_globals() {
+                        println!("  Contract name: {:?}", globals.get("contract_name"));
+                        println!("  Contract version: {:?}", globals.get("contract_version"));
+                    }
+                }
+                ModuleType::Library => {
+                    println!("\nLibrary Info:");
+                    if let Some(exports) = self.module_system.get_exports(&info.name) {
+                        println!("  Exports:");
+                        for export in exports {
+                            println!("    {}", export);
+                        }
+                    }
+                }
+            }
+        } else {
+            println!("Module '{}' not found", module_name);
+        }
+    }
+
+    /// Load module bytecode from path
+    fn load_module_bytecode(&self, path: &PathBuf) -> Result<KapraBytecode, String> {
+        let source = fs::read_to_string(path)
+            .map_err(|e| format!("Failed to read module: {}", e))?;
+        
+        let ast = parse(&source)
+            .map_err(|e| format!("Failed to parse module: {}", e))?;
+        
+        check(&ast)
+            .map_err(|errors| errors.into_iter()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join("\n"))?;
+        
+        compile(&ast)
+            .map_err(|errors| errors.into_iter()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join("\n"))
     }
 
     /// Processes a single input line
@@ -231,6 +554,96 @@ impl Repl {
         };
 
         Ok(output)
+    }
+
+    /// Reload a WASM contract
+    fn reload_wasm_contract(&mut self, contract_name: &str, wasm_path: &PathBuf) -> Result<(), String> {
+        // Save contract state if needed
+        if let Some(module) = self.loaded_modules.get(contract_name) {
+            self.vm.save_contract_state(contract_name)
+                .map_err(|e| format!("Failed to save contract state: {}", e))?;
+        }
+
+        // Load WASM module
+        let engine = self.wasm_engine.as_ref()
+            .ok_or_else(|| "WASM engine not initialized".to_string())?;
+        let module = Module::from_file(engine, wasm_path)
+            .map_err(|e| format!("Failed to load WASM module: {}", e))?;
+        
+        // Create new instance
+        let mut store = self.wasm_store.take()
+            .ok_or_else(|| "WASM store not initialized".to_string())?;
+        let instance = Instance::new(&mut store, &module, &[])
+            .map_err(|e| format!("Failed to instantiate WASM module: {}", e))?;
+
+        // Update instances
+        self.wasm_instances.insert(contract_name.to_string(), instance);
+        self.wasm_store = Some(store);
+
+        // Restore contract state if needed
+        if let Some(module) = self.loaded_modules.get(contract_name) {
+            self.vm.restore_contract_state(contract_name)
+                .map_err(|e| format!("Failed to restore contract state: {}", e))?;
+        }
+
+        // Update module info
+        self.loaded_modules.insert(contract_name.to_string(), ModuleInfo {
+            name: contract_name.to_string(),
+            path: wasm_path.clone(),
+            module_type: ModuleType::WasmContract,
+            version: "latest".to_string(),
+            state: ModuleState::Active,
+            wasm_path: Some(wasm_path.clone()),
+        });
+
+        Ok(())
+    }
+
+    /// Patch a WASM contract
+    fn patch_wasm_contract(&mut self, contract_name: &str, path: PathBuf) -> Result<(), String> {
+        if !path.exists() {
+            return Err(format!("WASM file not found: {}", path.display()));
+        }
+
+        // Save contract state if needed
+        if let Some(module) = self.loaded_modules.get(contract_name) {
+            self.vm.save_contract_state(contract_name)
+                .map_err(|e| format!("Failed to save contract state: {}", e))?;
+        }
+
+        // Load new WASM module
+        let engine = self.wasm_engine.as_ref()
+            .ok_or_else(|| "WASM engine not initialized".to_string())?;
+        let module = Module::from_file(engine, &path)
+            .map_err(|e| format!("Failed to load WASM module: {}", e))?;
+        
+        // Create new instance
+        let mut store = self.wasm_store.take()
+            .ok_or_else(|| "WASM store not initialized".to_string())?;
+        let instance = Instance::new(&mut store, &module, &[])
+            .map_err(|e| format!("Failed to instantiate WASM module: {}", e))?;
+
+        // Update instances
+        self.wasm_instances.insert(contract_name.to_string(), instance);
+        self.wasm_store = Some(store);
+
+        // Restore contract state if needed
+        if let Some(module) = self.loaded_modules.get(contract_name) {
+            self.vm.restore_contract_state(contract_name)
+                .map_err(|e| format!("Failed to restore contract state: {}", e))?;
+        }
+
+        // Update module info
+        self.loaded_modules.insert(contract_name.to_string(), ModuleInfo {
+            name: contract_name.to_string(),
+            path: path.clone(),
+            module_type: ModuleType::WasmContract,
+            version: "patched".to_string(),
+            state: ModuleState::Active,
+            wasm_path: Some(path),
+        });
+
+        Ok(())
     }
 }
 

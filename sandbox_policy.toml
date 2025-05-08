@@ -1,0 +1,201 @@
+# KSL Sandbox Policy Configuration
+# This template can be used to configure sandbox policies for different testnet environments
+
+# General sandbox configuration
+[general]
+# Whether to use WASI sandbox instead of Docker
+use_wasi = false
+# Whether to enable violation logging
+enable_logging = true
+# Path to store violation logs
+log_path = "sandbox_logs.json"
+# Whether to enforce strict mode (additional security checks)
+strict_mode = true
+
+# Resource limits configuration
+[resource_limits]
+# Maximum memory usage in bytes (e.g., 1GB = 1073741824)
+max_memory = 1073741824
+# Maximum CPU time in seconds
+max_cpu_time = 60
+# Maximum file size in bytes
+max_file_size = 1048576  # 1MB
+# Maximum number of open files
+max_files = 100
+# Maximum number of threads
+max_threads = 4
+
+# Network access configuration
+[network]
+# Whether to allow HTTP operations
+allow_http = true
+# Maximum requests per second
+max_requests_per_second = 10
+# Maximum total requests
+max_total_requests = 1000
+# Maximum bytes per request
+max_bytes_per_request = 1048576  # 1MB
+# Maximum total bytes transferred
+max_total_bytes = 104857600  # 100MB
+
+# List of allowed domains (empty means all domains allowed)
+allowed_domains = [
+    "api.testnet.example.com",
+    "rpc.testnet.example.com",
+    "storage.testnet.example.com"
+]
+
+# File system access configuration
+[filesystem]
+# Whether to allow file system access
+allow_filesystem = true
+# List of allowed paths (relative to sandbox root)
+allowed_paths = [
+    "/tmp",
+    "/data",
+    "/config"
+]
+# Whether to allow writing to files
+allow_write = true
+# Whether to allow reading from files
+allow_read = true
+# Whether to allow creating new files
+allow_create = true
+# Whether to allow deleting files
+allow_delete = false
+
+# Seccomp profile configuration
+[seccomp]
+# Path to seccomp profile (JSON or TOML)
+profile_path = "seccomp_profiles/testnet.json"
+# Default action for unknown syscalls
+default_action = "kill"  # Options: allow, kill, trap, trace, log
+# Whether to log syscall violations
+log_violations = true
+
+# Contract execution limits
+[contract]
+# Maximum gas per transaction
+max_gas = 1000000
+# Maximum contract size in bytes
+max_size = 1048576  # 1MB
+# Maximum number of storage operations
+max_storage_ops = 1000
+# Maximum number of cross-contract calls
+max_cross_calls = 10
+# Whether to allow self-destruct
+allow_self_destruct = false
+
+# Validator-specific configuration
+[validator]
+# Maximum number of validators
+max_validators = 100
+# Maximum stake per validator
+max_stake = 1000000
+# Minimum stake per validator
+min_stake = 1000
+# Maximum number of delegations
+max_delegations = 100
+# Whether to allow validator key rotation
+allow_key_rotation = true
+
+# Sharding configuration
+[sharding]
+# Number of shards
+num_shards = 4
+# Maximum cross-shard messages per block
+max_cross_shard_msgs = 100
+# Maximum shard size in bytes
+max_shard_size = 1073741824  # 1GB
+# Whether to enable shard replication
+enable_replication = true
+
+# Consensus configuration
+[consensus]
+# Consensus algorithm to use
+algorithm = "tendermint"  # Options: tendermint, paxos, raft
+# Block time in seconds
+block_time = 2
+# Maximum block size in bytes
+max_block_size = 1048576  # 1MB
+# Maximum number of transactions per block
+max_txs_per_block = 1000
+# Whether to allow forking
+allow_forking = false
+
+# Monitoring and metrics
+[monitoring]
+# Whether to enable performance metrics
+enable_metrics = true
+# Metrics collection interval in seconds
+metrics_interval = 60
+# Whether to enable tracing
+enable_tracing = true
+# Trace sampling rate (0.0 to 1.0)
+trace_sampling_rate = 0.1
+# Whether to enable profiling
+enable_profiling = true
+# Profiling output directory
+profiling_dir = "profiles"
+
+# Security features
+[security]
+# Whether to enable memory protection
+enable_memory_protection = true
+# Whether to enable stack protection
+enable_stack_protection = true
+# Whether to enable ASLR
+enable_aslr = true
+# Whether to enable DEP
+enable_dep = true
+# Whether to enable control flow integrity
+enable_cfi = true
+
+# Debug configuration
+[debug]
+# Whether to enable debug mode
+debug_mode = false
+# Debug log level
+log_level = "info"  # Options: trace, debug, info, warn, error
+# Whether to enable stack traces
+enable_stack_traces = true
+# Whether to enable memory dumps
+enable_memory_dumps = false
+# Debug output directory
+debug_dir = "debug_logs"
+
+# Example environment-specific overrides
+[environments.testnet]
+# Override specific settings for testnet
+resource_limits.max_memory = 2147483648  # 2GB
+network.max_requests_per_second = 20
+contract.max_gas = 2000000
+
+[environments.mainnet]
+# Override specific settings for mainnet
+resource_limits.max_memory = 4294967296  # 4GB
+network.max_requests_per_second = 5
+contract.max_gas = 5000000
+security.enable_memory_protection = true
+security.enable_stack_protection = true
+
+# Example contract-specific policies
+[contract_policies.standard]
+# Standard contract policy
+max_gas = 1000000
+max_size = 1048576
+allow_self_destruct = false
+
+[contract_policies.system]
+# System contract policy
+max_gas = 5000000
+max_size = 5242880
+allow_self_destruct = true
+security.enable_memory_protection = true
+
+[contract_policies.user]
+# User contract policy
+max_gas = 500000
+max_size = 524288
+allow_self_destruct = false
+security.enable_memory_protection = false 

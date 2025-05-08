@@ -1,6 +1,6 @@
 # KSL File Inventory
 ## Processed Files
-### Batch 1 (First 10 Files)
+### Batch 1
 - **ksl_parser.rs**: Parses KSL source into AST.
   - Documentation: Partial (sample `///` comments added).
   - Integration: Complete (used by `ksl_checker.rs`, `ksl_cli.rs`).
@@ -42,7 +42,7 @@
   - Integration: Complete (uses `ksl_bytecode.rs`).
   - Issues: Complete `///` comments.
 
-### Batch 2 (Next 9 Files)
+### Batch 2
 - **ksl_stdlib_io.rs**: I/O functions for KSL standard library (HTTP, sensors).
   - Documentation: Partial (sample `///` comments added).
   - Integration: Complete (VM opcodes implemented in Batch 3).
@@ -84,7 +84,7 @@
   - Integration: Complete (uses `ksl_module.rs`).
   - Issues: Complete `///` comments.
 
-### Batch 3 (Next 8 Files)
+### Batch 3
 - **ksl_bench.rs**: Benchmarking framework for KSL programs.
   - Documentation: Partial (sample `///` comments added).
   - Integration: Complete (uses `ksl_parser.rs`, `ksl_checker.rs`, `kapra_vm.rs`, `ksl_module.rs`).
@@ -126,7 +126,7 @@
   - Integration: Complete (VM sandboxing extension implemented in Batch 3).
   - Issues: Complete `///` comments.
 
-### Batch 4 (Next 9 Files)
+### Batch 4
 - **ksl_coverage.rs**: Code coverage measurement for KSL tests.
   - Documentation: Partial (sample `///` comments added).
   - Integration: Complete (CoverageVM trait implemented in Batch 4).
@@ -164,7 +164,7 @@
   - Integration: Complete (uses `ksl_parser.rs`, `ksl_wasm.rs`, `ksl_aot.rs`, `ksl_sandbox.rs`).
   - Issues: Complete `///` comments; enhance optimization strategies.
 
-### Batch 5 (Next 7 Files)
+### Batch 5
 - **ksl_docgen.rs**: API documentation generator for KSL libraries.
   - Documentation: Missing (no `///` comments).
   - Integration: Complete (uses `ksl_parser.rs`, `ksl_doc.rs`).
@@ -205,3 +205,98 @@
   - Documentation: Missing (no `///` comments).
   - Integration: Complete (uses `ksl_parser.rs`, `ksl_checker.rs`, `kapra_vm.rs`, `ksl_optimizer.rs`, `ksl_profile.rs`).
   - Issues: Add `///` comments.
+- **ksl_jit.rs**: Provides Just-In-Time (JIT) compilation for KSL to enable dynamic performance optimization.
+  - Documentation: Missing (no `///` comments for `JITCompiler`, `ProfileData`, `Optimizer`, `MachineCode`, `run_jit`).
+  - Integration: Pending (requires integration with `kapra_vm.rs` for JIT execution, `ksl_optimizer.rs` for Kapra Chain opcodes, `ksl_doc.rs` for documentation).
+  - Issues: Add `///` comments; extend `KapraVM::execute` to call `JITCompiler::jit_compile_and_run`; update `Optimizer::optimize` for `KapraOpCode::Sha3`, `KapraOpCode::MatrixMul`, `KapraOpCode::DilVerify`.
+
+- **ksl_macros.rs**: Implements a macro system for KSL to enable metaprogramming and code generation.
+  - Documentation: Missing (no `///` comments for `MacroExpander`, `MacroDef`, `MacroCall`, `MacroParam`, `MacroTypeChecker`).
+  - Integration: Pending (requires integration with `ksl_parser.rs`, `ksl_checker.rs` for macro parsing/checking, `ksl_docgen.rs` for documentation).
+  - Issues: Add `///` comments; extend `parse` in `ksl_parser.rs` for `AstNode::MacroDef`, `AstNode::MacroCall`; update `check` in `ksl_checker.rs` for macro validation.
+
+- **ksl_generics.rs**: Adds support for generic types and functions in KSL.
+  - Documentation: Missing (no `///` comments for `GenericDef`, `TypeParam`, `GenericTypeChecker`, `GenericCompiler`).
+  - Integration: Pending (requires integration with `ksl_parser.rs`, `ksl_checker.rs`, `ksl_compiler.rs` for generics, `ksl_docgen.rs` for documentation).
+  - Issues: Add `///` comments; extend `parse` for `AstNode::GenericFunction`, `AstNode::GenericStruct`; update `check` and `compile` for generics.
+
+- **ksl_doc_lsp.rs**: Integrates `ksl_docgen.rs` with `ksl_lsp.rs` to provide IDE documentation via LSP with caching.
+  - Documentation: Missing (no `///` comments for `DocLspServer`, `DocLspConfig`, `start_doc_lsp`).
+  - Integration: Pending (requires integration with `ksl_lsp.rs` for hover/completion, `ksl_doc.rs` for cross-referencing).
+  - Issues: Add `///` comments; update `LspServer::hover`, `LspServer::generate_completions` to use `DocLspServer::get_doc`; modify `preload_docs` for cross-references.
+
+- **ksl_stdlib_net.rs**: Adds networking support to the KSL standard library, including TCP/UDP and HTTP client functions with async support.
+  - Documentation: Missing (no `///` comments for `NetStdLib`, `TcpConnect`, `UdpSend`, `HttpPost`).
+  - Integration: Pending (requires integration with `kapra_vm.rs`, `ksl_async.rs` for async networking, `ksl_docgen.rs` for documentation).
+  - Issues: Add `///` comments; extend `KapraVM::execute` for networking opcodes; update `generate_docs` for detailed function docs.
+
+- **ksl_lsp.rs**: Implements an LSP server for KSL, providing IDE features like autocompletion, go-to-definition, hover documentation, and diagnostics.
+  - Documentation: Missing (no `///` comments for `LspServer`, `LspServerConfig`, `start_lsp`).
+  - Integration: Pending (requires integration with `ksl_doc_lsp.rs` for hover/completion, `ksl_security.rs` for diagnostics).
+  - Issues: Add `///` comments; modify `handle_request` to use `DocLspServer::get_doc`; update `generate_diagnostics` for security issues.
+
+- **ksl_ffi.rs**: Provides a Foreign Function Interface (FFI) for calling KSL code from other languages (e.g., C) and vice versa.
+  - Documentation: Missing (no `///` comments for `FfiGenerator`, `FfiConfig`, `generate_ffi`).
+  - Integration: Pending (requires integration with `ksl_bind.rs` for bindings, `ksl_async.rs` for async FFI).
+  - Issues: Add `///` comments; update `FfiGenerator::generate` for C-compatible bindings; extend `generate_c_bindings` for async functions.
+
+- **ksl_async.rs**: Adds asynchronous programming support to KSL with async/await syntax and async I/O operations.
+  - Documentation: Missing (no `///` comments for `AsyncProcessor`, `AsyncConfig`, `AsyncRuntime`, `process_async`).
+  - Integration: Pending (requires integration with `kapra_vm.rs`, `ksl_stdlib_net.rs` for networking, `ksl_kapra_shard.rs` for sharding).
+  - Issues: Add `///` comments; extend `KapraVM::run_with_async` for networking opcodes; update `ShardRuntime::shard_send` for async tasks.
+
+- **ksl_transpiler.rs**: Transpiles KSL code to other languages (e.g., Rust, Python) for broader compatibility.
+  - Documentation: Missing (no `///` comments for `Transpiler`, `TranspilerConfig`, `transpile`).
+  - Integration: Pending (requires integration with `ksl_ast_transform.rs` for AST transformations, `ksl_async.rs`, `ksl_generics.rs` for async/generic code).
+  - Issues: Add `///` comments; update `transpile` for loop unrolling, constant folding; extend `transpile_to_rust`, `transpile_to_python` for generics, async.
+
+- **ksl_contract_verifier.rs**: Provides formal verification for blockchain smart contracts, with Kapra Chain-specific checks for validators.
+  - Documentation: Missing (no `///` comments for `ContractVerifier`, `VerificationConfig`, `VerificationResult`, `contract_verify`).
+  - Integration: Pending (requires integration with `ksl_kapra_validator.rs` for validator bytecode, `ksl_optimizer.rs` for gas usage).
+  - Issues: Add `///` comments; extend `verify_contract` for validator AST nodes; update `check_gas_usage` for optimized bytecode.
+
+- **ksl_kapra_validator.rs**: Language-level validator primitives for Kapra Chain, including compilation and execution of validator blocks.
+  - Documentation: Missing (no `///` comments for `ValidatorCompiler`, `KapraVM`, `Bytecode`, `Constant`, `AstNode`).
+  - Integration: Pending (requires integration with `kapra_vm.rs` for validator opcodes, `ksl_kapra_crypto.rs` for crypto).
+  - Issues: Add `///` comments; extend `KapraVM::execute` for validator opcodes; update `KapraCrypto::dil_verify`, `sha3` for real crypto.
+
+- **ksl_runtime_monitor.rs**: Runtime monitoring for KSL programs to track behavior and enforce policies.
+  - Documentation: Missing (no `///` comments for `RuntimeMonitor`, `RuntimeMetrics`, `RuntimePolicies`, `run_runtime_monitor`).
+  - Integration: Pending (requires integration with `ksl_metrics.rs` for metrics, `ksl_security.rs` for anomaly detection).
+  - Issues: Add `///` comments; extend `RuntimeMetrics` for VM-specific metrics; update `AnomalyDetector::detect` for security checks.
+
+- **ksl_embedded.rs**: Support for embedded systems as a compilation target, optimized for Kapra Chain validators.
+  - Documentation: Missing (no `///` comments for `EmbeddedCompiler`, `EmbeddedVM`, `EmbeddedOptimizer`, `run_compile_embedded`).
+  - Integration: Pending (requires integration with `ksl_aot.rs` for native code, `ksl_kapra_crypto.rs` for crypto).
+  - Issues: Add `///` comments; extend `EmbeddedCompiler::compile` for Cranelift IR; update `KapraCrypto::dil_verify`, `sha3` for real crypto.
+
+- **ksl_kapra_crypto.rs**: Optimized quantum-resistant cryptographic functions for Kapra Chain.
+  - Documentation: Missing (no `///` comments for `KapraCrypto`, `DilithiumVerifier`, `VRFGenerator`).
+  - Integration: Pending (requires integration with `ksl_stdlib_crypto.rs`, `ksl_contract_verifier.rs`, `ksl_kapra_validator.rs` for crypto).
+  - Issues: Add `///` comments; update `ksl_stdlib_crypto.rs` for `dil_verify`, `vrf_generate`; extend `check_kapra_validator`, `KapraVM::execute` for `DilithiumVerifier`.
+  
+- **ksl_project.rs**: Project initialization tool for KSL with templates and scaffolding.
+  - Documentation: Missing (no `///` comments for `ProjectInitializer`, `TemplateRegistry`, `run_project_init`).
+  - Integration: Pending (requires integration with `ksl_template.rs` for dynamic templates, `ksl_docgen.rs` for documentation).
+  - Issues: Add `///` comments; update `TemplateRegistry::new` for dynamic templates; integrate with `ksl_docgen.rs` for initial docs.
+
+- **ksl_dep_audit.rs**: Audit KSL package dependencies for security and licensing issues.
+  - Documentation: Missing (no `///` comments for `DependencyAuditor`, `AuditReport`, `VulnerabilityDatabase`, `run_dep_audit`).
+  - Integration: Pending (requires integration with `ksl_package_version.rs` for version resolution, `ksl_security.rs` for security analysis).
+  - Issues: Add `///` comments; update `DependencyResolver` for version constraints; extend `SecurityAnalyzer::analyze` for deeper checks.
+
+- **ksl_package_version.rs**: Version management and dependency resolution enhancements for KSL packages.
+  - Documentation: Missing (no `///` comments for `PackageRegistry`, `DependencyResolver`, `SemVer`, `VersionConstraint`, `run_package_version`).
+  - Integration: Pending (requires integration with `ksl_package.rs`, `ksl_package_publish.rs` for package lifecycle, `ksl_registry.rs` for remote queries).
+  - Issues: Add `///` comments; extend `PackageRegistry` for publishing, resolution; update `PackageRegistry::find_compatible` for registry queries.
+
+- **ksl_hot_reload.rs**: Enables hot reloading of KSL code, monitoring source files for changes.
+  - Documentation: Missing (no `///` comments for `HotReloadManager`, `HotReloadConfig`, `HotReloadState`, `hot_reload`).
+  - Integration: Pending (requires integration with `kapra_vm.rs` for bytecode reloading, `ksl_simulator.rs` for testing).
+  - Issues: Add `///` comments; implement `reload_bytecode` in `kapra_vm.rs`; update `run_simulation` for hot reload events.
+
+- **ksl_kapra_shard.rs**: Language-level sharding primitives for Kapra Chain.
+  - Documentation: Missing (no `///` comments for `ShardCompiler`, `ShardRuntime`, `KapraVM`, `AsyncTask`).
+  - Integration: Pending (requires integration with `ksl_stdlib_net.rs` for networking, `ksl_contract_verifier.rs` for shard block verification).
+  - Issues: Add `///` comments; update `ShardRuntime::shard_send` for `net.udp_send`; extend `check_kapra_validator` for `AstNode::ShardBlock`.
+

@@ -9,6 +9,11 @@ use tokio::sync::RwLock;
 use crate::ksl_async::{AsyncRuntime, AsyncResult};
 use crate::ksl_kapra_consensus::{ConsensusRuntime, ConsensusState};
 use crate::ksl_errors::{KslError, SourcePosition};
+use crossbeam_queue::SegQueue;
+use packed_simd::{u8x32, u32x8, u64x4};
+use rand::Rng;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 /// Represents KSL bytecode (aligned with ksl_bytecode.rs).
 #[derive(Debug, Clone)]
@@ -74,6 +79,43 @@ pub struct ShardState {
     pub last_block: [u8; 32],
     pub validators: Vec<[u8; 32]>,
     pub signatures: HashMap<[u8; 32], [u8; 2420]>, // validator_id -> signature
+}
+
+/// Lock-free transaction pool for a shard
+#[derive(Debug)]
+pub struct ShardTransactionPool {
+    /// Pending transactions
+    pending: SegQueue<Transaction>,
+    /// Transaction count
+    tx_count: AtomicU64,
+    /// Pool metrics
+    metrics: TransactionPoolMetrics,
+}
+
+/// Transaction pool metrics
+#[derive(Debug, Default)]
+pub struct TransactionPoolMetrics {
+    /// Total transactions processed
+    total_processed: AtomicU64,
+    /// Average transaction latency
+    avg_latency_us: AtomicU64,
+    /// Peak transactions per second
+    peak_tps: AtomicU64,
+}
+
+/// Transaction with SIMD-optimized state
+#[derive(Debug, Clone)]
+pub struct Transaction {
+    /// Transaction ID
+    id: [u8; 32],
+    /// Transaction data (SIMD-aligned)
+    data: Vec<u8>,
+    /// Source shard
+    source_shard: u32,
+    /// Destination shard
+    dest_shard: u32,
+    /// Timestamp
+    timestamp: u64,
 }
 
 /// Sharding runtime for Kapra Chain (integrates with ksl_stdlib_net.rs).
@@ -170,6 +212,21 @@ impl ShardRuntime {
         ).await?;
 
         Ok(())
+    }
+
+    /// Creates a new transaction pool for the shard
+    pub fn create_pool(&self) -> ShardTransactionPool {
+        ShardTransactionPool::new()
+    }
+
+    /// Creates a new state transition engine
+    pub fn create_engine(&self, state_size: usize) -> StateTransitionEngine {
+        StateTransitionEngine::new(state_size)
+    }
+
+    /// Creates a new gossip protocol instance
+    pub fn create_gossip(&self, interval: Duration, cache_size: usize) -> GossipProtocol {
+        GossipProtocol::new(interval, cache_size)
     }
 }
 

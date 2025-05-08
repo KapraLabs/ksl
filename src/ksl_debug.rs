@@ -47,7 +47,9 @@ pub struct Debugger {
     vm: KapraVM, // VM instance for execution
     bytecode: KapraBytecode, // Program bytecode
     breakpoints: HashSet<u32>, // Instruction indices for breakpoints
+    function_breakpoints: HashSet<String>, // Function name breakpoints for JIT
     running: bool, // Debugger loop control
+    is_jit: bool, // Whether running in JIT mode
 }
 
 impl Debugger {
@@ -87,13 +89,77 @@ impl Debugger {
             vm,
             bytecode,
             breakpoints: HashSet::new(),
+            function_breakpoints: HashSet::new(),
             running: true,
+            is_jit: false,
         })
+    }
+
+    // Enable JIT mode
+    pub fn enable_jit(&mut self) {
+        self.is_jit = true;
+    }
+
+    // Attach bytecode for debugging
+    pub fn attach_bytecode(&mut self, bytecode: &KapraBytecode) -> Result<(), String> {
+        self.bytecode = bytecode.clone();
+        Ok(())
+    }
+
+    // Check if a function has a breakpoint (for JIT mode)
+    pub fn has_breakpoint(&self, function_name: &str) -> bool {
+        self.function_breakpoints.contains(function_name)
+    }
+
+    // Handle a breakpoint in JIT mode
+    pub fn handle_breakpoint(&self) -> Result<(), String> {
+        println!("Breakpoint hit. Commands: continue, step, print <var>, quit");
+        loop {
+            print!("(ksl-dbg) ");
+            io::stdout().flush().map_err(|e| e.to_string())?;
+            let mut input = String::new();
+            io::stdin().read_line(&mut input).map_err(|e| e.to_string())?;
+            let input = input.trim();
+
+            match input {
+                "continue" => break,
+                "step" => {
+                    println!("Stepping...");
+                    break;
+                }
+                "quit" => {
+                    println!("Exiting debugger...");
+                    std::process::exit(0);
+                }
+                cmd if cmd.starts_with("print ") => {
+                    let var = &cmd[6..];
+                    println!("Variable {}: <value not available in JIT mode>", var);
+                }
+                _ => println!("Unknown command. Use: continue, step, print <var>, quit"),
+            }
+        }
+        Ok(())
+    }
+
+    // Notify function entry (for JIT mode)
+    pub fn notify_function_entry(&mut self, function_name: &str) -> Result<(), String> {
+        if self.is_jit {
+            println!("Entering function: {}", function_name);
+        }
+        Ok(())
+    }
+
+    // Notify function exit (for JIT mode)
+    pub fn notify_function_exit(&mut self, function_name: &str) -> Result<(), String> {
+        if self.is_jit {
+            println!("Exiting function: {}", function_name);
+        }
+        Ok(())
     }
 
     // Start the debugging session
     pub fn run(&mut self) -> Result<(), String> {
-        println!("KSL Debugger started. Commands: break <index>, step, continue, print <rN/mem addr>, net, tasks, quit");
+        println!("KSL Debugger started. Commands: break <index/function>, step, continue, print <rN/mem addr>, net, tasks, quit");
         while self.running {
             self.print_state();
             match self.read_command() {
@@ -121,10 +187,20 @@ impl Debugger {
         } else if input.starts_with("break ") {
             let parts: Vec<&str> = input.split_whitespace().collect();
             if parts.len() != 2 {
-                return Err("Invalid break command: use 'break <index>'".to_string());
+                return Err("Invalid break command: use 'break <index/function>'".to_string());
             }
-            let index = parts[1].parse::<u32>().map_err(|e| format!("Invalid index: {}", e))?;
-            return Ok(DebugCommand::Break(index));
+            // Try parsing as instruction index first
+            match parts[1].parse::<u32>() {
+                Ok(index) => return Ok(DebugCommand::Break(index)),
+                Err(_) => {
+                    // If not a number, treat as function name
+                    if self.is_jit {
+                        self.function_breakpoints.insert(parts[1].to_string());
+                        println!("Breakpoint set on function: {}", parts[1]);
+                    }
+                    return Ok(DebugCommand::Break(0)); // Dummy index for function breakpoint
+                }
+            }
         } else if input.starts_with("print ") {
             let parts: Vec<&str> = input.split_whitespace().collect();
             if parts.len() != 2 {

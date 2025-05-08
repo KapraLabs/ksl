@@ -13,6 +13,10 @@ use sha3::{Digest, Sha3_256, Sha3_512};
 use crate::ksl_stdlib_net::NetStdLib;
 use crate::ksl_async::AsyncRuntime;
 use std::sync::Arc;
+use std::fs::{self, File};
+use std::path::PathBuf;
+use bincode::{serialize, deserialize};
+use serde::{Serialize, Deserialize};
 
 // Re-export dependencies
 mod ksl_bytecode {
@@ -52,10 +56,10 @@ pub struct RuntimeError {
 
 /// Virtual machine state for executing KapraBytecode.
 pub struct KapraVM {
-    registers: [Vec<u8>; 16], // 16 registers, storing raw bytes
+    registers: Vec<u64>,
     stack: Vec<(usize, HashMap<u8, Vec<u8>>)>, // (return_pc, saved_registers)
     pc: usize, // Program counter
-    memory: HashMap<u64, Vec<u8>>, // Heap for immediates
+    memory: Vec<u8>, // Heap for immediates
     next_mem_addr: u64, // Next free memory address
     bytecode: KapraBytecode, // Program to execute
     halted: bool, // Halt flag
@@ -67,6 +71,26 @@ pub struct KapraVM {
     crypto: KapraCrypto, // Crypto module
     net_stdlib: Option<NetStdLib>, // Networking standard library
     runtime: Option<Arc<AsyncRuntime>>, // Async runtime
+    debug_mode: bool,
+}
+
+/// Contract state that can be serialized
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContractState {
+    /// Contract name
+    pub name: String,
+    /// Contract memory
+    pub memory: Vec<u8>,
+    /// Contract globals
+    pub globals: HashMap<String, Vec<u8>>,
+    /// Contract stack
+    pub stack: Vec<(usize, HashMap<u8, Vec<u8>>)>,
+    /// Contract registers
+    pub registers: HashMap<usize, Vec<u8>>,
+    /// Contract heap
+    pub heap: HashMap<usize, u8>,
+    /// Contract version
+    pub version: u64,
 }
 
 impl KapraVM {
@@ -82,10 +106,10 @@ impl KapraVM {
     pub fn new(bytecode: KapraBytecode, runtime: Option<Arc<AsyncRuntime>>) -> Self {
         let net_stdlib = runtime.as_ref().map(|r| NetStdLib::new(r.clone()));
         KapraVM {
-            registers: [vec![]; 16],
+            registers: vec![0; 256],
             stack: Vec::new(),
             pc: 0,
-            memory: HashMap::new(),
+            memory: vec![0; 65536],
             next_mem_addr: 0,
             bytecode,
             halted: false,
@@ -97,7 +121,12 @@ impl KapraVM {
             crypto: KapraCrypto::new(false), // Default to non-embedded mode
             net_stdlib,
             runtime,
+            debug_mode: false,
         }
+    }
+
+    pub fn enable_debug(&mut self) {
+        self.debug_mode = true;
     }
 
     /// Runs the bytecode program.
@@ -107,27 +136,35 @@ impl KapraVM {
     /// let mut vm = KapraVM::new(bytecode, None);
     /// vm.run().unwrap();
     /// ```
-    pub fn run(&mut self) -> Result<(), RuntimeError> {
-        while !self.halted && self.pc < self.bytecode.instructions.len() {
+    pub fn run(&mut self, async_support: bool, debug_mode: bool) -> Result<i64, KslError> {
+        self.debug_mode = debug_mode;
+        if debug_mode {
+            println!("Running VM in debug mode");
+        }
+        
+        while self.pc < self.bytecode.instructions.len() {
+            if self.debug_mode {
+                self.print_debug_info();
+            }
+            
             let instruction = &self.bytecode.instructions[self.pc];
-            // Record coverage
-            if let Some(coverage) = self.coverage_data.as_mut() {
-                coverage.insert(self.pc);
-            }
-            // Increment instruction counter
-            if self.metrics_data.is_some() {
-                ksl_metrics::MetricsCollector::increment_counter("instructions_executed");
-            }
-            self.execute_instruction(instruction)?;
+            self.execute_instruction(instruction, async_support)?;
             self.pc += 1;
         }
-        Ok(())
+
+        Ok(self.registers[0])
+    }
+
+    fn print_debug_info(&self) {
+        println!("PC: {}", self.pc);
+        println!("Current instruction: {:?}", self.bytecode.instructions[self.pc]);
+        println!("Registers: {:?}", self.registers);
     }
 
     /// Executes a single instruction.
     /// @param instr The instruction to execute.
     /// @returns `Ok(())` if execution succeeds, or `Err` with a `RuntimeError`.
-    fn execute_instruction(&mut self, instr: &KapraInstruction) -> Result<(), RuntimeError> {
+    fn execute_instruction(&mut self, instr: &KapraInstruction, async_support: bool) -> Result<(), RuntimeError> {
         match instr.opcode {
             KapraOpCode::Mov => {
                 let dst = self.get_register(&instr.operands[0], self.pc)?;
@@ -203,7 +240,7 @@ impl KapraVM {
             }
             KapraOpCode::Return => {
                 if let Some((return_pc, saved_registers)) = self.stack.pop() {
-                    self.registers = [vec![]; 16];
+                    self.registers = vec![0; 256];
                     for (reg, value) in saved_registers {
                         self.registers[reg as usize] = value;
                     }
@@ -438,7 +475,7 @@ impl KapraVM {
         pc: usize,
     ) -> Result<Vec<u8>, RuntimeError> {
         match operand {
-            Operand::Register(reg) if *reg < 16 => Ok(self.registers[*reg as usize].clone()),
+            Operand::Register(reg) if *reg < 16 => Ok(self.registers[*reg as usize].to_le_bytes().to_vec()),
             Operand::Immediate(data) => Ok(data.clone()),
             _ => Err(RuntimeError {
                 message: "Invalid operand".to_string(),
@@ -476,7 +513,7 @@ impl KapraVM {
             match instruction.opcode {
                 KapraOpCode::TcpConnect | KapraOpCode::UdpSend | 
                 KapraOpCode::HttpPost | KapraOpCode::HttpGet => {
-                    self.execute_instruction(instruction)?;
+                    self.execute_instruction(instruction, true)?;
                     // Wait for async operation to complete
                     if let Some((dst_reg, _)) = self.pending_async.last() {
                         runtime.poll().await.map_err(|e| RuntimeError {
@@ -487,7 +524,7 @@ impl KapraVM {
                     }
                 }
                 _ => {
-                    self.execute_instruction(instruction)?;
+                    self.execute_instruction(instruction, true)?;
                 }
             }
             self.pc += 1;
@@ -543,6 +580,99 @@ impl KapraVM {
             }),
         }
     }
+
+    /// Saves contract state to a file
+    pub fn save_contract_state(&self, name: &str) -> Result<(), KslError> {
+        let pos = SourcePosition::new(1, 1);
+        
+        // Create state directory if it doesn't exist
+        let state_dir = PathBuf::from("./state");
+        fs::create_dir_all(&state_dir).map_err(|e| KslError::runtime_error(
+            format!("Failed to create state directory: {}", e),
+            None,
+        ))?;
+
+        // Create contract state
+        let state = ContractState {
+            name: name.to_string(),
+            memory: self.memory.clone(),
+            globals: self.state.as_ref()
+                .map(|s| s.globals.iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect())
+                .unwrap_or_default(),
+            stack: self.stack.clone(),
+            registers: self.registers.iter()
+                .enumerate()
+                .map(|(i, v)| (i, v.clone()))
+                .collect(),
+            heap: self.memory.iter()
+                .enumerate()
+                .map(|(i, &b)| (i, b))
+                .collect(),
+            version: 1, // TODO: Track version from contract metadata
+        };
+
+        // Serialize state
+        let bytes = serialize(&state).map_err(|e| KslError::runtime_error(
+            format!("Failed to serialize contract state: {}", e),
+            None,
+        ))?;
+
+        // Write to file
+        let file_path = state_dir.join(format!("{}.bin", name));
+        fs::write(&file_path, bytes).map_err(|e| KslError::runtime_error(
+            format!("Failed to write contract state: {}", e),
+            None,
+        ))?;
+
+        Ok(())
+    }
+
+    /// Restores contract state from a file
+    pub fn restore_contract_state(&mut self, name: &str) -> Result<(), KslError> {
+        let pos = SourcePosition::new(1, 1);
+        
+        // Read state file
+        let file_path = PathBuf::from("./state").join(format!("{}.bin", name));
+        let bytes = fs::read(&file_path).map_err(|e| KslError::runtime_error(
+            format!("Failed to read contract state: {}", e),
+            None,
+        ))?;
+
+        // Deserialize state
+        let state: ContractState = deserialize(&bytes).map_err(|e| KslError::runtime_error(
+            format!("Failed to deserialize contract state: {}", e),
+            None,
+        ))?;
+
+        // Restore memory
+        self.memory = state.memory;
+
+        // Restore globals
+        if let Some(vm_state) = &mut self.state {
+            vm_state.globals = state.globals;
+        }
+
+        // Restore stack
+        self.stack = state.stack;
+
+        // Restore registers
+        for (reg_id, value) in state.registers {
+            if reg_id < self.registers.len() {
+                self.registers[reg_id] = value;
+            }
+        }
+
+        // Restore heap
+        for (addr, value) in state.heap {
+            if addr < self.memory.len() {
+                self.memory[addr] = value;
+            }
+        }
+
+        Ok(())
+    }
 }
 
 /// Simplified Kaprekar step (for u32 input).
@@ -566,9 +696,13 @@ fn kaprekar_step(input: u32) -> u32 {
 /// let bytecode = KapraBytecode::new();
 /// run(bytecode).unwrap();
 /// ```
-pub fn run(bytecode: KapraBytecode) -> Result<(), RuntimeError> {
+pub fn run(bytecode: KapraBytecode, async_support: bool, debug_mode: bool) -> Result<(), KslError> {
     let mut vm = KapraVM::new(bytecode, None);
-    vm.run()
+    if debug_mode {
+        vm.enable_debug();
+    }
+    vm.run(async_support, debug_mode)?;
+    Ok(())
 }
 
 // Implement HotReloadableVM trait
@@ -577,22 +711,95 @@ impl ksl_hot_reload::HotReloadableVM for KapraVM {
         let mut vm = KapraVM::new(bytecode, None);
         vm.state = Some(HotReloadState {
             globals: HashMap::new(),
+            networking_state: NetworkingState::default(),
+            async_state: AsyncState::default(),
+            preserved_registers: HashMap::new(),
+            preserved_stack: Vec::new(),
+            preserved_heap: HashMap::new(),
         });
         vm
     }
 
     fn run_with_state(&mut self) -> Result<(), RuntimeError> {
-        self.run()
+        self.run(true, self.debug_mode)?;
+        Ok(())
     }
 
-    fn reload_bytecode(&mut self, new_bytecode: KapraBytecode) -> Result<(), KslError> {
+    fn reload_bytecode(
+        &mut self,
+        new_bytecode: KapraBytecode,
+        networking_state: Option<NetworkingState>,
+        async_state: Option<AsyncState>,
+    ) -> Result<(), KslError> {
         let pos = SourcePosition::new(1, 1);
-        // Preserve state
-        let preserved_state = self.state.clone();
+
+        // Save current state if we have a contract name
+        if let Some(state) = &self.state {
+            if let Some(contract_name) = state.globals.get("__contract_name") {
+                if let Ok(name) = String::from_utf8(contract_name.clone()) {
+                    self.save_contract_state(&name)?;
+                }
+            }
+        }
+
+        // Preserve current state
+        let preserved_state = if let Some(state) = &self.state {
+            HotReloadState {
+                globals: state.globals.clone(),
+                networking_state: networking_state.unwrap_or_else(|| state.networking_state.clone()),
+                async_state: async_state.unwrap_or_else(|| state.async_state.clone()),
+                preserved_registers: self.registers.iter()
+                    .enumerate()
+                    .map(|(i, v)| (i, v.clone()))
+                    .collect(),
+                preserved_stack: self.stack.clone(),
+                preserved_heap: self.memory.iter().map(|&b| b as u8).collect(),
+            }
+        } else {
+            HotReloadState {
+                globals: HashMap::new(),
+                networking_state: networking_state.unwrap_or_default(),
+                async_state: async_state.unwrap_or_default(),
+                preserved_registers: HashMap::new(),
+                preserved_stack: Vec::new(),
+                preserved_heap: HashMap::new(),
+            }
+        };
+
+        // Update bytecode
         self.bytecode = new_bytecode;
         self.pc = 0; // Reset program counter
-        self.state = preserved_state;
-        self.pending_async.clear(); // Clear async calls
+
+        // Restore preserved state
+        self.state = Some(preserved_state.clone());
+
+        // Restore registers that exist in both old and new bytecode
+        for (reg_id, value) in preserved_state.preserved_registers {
+            if reg_id < self.registers.len() {
+                self.registers[reg_id] = value;
+            }
+        }
+
+        // Restore stack if compatible
+        if self.validate_stack_compatibility(&preserved_state.preserved_stack)? {
+            self.stack = preserved_state.preserved_stack;
+        }
+
+        // Restore heap
+        self.memory = preserved_state.preserved_heap.iter().map(|&b| b as u8).collect();
+
+        // Restore contract state if we have a contract name
+        if let Some(state) = &self.state {
+            if let Some(contract_name) = state.globals.get("__contract_name") {
+                if let Ok(name) = String::from_utf8(contract_name.clone()) {
+                    self.restore_contract_state(&name)?;
+                }
+            }
+        }
+
+        // Validate restored state
+        self.validate_state()?;
+
         Ok(())
     }
 }
@@ -653,6 +860,164 @@ impl ksl_simulator::SimVM for KapraVM {
         }
         self.execute_instruction(instr)
     }
+}
+
+impl KapraVM {
+    /// Get current globals
+    pub fn get_globals(&self) -> Result<HashMap<String, Value>, KslError> {
+        Ok(self.state.as_ref()
+            .map(|s| s.globals.clone())
+            .unwrap_or_default())
+    }
+
+    /// Set globals
+    pub fn set_globals(&mut self, globals: HashMap<String, Value>) -> Result<(), KslError> {
+        if let Some(state) = self.state.as_mut() {
+            state.globals = globals;
+        }
+        Ok(())
+    }
+
+    /// Pause operations for a module
+    pub fn pause_operations(&mut self, module_name: &str) -> Result<(), KslError> {
+        // Pause any operations associated with the module
+        if let Some(state) = self.state.as_mut() {
+            // Pause networking operations
+            for conn in state.networking_state.http_connections.values_mut() {
+                if conn.module == module_name {
+                    conn.state = ConnectionState::Paused;
+                }
+            }
+            for conn in state.networking_state.tcp_connections.values_mut() {
+                if conn.module == module_name {
+                    conn.state = ConnectionState::Paused;
+                }
+            }
+
+            // Pause async operations
+            for op in state.async_state.active_operations.values_mut() {
+                if op.module == module_name {
+                    op.state = AsyncStateType::Paused;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Resume operations for a module
+    pub fn resume_operations(&mut self, module_name: &str) -> Result<(), KslError> {
+        // Resume paused operations for the module
+        if let Some(state) = self.state.as_mut() {
+            // Resume networking operations
+            for conn in state.networking_state.http_connections.values_mut() {
+                if conn.module == module_name && conn.state == ConnectionState::Paused {
+                    conn.state = ConnectionState::Connected;
+                }
+            }
+            for conn in state.networking_state.tcp_connections.values_mut() {
+                if conn.module == module_name && conn.state == ConnectionState::Paused {
+                    conn.state = ConnectionState::Connected;
+                }
+            }
+
+            // Resume async operations
+            for op in state.async_state.active_operations.values_mut() {
+                if op.module == module_name && op.state == AsyncStateType::Paused {
+                    op.state = AsyncStateType::Pending;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate stack compatibility
+    fn validate_stack_compatibility(&self, preserved_stack: &Vec<Value>) -> Result<bool, KslError> {
+        // Check if stack types are compatible with current bytecode
+        for (i, value) in preserved_stack.iter().enumerate() {
+            if let Some(expected_type) = self.bytecode.get_stack_type(i) {
+                if !value.matches_type(expected_type) {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
+    }
+
+    /// Validate restored state
+    fn validate_state(&self) -> Result<(), KslError> {
+        if let Some(state) = &self.state {
+            // Validate globals
+            for (name, value) in &state.globals {
+                if let Some(expected_type) = self.bytecode.get_global_type(name) {
+                    if !value.matches_type(expected_type) {
+                        return Err(KslError::type_error(
+                            format!("Invalid type for global variable {}", name),
+                            None,
+                        ));
+                    }
+                }
+            }
+
+            // Validate registers
+            for (reg_id, value) in &state.preserved_registers {
+                if let Some(expected_type) = self.bytecode.get_register_type(*reg_id) {
+                    if !value.matches_type(expected_type) {
+                        return Err(KslError::type_error(
+                            format!("Invalid type for register {}", reg_id),
+                            None,
+                        ));
+                    }
+                }
+            }
+
+            // Validate heap references
+            for (addr, value) in &state.preserved_heap {
+                if !self.validate_heap_reference(*addr, value)? {
+                    return Err(KslError::runtime_error(
+                        format!("Invalid heap reference at address {}", addr),
+                        None,
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate heap reference
+    fn validate_heap_reference(&self, addr: usize, value: &Value) -> Result<bool, KslError> {
+        // Check if heap reference is valid in current bytecode
+        if let Some(heap_type) = self.bytecode.get_heap_type(addr) {
+            Ok(value.matches_type(heap_type))
+        } else {
+            Ok(false)
+        }
+    }
+}
+
+#[derive(Clone)]
+struct HotReloadState {
+    globals: HashMap<String, Value>,
+    networking_state: NetworkingState,
+    async_state: AsyncState,
+    preserved_registers: HashMap<usize, Vec<u8>>,
+    preserved_stack: Vec<Value>,
+    preserved_heap: HashMap<usize, Value>,
+}
+
+#[derive(Clone, PartialEq)]
+enum ConnectionState {
+    Connected,
+    Connecting,
+    Closed,
+    Paused,
+}
+
+#[derive(Clone, PartialEq)]
+enum AsyncStateType {
+    Pending,
+    Completed,
+    Failed(String),
+    Paused,
 }
 
 #[cfg(test)]
@@ -867,7 +1232,7 @@ mod tests {
         let mut vm = KapraVM::new_with_state(bytecode.clone());
         vm.registers[1] = 100u32.to_le_bytes().to_vec(); // Set state
         let new_bytecode = bytecode; // Same bytecode for simplicity
-        vm.reload_bytecode(new_bytecode).unwrap();
+        vm.reload_bytecode(new_bytecode, None, None).unwrap();
         assert_eq!(vm.pc, 0, "Program counter should reset");
         assert_eq!(
             vm.registers[1],
@@ -1089,7 +1454,7 @@ mod tests {
         ));
 
         // Reload bytecode
-        vm.reload_bytecode(new_bytecode).unwrap();
+        vm.reload_bytecode(new_bytecode, None, None).unwrap();
         
         // Run new program
         let result = vm.run_with_async(&runtime).await;

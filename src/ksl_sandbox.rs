@@ -1,23 +1,11 @@
 // ksl_sandbox.rs
-// Implements a secure sandboxing system for KSL program execution.
+// Implements a comprehensive sandboxing system for KSL contracts and programs.
 // 
 // Features:
-// - Container-based isolation using Docker
-// - Seccomp-based system call filtering
-// - Network access control and rate limiting
-// - Resource usage limits (memory, CPU, instructions)
-// - Function-level permission control
-// 
-// Usage:
-//   let mut sandbox = Sandbox::new();
-//   sandbox.configure_policy(SandboxPolicy {
-//       containerize: true,
-//       allow_http: true,
-//       max_memory: 1024 * 1024,
-//       max_instructions: 100_000,
-//       network_quota: NetworkQuota::default(),
-//   });
-//   sandbox.run_sandbox(&file_path)?;
+// - WASI sandbox fallback for WebAssembly execution
+// - Full seccomp integration with JSON/TOML profiles
+// - Sandbox violation logging
+// - Per-contract sandbox fingerprinting
 
 use crate::ksl_parser::{parse, AstNode};
 use crate::ksl_checker::check;
@@ -27,9 +15,19 @@ use crate::kapra_vm::{KapraVM, run};
 use crate::ksl_module::ModuleSystem;
 use crate::ksl_errors::{KslError, SourcePosition};
 use std::fs;
-use std::path::PathBuf;
-use std::collections::HashSet;
-use std::time::Duration;
+use std::path::{Path, PathBuf};
+use std::collections::{HashSet, HashMap};
+use std::time::{SystemTime, Duration};
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use serde::{Deserialize, Serialize};
+use wasmtime::{Engine, Module, Store, Linker};
+use wasmtime_wasi::{WasiCtx, WasiCtxBuilder};
+use seccompiler::{compile, SeccompAction, SeccompFilter, SeccompRule};
+use sha2::{Sha256, Digest};
+use chrono::{Local, DateTime};
+use serde_json;
+use toml;
 
 /// Network usage quotas for sandboxed programs
 #[derive(Debug, Clone)]
@@ -115,6 +113,102 @@ impl Default for NetworkState {
             request_times: Vec::new(),
         }
     }
+}
+
+/// Sandbox configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SandboxConfig {
+    /// Whether to use WASI sandbox
+    pub use_wasi: bool,
+    /// Seccomp profile path
+    pub seccomp_profile: Option<PathBuf>,
+    /// Resource limits
+    pub resource_limits: ResourceLimits,
+    /// Whether to enable violation logging
+    pub enable_logging: bool,
+    /// Log file path
+    pub log_path: Option<PathBuf>,
+}
+
+/// Resource limits for sandbox
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResourceLimits {
+    /// Maximum memory in bytes
+    pub max_memory: Option<usize>,
+    /// Maximum CPU time
+    pub max_cpu_time: Option<Duration>,
+    /// Maximum file size
+    pub max_file_size: Option<usize>,
+    /// Maximum number of files
+    pub max_files: Option<usize>,
+    /// Maximum number of threads
+    pub max_threads: Option<usize>,
+}
+
+/// Sandbox violation log entry
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ViolationLog {
+    /// Timestamp of violation
+    pub timestamp: DateTime<Local>,
+    /// Contract fingerprint
+    pub contract_fingerprint: String,
+    /// Violation type
+    pub violation_type: ViolationType,
+    /// Violation details
+    pub details: String,
+    /// Stack trace if available
+    pub stack_trace: Option<String>,
+}
+
+/// Violation type
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ViolationType {
+    /// Syscall violation
+    SyscallViolation {
+        syscall: String,
+        args: Vec<String>,
+    },
+    /// Resource limit violation
+    ResourceViolation {
+        resource: String,
+        limit: String,
+        actual: String,
+    },
+    /// Memory violation
+    MemoryViolation {
+        address: String,
+        size: usize,
+        operation: String,
+    },
+    /// File system violation
+    FileSystemViolation {
+        path: String,
+        operation: String,
+    },
+}
+
+/// Contract fingerprint
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContractFingerprint {
+    /// Hash of contract bytecode
+    pub bytecode_hash: String,
+    /// Hash of contract ABI
+    pub abi_hash: String,
+    /// Hash of contract dependencies
+    pub dependency_hash: String,
+    /// Creation timestamp
+    pub created_at: DateTime<Local>,
+    /// Last modification timestamp
+    pub modified_at: DateTime<Local>,
+}
+
+/// Sandbox manager
+pub struct SandboxManager {
+    config: SandboxConfig,
+    wasm_engine: Option<Engine>,
+    seccomp_filters: HashMap<String, SeccompFilter>,
+    violation_logs: Arc<RwLock<Vec<ViolationLog>>>,
+    contract_fingerprints: Arc<RwLock<HashMap<String, ContractFingerprint>>>,
 }
 
 impl Sandbox {

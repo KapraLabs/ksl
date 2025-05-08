@@ -1,0 +1,85 @@
+{
+    "version": "1.0.0",
+    "templates": {
+        "contract": {
+            "name": "Smart Contract",
+            "description": "A basic smart contract template with standard interfaces",
+            "tags": ["contract", "smart-contract", "blockchain"],
+            "features": ["abi", "tests", "docs"],
+            "dependencies": ["ksl-core", "ksl-crypto"]
+        },
+        "validator": {
+            "name": "Validator Node",
+            "description": "A validator node template for consensus participation",
+            "tags": ["validator", "node", "consensus"],
+            "features": ["metrics", "logging", "monitoring"],
+            "dependencies": ["ksl-core", "ksl-network"]
+        },
+        "ai": {
+            "name": "AI Model",
+            "description": "An AI model template with training and inference support",
+            "tags": ["ai", "ml", "model"],
+            "features": ["training", "inference", "metrics"],
+            "dependencies": ["ksl-core", "ksl-ai"]
+        },
+        "iot": {
+            "name": "IoT Device",
+            "description": "An IoT device template with sensor and actuator support",
+            "tags": ["iot", "device", "sensor"],
+            "features": ["sensors", "actuators", "telemetry"],
+            "dependencies": ["ksl-core", "ksl-iot"]
+        },
+        "shard": {
+            "name": "Shard Module",
+            "description": "A shard module template for horizontal scaling",
+            "tags": ["shard", "scaling", "module"],
+            "features": ["replication", "consistency", "routing"],
+            "dependencies": ["ksl-core", "ksl-network"]
+        },
+        "zk": {
+            "name": "ZK Proof",
+            "description": "A zero-knowledge proof template with circuit support",
+            "tags": ["zk", "privacy", "crypto"],
+            "features": ["circuit", "prover", "verifier"],
+            "dependencies": ["ksl-core", "ksl-crypto"]
+        }
+    },
+    "component_types": {
+        "service": {
+            "name": "Service",
+            "description": "A service component for business logic",
+            "features": ["api", "metrics", "logging"]
+        },
+        "model": {
+            "name": "Model",
+            "description": "A data model component",
+            "features": ["validation", "serialization", "migration"]
+        },
+        "contract": {
+            "name": "Contract",
+            "description": "A smart contract component",
+            "features": ["abi", "events", "storage"]
+        },
+        "validator": {
+            "name": "Validator",
+            "description": "A validation component",
+            "features": ["rules", "custom-validators", "error-handling"]
+        },
+        "middleware": {
+            "name": "Middleware",
+            "description": "A middleware component",
+            "features": ["interceptors", "filters", "transformers"]
+        }
+    },
+    "registry": {
+        "url": "https://registry.ksl.dev/templates",
+        "auth": {
+            "type": "token",
+            "env_var": "KSL_REGISTRY_TOKEN"
+        },
+        "cache": {
+            "ttl": 3600,
+            "path": ".ksl/cache/templates"
+        }
+    }
+} 

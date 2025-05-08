@@ -54,6 +54,101 @@ enum AsyncOpType {
     File,
 }
 
+/// LLVM optimization pass registry
+#[derive(Debug)]
+pub struct LLVMPassRegistry {
+    /// Available optimization passes
+    passes: Vec<Box<dyn LLVMPass>>,
+    /// Pass dependencies
+    dependencies: HashMap<String, Vec<String>>,
+    /// Pass execution order
+    execution_order: Vec<String>,
+}
+
+/// Trait for LLVM optimization passes
+pub trait LLVMPass {
+    /// Name of the pass
+    fn name(&self) -> &'static str;
+    /// Run the pass on the LLVM module
+    fn run_on_module(&self, module: &mut Module) -> bool;
+    /// Dependencies of this pass
+    fn dependencies(&self) -> Vec<&'static str> { Vec::new() }
+}
+
+/// Blockchain-specific inlining pass
+pub struct BlockchainInlining {
+    /// Hot functions to inline
+    hot_functions: HashSet<String>,
+    /// Validator-specific functions
+    validator_functions: HashSet<String>,
+}
+
+impl LLVMPass for BlockchainInlining {
+    fn name(&self) -> &'static str {
+        "blockchain-inlining"
+    }
+
+    fn run_on_module(&self, module: &mut Module) -> bool {
+        let mut modified = false;
+        
+        // Inline hot validator functions
+        for func in module.get_functions() {
+            let name = func.get_name().to_str().unwrap_or("");
+            if self.validator_functions.contains(name) || 
+               (self.hot_functions.contains(name) && name.contains("validate")) {
+                func.add_attribute(AttributeKind::AlwaysInline);
+                modified = true;
+            }
+        }
+
+        modified
+    }
+
+    fn dependencies(&self) -> Vec<&'static str> {
+        vec!["function-attrs"]
+    }
+}
+
+/// Shard operation vectorization pass
+pub struct ShardVectorization {
+    /// Shard operation patterns
+    shard_patterns: Vec<String>,
+    /// Vector width for the target
+    vector_width: usize,
+}
+
+impl LLVMPass for ShardVectorization {
+    fn name(&self) -> &'static str {
+        "shard-vectorization"
+    }
+
+    fn run_on_module(&self, module: &mut Module) -> bool {
+        let mut modified = false;
+
+        // Find shard operation patterns
+        for func in module.get_functions() {
+            if let Some(body) = func.get_body() {
+                // Look for shard operation patterns
+                for pattern in &self.shard_patterns {
+                    if let Some(ops) = find_shard_operations(&body, pattern) {
+                        // Vectorize compatible operations
+                        if let Ok(vectorized) = vectorize_shard_ops(ops, self.vector_width) {
+                            replace_with_vector_ops(&mut body, vectorized);
+                            modified = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        modified
+    }
+
+    fn dependencies(&self) -> Vec<&'static str> {
+        vec!["loop-vectorize", "slp-vectorizer"]
+    }
+}
+
 impl Optimizer {
     /// Creates a new optimizer with default configuration
     pub fn new(bytecode: KapraBytecode) -> Self {
@@ -108,6 +203,9 @@ impl Optimizer {
         if self.config.optimize_async {
             optimized = self.optimize_async_ops(optimized);
         }
+
+        // Pass 8: Blockchain operations optimization
+        optimized = self.optimize_blockchain_ops(optimized);
 
         if self.errors.is_empty() {
             Ok(optimized)
@@ -485,6 +583,108 @@ impl Optimizer {
         }
 
         result
+    }
+
+    /// Optimizes blockchain operations
+    fn optimize_blockchain_ops(&mut self, bytecode: KapraBytecode) -> KapraBytecode {
+        let mut result = KapraBytecode::new();
+        let mut shard_ops = Vec::new();
+        let mut current_shard = None;
+
+        for instr in bytecode.instructions.iter() {
+            match instr.opcode {
+                KapraOpCode::MerkleVerify | 
+                KapraOpCode::BlsVerify | 
+                KapraOpCode::DilithiumVerify => {
+                    // Batch verification operations
+                    if let Some(batch) = self.batch_verify_ops(&shard_ops, &instr.opcode) {
+                        result.add_instruction(batch);
+                        shard_ops.clear();
+                    } else {
+                        shard_ops.push(instr.clone());
+                    }
+                }
+                KapraOpCode::AsyncCall => {
+                    // Track shard context
+                    if let Some(shard_id) = self.get_shard_id(instr) {
+                        current_shard = Some(shard_id);
+                    }
+                    result.add_instruction(instr.clone());
+                }
+                _ => {
+                    // Process any remaining shard operations
+                    if !shard_ops.is_empty() {
+                        for op in shard_ops.drain(..) {
+                            result.add_instruction(op);
+                        }
+                    }
+                    result.add_instruction(instr.clone());
+                }
+            }
+        }
+
+        result
+    }
+
+    /// Batches verification operations when possible
+    fn batch_verify_ops(&self, ops: &[KapraInstruction], op_type: &KapraOpCode) -> Option<KapraInstruction> {
+        if ops.len() < 2 {
+            return None;
+        }
+
+        match op_type {
+            KapraOpCode::MerkleVerify => {
+                // Combine multiple Merkle path verifications
+                Some(KapraInstruction::new(
+                    KapraOpCode::BatchMerkleVerify,
+                    self.combine_merkle_ops(ops),
+                    None
+                ))
+            }
+            KapraOpCode::BlsVerify => {
+                // Batch BLS signature verifications
+                Some(KapraInstruction::new(
+                    KapraOpCode::BatchBlsVerify,
+                    self.combine_bls_ops(ops),
+                    None
+                ))
+            }
+            _ => None
+        }
+    }
+
+    /// Gets shard ID from async call if it's a shard operation
+    fn get_shard_id(&self, instr: &KapraInstruction) -> Option<u32> {
+        if let KapraOpCode::AsyncCall = instr.opcode {
+            if let Some(Operand::Immediate(data)) = instr.operands.get(0) {
+                let func_name = String::from_utf8_lossy(data);
+                if func_name.contains("shard") {
+                    // Extract shard ID from function name or arguments
+                    if let Some(Operand::Immediate(shard_data)) = instr.operands.get(1) {
+                        return Some(u32::from_le_bytes(shard_data[..4].try_into().unwrap_or([0; 4])));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Combines multiple Merkle verification operations
+    fn combine_merkle_ops(&self, ops: &[KapraInstruction]) -> Vec<Operand> {
+        let mut combined = Vec::new();
+        for op in ops {
+            combined.extend_from_slice(&op.operands);
+        }
+        combined
+    }
+
+    /// Combines multiple BLS verification operations
+    fn combine_bls_ops(&self, ops: &[KapraInstruction]) -> Vec<Operand> {
+        let mut combined = Vec::new();
+        for op in ops {
+            combined.extend_from_slice(&op.operands);
+        }
+        combined
     }
 }
 

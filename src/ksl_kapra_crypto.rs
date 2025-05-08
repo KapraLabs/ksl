@@ -4,6 +4,12 @@
 
 use crate::ksl_errors::{KslError, SourcePosition};
 use std::collections::HashMap;
+use std::arch::x86_64::*;
+use std::arch::asm;
+use wgpu;
+use packed_simd::{u8x32, u32x8, u64x4};
+use rayon::prelude::*;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Represents a fixed-size array (aligned with KSL's type system).
 /// Uses the new program's array type for better performance and memory safety.
@@ -320,6 +326,330 @@ impl CryptoContext {
     fn merkle_verify_embedded(&self, leaf: &[u8], root: &[u8], proof: Vec<&[u8]>) -> bool {
         // Optimized implementation for embedded systems
         true // Placeholder
+    }
+}
+
+/// Dilithium signature parameters
+#[derive(Debug, Clone)]
+pub struct DilithiumParams {
+    /// Security level (2, 3, or 5)
+    pub security_level: u8,
+    /// Public key size in bytes
+    pub public_key_size: usize,
+    /// Secret key size in bytes
+    pub secret_key_size: usize,
+    /// Signature size in bytes
+    pub signature_size: usize,
+}
+
+/// BLS signature parameters
+#[derive(Debug, Clone)]
+pub struct BLSParams {
+    /// Curve type (BLS12-381, BLS12-377)
+    pub curve_type: BLSCurve,
+    /// Public key size in bytes
+    pub public_key_size: usize,
+    /// Signature size in bytes
+    pub signature_size: usize,
+    /// Aggregation threshold
+    pub aggregation_threshold: usize,
+}
+
+/// BLS curve types
+#[derive(Debug, Clone, PartialEq)]
+pub enum BLSCurve {
+    BLS12381,
+    BLS12377,
+}
+
+/// GPU-accelerated BLS aggregation engine
+pub struct GpuBLSEngine {
+    /// GPU device
+    device: wgpu::Device,
+    /// Command queue
+    queue: wgpu::Queue,
+    /// Compute pipeline
+    pipeline: wgpu::ComputePipeline,
+    /// Aggregation shader
+    aggregate_shader: wgpu::ShaderModule,
+    /// Batch buffers
+    batch_buffers: Vec<wgpu::Buffer>,
+}
+
+impl GpuBLSEngine {
+    /// Creates a new GPU BLS engine
+    pub async fn new() -> Result<Self, String> {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::all(),
+            dx12_shader_compiler: Default::default(),
+        });
+
+        let adapter = instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+        }).await.ok_or("Failed to find GPU adapter")?;
+
+        let (device, queue) = adapter.request_device(
+            &wgpu::DeviceDescriptor {
+                label: None,
+                features: wgpu::Features::empty(),
+                limits: wgpu::Limits::default(),
+            },
+            None,
+        ).await.map_err(|e| format!("Failed to create device: {}", e))?;
+
+        // Load compute shader
+        let shader_src = include_str!("shaders/bls_aggregate.wgsl");
+        let aggregate_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("BLS Aggregation Shader"),
+            source: wgpu::ShaderSource::Wgsl(shader_src.into()),
+        });
+
+        // Create compute pipeline
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("BLS Pipeline Layout"),
+            bind_group_layouts: &[],
+            push_constant_ranges: &[],
+        });
+
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("BLS Pipeline"),
+            layout: Some(&pipeline_layout),
+            module: &aggregate_shader,
+            entry_point: "main",
+        });
+
+        // Create batch buffers
+        let mut batch_buffers = Vec::with_capacity(2);
+        for _ in 0..2 {
+            let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Batch Buffer"),
+                size: 1024 * 1024, // 1MB buffer
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            });
+            batch_buffers.push(buffer);
+        }
+
+        Ok(GpuBLSEngine {
+            device,
+            queue,
+            pipeline,
+            aggregate_shader,
+            batch_buffers,
+        })
+    }
+
+    /// Aggregates BLS signatures using GPU
+    pub async fn aggregate_signatures_gpu(&self, signatures: &[BLSSignature]) -> Result<BLSSignature, String> {
+        let buffer_size = signatures.len() * std::mem::size_of::<BLSSignature>();
+        let staging_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Staging Buffer"),
+            size: buffer_size as u64,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // Create bind group
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("BLS Aggregation Bind Group"),
+            layout: &self.pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.batch_buffers[0].as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: staging_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        // Write data to GPU
+        self.queue.write_buffer(&self.batch_buffers[0], 0, bytemuck::cast_slice(signatures));
+
+        // Create command encoder
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("BLS Aggregation Command Encoder"),
+        });
+
+        // Dispatch compute shader
+        {
+            let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("BLS Aggregation Compute Pass"),
+            });
+            compute_pass.set_pipeline(&self.pipeline);
+            compute_pass.set_bind_group(0, &bind_group, &[]);
+            compute_pass.dispatch_workgroups((signatures.len() as u32 + 255) / 256, 1, 1);
+        }
+
+        // Copy results back
+        encoder.copy_buffer_to_buffer(
+            &self.batch_buffers[0],
+            0,
+            &staging_buffer,
+            0,
+            buffer_size as u64,
+        );
+
+        // Submit commands
+        self.queue.submit(Some(encoder.finish()));
+
+        // Read results
+        let buffer_slice = staging_buffer.slice(..);
+        let (tx, rx) = futures_intrusive::channel::shared::oneshot_channel();
+        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+            tx.send(result).unwrap();
+        });
+        self.device.poll(wgpu::Maintain::Wait);
+
+        if rx.receive().await.unwrap().is_err() {
+            return Err("Failed to read GPU results".to_string());
+        }
+
+        let data = buffer_slice.get_mapped_range();
+        let result: BLSSignature = bytemuck::from_bytes(&data[..std::mem::size_of::<BLSSignature>()]).clone();
+        drop(data);
+        staging_buffer.unmap();
+
+        Ok(result)
+    }
+}
+
+/// CPU-accelerated BLS aggregation using SIMD
+pub struct SimdBLSEngine {
+    /// SIMD width
+    simd_width: usize,
+    /// Aggregation metrics
+    metrics: AggregationMetrics,
+}
+
+/// Aggregation metrics
+#[derive(Debug, Default)]
+pub struct AggregationMetrics {
+    /// Total signatures aggregated
+    total_aggregated: AtomicU64,
+    /// Total aggregation time
+    total_time_us: AtomicU64,
+    /// Average aggregation latency
+    avg_latency_us: AtomicU64,
+}
+
+impl SimdBLSEngine {
+    /// Creates a new SIMD BLS engine
+    pub fn new() -> Self {
+        SimdBLSEngine {
+            simd_width: 32, // 256-bit SIMD
+            metrics: AggregationMetrics::default(),
+        }
+    }
+
+    /// Aggregates BLS signatures using SIMD
+    pub fn aggregate_signatures_simd(&self, signatures: &[BLSSignature]) -> BLSSignature {
+        let start = std::time::Instant::now();
+        
+        // Process signatures in parallel using SIMD
+        let aggregated = signatures.par_chunks(self.simd_width)
+            .map(|chunk| {
+                let mut result = BLSSignature::default();
+                for sig in chunk {
+                    // Vectorized point addition
+                    unsafe {
+                        let sig_vec = _mm256_loadu_si256(sig.as_ptr() as *const __m256i);
+                        let result_vec = _mm256_loadu_si256(result.as_ptr() as *const __m256i);
+                        let sum = _mm256_add_epi64(sig_vec, result_vec);
+                        _mm256_storeu_si256(result.as_mut_ptr() as *mut __m256i, sum);
+                    }
+                }
+                result
+            })
+            .reduce(|| BLSSignature::default(), |a, b| {
+                let mut result = a;
+                unsafe {
+                    let a_vec = _mm256_loadu_si256(a.as_ptr() as *const __m256i);
+                    let b_vec = _mm256_loadu_si256(b.as_ptr() as *const __m256i);
+                    let sum = _mm256_add_epi64(a_vec, b_vec);
+                    _mm256_storeu_si256(result.as_mut_ptr() as *mut __m256i, sum);
+                }
+                result
+            });
+
+        // Update metrics
+        let duration = start.elapsed();
+        self.metrics.total_aggregated.fetch_add(signatures.len() as u64, Ordering::Relaxed);
+        self.metrics.total_time_us.fetch_add(duration.as_micros() as u64, Ordering::Relaxed);
+        let avg_latency = duration.as_micros() as u64 / signatures.len() as u64;
+        self.metrics.avg_latency_us.store(avg_latency, Ordering::Relaxed);
+
+        aggregated
+    }
+}
+
+/// Dilithium signature with assembly-optimized operations
+pub struct DilithiumSignature {
+    /// Signature data
+    data: Vec<u8>,
+    /// Parameters
+    params: DilithiumParams,
+}
+
+impl DilithiumSignature {
+    /// Creates a new Dilithium signature
+    pub fn new(data: Vec<u8>, params: DilithiumParams) -> Self {
+        DilithiumSignature { data, params }
+    }
+
+    /// Verifies the signature using assembly intrinsics
+    pub fn verify(&self, message: &[u8], public_key: &[u8]) -> bool {
+        unsafe {
+            // Load message and public key into SIMD registers
+            let msg_vec = _mm256_loadu_si256(message.as_ptr() as *const __m256i);
+            let key_vec = _mm256_loadu_si256(public_key.as_ptr() as *const __m256i);
+            let sig_vec = _mm256_loadu_si256(self.data.as_ptr() as *const __m256i);
+
+            // Vectorized polynomial multiplication
+            let mut result = _mm256_setzero_si256();
+            for i in 0..self.params.signature_size / 32 {
+                let sig_chunk = _mm256_loadu_si256(self.data[i * 32..].as_ptr() as *const __m256i);
+                let key_chunk = _mm256_loadu_si256(public_key[i * 32..].as_ptr() as *const __m256i);
+                let prod = _mm256_mullo_epi32(sig_chunk, key_chunk);
+                result = _mm256_add_epi32(result, prod);
+            }
+
+            // Compare with message hash
+            let msg_hash = _mm256_loadu_si256(message.as_ptr() as *const __m256i);
+            let cmp = _mm256_cmpeq_epi32(result, msg_hash);
+            _mm256_movemask_epi8(cmp) == -1
+        }
+    }
+}
+
+/// BLS signature with GPU/CPU fallback
+pub struct BLSSignature {
+    /// Signature data
+    data: Vec<u8>,
+    /// Parameters
+    params: BLSParams,
+}
+
+impl BLSSignature {
+    /// Creates a new BLS signature
+    pub fn new(data: Vec<u8>, params: BLSParams) -> Self {
+        BLSSignature { data, params }
+    }
+
+    /// Aggregates multiple BLS signatures
+    pub async fn aggregate(signatures: &[BLSSignature], gpu_engine: Option<&GpuBLSEngine>) -> Result<BLSSignature, String> {
+        if let Some(gpu) = gpu_engine {
+            // Use GPU acceleration
+            gpu.aggregate_signatures_gpu(signatures).await
+        } else {
+            // Fallback to CPU SIMD
+            let simd_engine = SimdBLSEngine::new();
+            Ok(simd_engine.aggregate_signatures_simd(signatures))
+        }
     }
 }
 

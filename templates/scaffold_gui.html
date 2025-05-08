@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>KSL Scaffold</title>
+    <style>
+        :root {
+            --primary-color: #2196F3;
+            --secondary-color: #1976D2;
+            --background-color: #f5f5f5;
+            --text-color: #333;
+            --border-color: #ddd;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: var(--background-color);
+            color: var(--text-color);
+        }
+
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+
+        h1 {
+            color: var(--primary-color);
+            margin-bottom: 20px;
+        }
+
+        .form-group {
+            margin-bottom: 15px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 500;
+        }
+
+        input[type="text"],
+        input[type="path"],
+        select {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            font-size: 14px;
+        }
+
+        .checkbox-group {
+            display: flex;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+
+        .checkbox-group input[type="checkbox"] {
+            margin-right: 8px;
+        }
+
+        .button-group {
+            display: flex;
+            gap: 10px;
+            margin-top: 20px;
+        }
+
+        button {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: 500;
+            transition: background-color 0.2s;
+        }
+
+        .primary-button {
+            background-color: var(--primary-color);
+            color: white;
+        }
+
+        .primary-button:hover {
+            background-color: var(--secondary-color);
+        }
+
+        .secondary-button {
+            background-color: #e0e0e0;
+            color: var(--text-color);
+        }
+
+        .secondary-button:hover {
+            background-color: #d0d0d0;
+        }
+
+        .mode-switch {
+            margin-bottom: 20px;
+            padding: 10px;
+            background-color: #f8f9fa;
+            border-radius: 4px;
+        }
+
+        .mode-switch label {
+            margin-right: 15px;
+        }
+
+        .features-list {
+            margin-top: 10px;
+        }
+
+        .feature-item {
+            display: flex;
+            align-items: center;
+            margin-bottom: 5px;
+        }
+
+        .feature-item input[type="text"] {
+            flex: 1;
+            margin-right: 10px;
+        }
+
+        .remove-feature {
+            color: #dc3545;
+            cursor: pointer;
+            font-size: 18px;
+        }
+
+        .add-feature {
+            color: var(--primary-color);
+            cursor: pointer;
+            font-size: 14px;
+            margin-top: 5px;
+        }
+
+        .success-message {
+            display: none;
+            padding: 10px;
+            background-color: #d4edda;
+            color: #155724;
+            border-radius: 4px;
+            margin-top: 20px;
+        }
+
+        .error-message {
+            display: none;
+            padding: 10px;
+            background-color: #f8d7da;
+            color: #721c24;
+            border-radius: 4px;
+            margin-top: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>KSL Scaffold</h1>
+
+        <div class="mode-switch">
+            <label>
+                <input type="radio" name="mode" value="project" checked onchange="toggleMode('project')">
+                Project Mode
+            </label>
+            <label>
+                <input type="radio" name="mode" value="component" onchange="toggleMode('component')">
+                Component Mode
+            </label>
+        </div>
+
+        <div id="project-form">
+            <div class="form-group">
+                <label for="project-name">Project Name</label>
+                <input type="text" id="project-name" placeholder="Enter project name">
+            </div>
+
+            <div class="form-group">
+                <label for="output-path">Output Path</label>
+                <input type="path" id="output-path" placeholder="Enter output path">
+            </div>
+
+            <div class="form-group">
+                <label for="template">Template</label>
+                <select id="template"></select>
+            </div>
+
+            <div class="checkbox-group">
+                <input type="checkbox" id="sandbox">
+                <label for="sandbox">Enable Sandbox Mode</label>
+            </div>
+
+            <div class="checkbox-group">
+                <input type="checkbox" id="generate-abi">
+                <label for="generate-abi">Generate ABI</label>
+            </div>
+
+            <div class="checkbox-group">
+                <input type="checkbox" id="enable-zk">
+                <label for="enable-zk">Enable ZK Features</label>
+            </div>
+
+            <div class="checkbox-group">
+                <input type="checkbox" id="inject">
+                <label for="inject">Inject into Module</label>
+            </div>
+
+            <div class="form-group" id="target-module-group" style="display: none;">
+                <label for="target-module">Target Module</label>
+                <input type="text" id="target-module" placeholder="Enter target module">
+            </div>
+        </div>
+
+        <div id="component-form" style="display: none;">
+            <div class="form-group">
+                <label for="component-name">Component Name</label>
+                <input type="text" id="component-name" placeholder="Enter component name">
+            </div>
+
+            <div class="form-group">
+                <label for="component-type">Component Type</label>
+                <select id="component-type"></select>
+            </div>
+
+            <div class="form-group">
+                <label>Features</label>
+                <div class="features-list" id="features-list"></div>
+                <div class="add-feature" onclick="addFeature()">+ Add Feature</div>
+            </div>
+
+            <div class="checkbox-group">
+                <input type="checkbox" id="generate-tests">
+                <label for="generate-tests">Generate Tests</label>
+            </div>
+        </div>
+
+        <div class="button-group">
+            <button class="primary-button" onclick="scaffold()">Scaffold</button>
+            <button class="secondary-button" onclick="reset()">Reset</button>
+        </div>
+
+        <div id="success-message" class="success-message"></div>
+        <div id="error-message" class="error-message"></div>
+    </div>
+
+    <script>
+        // Initialize state
+        let state = {
+            mode: 'project',
+            features: []
+        };
+
+        // Load templates and component types
+        window.onload = function() {
+            external.invoke('get_templates');
+            external.invoke('get_component_types');
+        };
+
+        // Update templates dropdown
+        window.updateTemplates = function(templates) {
+            const select = document.getElementById('template');
+            select.innerHTML = templates.map(t => 
+                `<option value="${t}">${t.charAt(0).toUpperCase() + t.slice(1)}</option>`
+            ).join('');
+        };
+
+        // Update component types dropdown
+        window.updateComponentTypes = function(types) {
+            const select = document.getElementById('component-type');
+            select.innerHTML = types.map(t => 
+                `<option value="${t}">${t.charAt(0).toUpperCase() + t.slice(1)}</option>`
+            ).join('');
+        };
+
+        // Toggle between project and component mode
+        function toggleMode(mode) {
+            state.mode = mode;
+            document.getElementById('project-form').style.display = mode === 'project' ? 'block' : 'none';
+            document.getElementById('component-form').style.display = mode === 'component' ? 'block' : 'none';
+        }
+
+        // Add feature input
+        function addFeature() {
+            const featuresList = document.getElementById('features-list');
+            const featureItem = document.createElement('div');
+            featureItem.className = 'feature-item';
+            featureItem.innerHTML = `
+                <input type="text" placeholder="Enter feature name">
+                <span class="remove-feature" onclick="this.parentElement.remove()">×</span>
+            `;
+            featuresList.appendChild(featureItem);
+        }
+
+        // Show success message
+        window.showSuccess = function(message) {
+            const successMessage = document.getElementById('success-message');
+            successMessage.textContent = message;
+            successMessage.style.display = 'block';
+            setTimeout(() => {
+                successMessage.style.display = 'none';
+            }, 3000);
+        };
+
+        // Show error message
+        window.showError = function(message) {
+            const errorMessage = document.getElementById('error-message');
+            errorMessage.textContent = message;
+            errorMessage.style.display = 'block';
+            setTimeout(() => {
+                errorMessage.style.display = 'none';
+            }, 3000);
+        };
+
+        // Reset form
+        function reset() {
+            document.getElementById('project-name').value = '';
+            document.getElementById('output-path').value = '';
+            document.getElementById('sandbox').checked = false;
+            document.getElementById('generate-abi').checked = false;
+            document.getElementById('enable-zk').checked = false;
+            document.getElementById('inject').checked = false;
+            document.getElementById('target-module').value = '';
+            document.getElementById('component-name').value = '';
+            document.getElementById('generate-tests').checked = false;
+            document.getElementById('features-list').innerHTML = '';
+            state.features = [];
+        }
+
+        // Handle inject checkbox
+        document.getElementById('inject').addEventListener('change', function() {
+            document.getElementById('target-module-group').style.display = 
+                this.checked ? 'block' : 'none';
+        });
+
+        // Scaffold project or component
+        function scaffold() {
+            const mode = state.mode;
+            const data = {};
+
+            if (mode === 'project') {
+                data.project_name = document.getElementById('project-name').value;
+                data.output_path = document.getElementById('output-path').value;
+                data.template = document.getElementById('template').value;
+                data.sandbox = document.getElementById('sandbox').checked;
+                data.generate_abi = document.getElementById('generate-abi').checked;
+                data.enable_zk = document.getElementById('enable-zk').checked;
+                data.inject = document.getElementById('inject').checked;
+                data.target_module = document.getElementById('target-module').value;
+            } else {
+                data.project_name = document.getElementById('component-name').value;
+                data.output_path = document.getElementById('output-path').value;
+                data.component_type = document.getElementById('component-type').value;
+                data.features = Array.from(document.querySelectorAll('.feature-item input'))
+                    .map(input => input.value)
+                    .filter(value => value.trim() !== '');
+                data.generate_tests = document.getElementById('generate-tests').checked;
+            }
+
+            data.component_mode = mode === 'component';
+
+            // Validate required fields
+            if (!data.project_name || !data.output_path) {
+                window.showError('Please fill in all required fields');
+                return;
+            }
+
+            // Send scaffold command
+            external.invoke('scaffold');
+        }
+    </script>
+</body>
+</html> 
