@@ -27,7 +27,9 @@ class ScaffoldTreeDataProvider implements vscode.TreeDataProvider<ScaffoldTreeIt
 
     private templates: any[] = [];
 
-    constructor(private context: vscode.ExtensionContext) {
+    constructor(private readonly context: vscode.ExtensionContext) {
+        // Store templates in extension context for persistence
+        this.templates = context.globalState.get('ksl.templates', []);
         this.loadTemplates();
     }
 
@@ -35,6 +37,8 @@ class ScaffoldTreeDataProvider implements vscode.TreeDataProvider<ScaffoldTreeIt
         try {
             const { stdout } = await execAsync('ksl scaffold --list-templates');
             this.templates = JSON.parse(stdout);
+            // Save templates to extension context
+            await this.context.globalState.update('ksl.templates', this.templates);
             this._onDidChangeTreeData.fire();
         } catch (error) {
             vscode.window.showErrorMessage('Failed to load templates');
