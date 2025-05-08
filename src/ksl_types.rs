@@ -2,6 +2,9 @@
 // Defines the KSL type system and utilities for type inference and validation.
 
 use std::collections::HashMap;
+use std::fmt;
+use crate::ksl_errors::KslError;
+use crate::ksl_kapra_zkp::{ZkScheme, ZkProof as RuntimeZkProof};
 
 // Assume ksl_generics.rs provides GenericResolver
 mod ksl_generics {
@@ -77,6 +80,9 @@ pub enum Type {
     Socket, // For network sockets
     HttpRequest, // For HTTP requests
     HttpResponse, // For HTTP responses
+    Bool,
+    ZkProof(ZkProofType),
+    Signature(SignatureType),
 }
 
 /// Context for type inference (e.g., variable bindings).
@@ -162,7 +168,29 @@ impl TypeSystem {
             "socket" => Ok(Type::Socket),
             "http_request" => Ok(Type::HttpRequest),
             "http_response" => Ok(Type::HttpResponse),
-            _ if annot.starts_with("array<") && annot.ends_with('>') => {
+            "bool" => Ok(Type::Bool),
+            "option<" => {
+                let inner = &annot[7..annot.len() - 1];
+                let inner_type = Self::parse_type_annotation(inner, position)?;
+                Ok(Type::Option(Box::new(inner_type)))
+            }
+            "result<" => {
+                let inner = &annot[7..annot.len() - 1];
+                let parts: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
+                if parts.len() != 2 {
+                    return Err(TypeError {
+                        message: "Result type requires ok and err types".to_string(),
+                        position,
+                    });
+                }
+                let ok_type = Self::parse_type_annotation(parts[0], position)?;
+                let err_type = Self::parse_type_annotation(parts[1], position)?;
+                Ok(Type::Result {
+                    ok: Box::new(ok_type),
+                    err: Box::new(err_type),
+                })
+            }
+            "array<" => {
                 let inner = &annot[6..annot.len() - 1];
                 let parts: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
                 if parts.len() != 2 {
@@ -178,12 +206,7 @@ impl TypeSystem {
                 })?;
                 Ok(Type::Array(Box::new(inner_type), size))
             }
-            _ if annot.starts_with("option<") && annot.ends_with('>') => {
-                let inner = &annot[7..annot.len() - 1];
-                let inner_type = Self::parse_type_annotation(inner, position)?;
-                Ok(Type::Option(Box::new(inner_type)))
-            }
-            _ if annot.starts_with("generated<") && annot.ends_with('>') => {
+            "generated<" => {
                 let schema = &annot[10..annot.len() - 1].trim().to_string();
                 ksl_typegen::TypeGenerator::validate_schema(schema).map_err(|e| TypeError {
                     message: e.message,
@@ -191,34 +214,7 @@ impl TypeSystem {
                 })?;
                 Ok(Type::Generated { schema: schema.to_string() })
             }
-            _ if annot.contains('<') && annot.ends_with('>') => {
-                let parts: Vec<&str> = annot.split('<').collect();
-                if parts.len() != 2 {
-                    return Err(TypeError {
-                        message: "Invalid generic type syntax".to_string(),
-                        position,
-                    });
-                }
-                let name = parts[0].trim();
-                let constraints_str = &parts[1][..parts[1].len() - 1];
-                let constraints: Vec<Type> = constraints_str
-                    .split('|')
-                    .map(|s| s.trim())
-                    .filter(|s| !s.is_empty())
-                    .map(|s| Self::parse_type_annotation(s, position))
-                    .collect::<Result<Vec<Type>, TypeError>>()?;
-                if constraints.is_empty() {
-                    return Err(TypeError {
-                        message: "Generic type requires at least one constraint".to_string(),
-                        position,
-                    });
-                }
-                Ok(Type::Generic {
-                    name: name.to_string(),
-                    constraints,
-                })
-            }
-            _ if annot.starts_with("function<") && annot.ends_with('>') => {
+            "function<" => {
                 let inner = &annot[9..annot.len() - 1];
                 let parts: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
                 if parts.len() < 2 {
@@ -237,21 +233,15 @@ impl TypeSystem {
                     return_type: Box::new(return_type),
                 })
             }
-            _ if annot.starts_with("result<") && annot.ends_with('>') => {
-                let inner = &annot[7..annot.len() - 1];
-                let parts: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
-                if parts.len() != 2 {
-                    return Err(TypeError {
-                        message: "Result type requires ok and err types".to_string(),
-                        position,
-                    });
-                }
-                let ok_type = Self::parse_type_annotation(parts[0], position)?;
-                let err_type = Self::parse_type_annotation(parts[1], position)?;
-                Ok(Type::Result {
-                    ok: Box::new(ok_type),
-                    err: Box::new(err_type),
-                })
+            "zkproof<" => {
+                let inner = &annot[10..annot.len() - 1];
+                let proof_type = Self::parse_zkproof_type(inner, position)?;
+                Ok(Type::ZkProof(proof_type))
+            }
+            "signature<" => {
+                let inner = &annot[11..annot.len() - 1];
+                let sig_type = Self::parse_signature_type(inner, position)?;
+                Ok(Type::Signature(sig_type))
             }
             _ => Err(TypeError {
                 message: format!("Unknown type: {}", annot),
@@ -528,6 +518,181 @@ pub enum ExprKind {
     },
 }
 
+/// Represents different types of zero-knowledge proofs
+#[derive(Debug, Clone, PartialEq)]
+pub enum ZkProofType {
+    /// BLS signature-based proof (96 bytes)
+    Bls,
+    /// Dilithium post-quantum proof (2420 bytes)
+    Dilithium,
+    /// Generic proof type when scheme is determined at runtime
+    Generic,
+}
+
+/// Represents different types of cryptographic signatures
+#[derive(Debug, Clone, PartialEq)]
+pub enum SignatureType {
+    /// Ed25519 signature (64 bytes)
+    Ed25519,
+    /// BLS signature (96 bytes)
+    Bls,
+    /// Dilithium signature (2420 bytes)
+    Dilithium,
+}
+
+impl Type {
+    /// Get the size in bytes for fixed-size types
+    pub fn size_in_bytes(&self) -> Option<usize> {
+        match self {
+            Type::U8 => Some(1),
+            Type::U32 => Some(4),
+            Type::U64 => Some(8),
+            Type::Bool => Some(1),
+            Type::Array(inner, len) => inner.size_in_bytes().map(|s| s * len),
+            Type::ZkProof(proof_type) => Some(match proof_type {
+                ZkProofType::Bls => 96,
+                ZkProofType::Dilithium => 2420,
+                ZkProofType::Generic => 0, // Size determined at runtime
+            }),
+            Type::Signature(sig_type) => Some(match sig_type {
+                SignatureType::Ed25519 => 64,
+                SignatureType::Bls => 96,
+                SignatureType::Dilithium => 2420,
+            }),
+            _ => None, // Dynamic size for strings, tuples, etc.
+        }
+    }
+
+    /// Check if a type can be converted to another type
+    pub fn can_convert_to(&self, target: &Type) -> bool {
+        match (self, target) {
+            // Allow conversion between proof types if sizes match
+            (Type::ZkProof(a), Type::ZkProof(b)) => {
+                matches!((a, b),
+                    (ZkProofType::Bls, ZkProofType::Generic) |
+                    (ZkProofType::Dilithium, ZkProofType::Generic) |
+                    (ZkProofType::Generic, ZkProofType::Bls) |
+                    (ZkProofType::Generic, ZkProofType::Dilithium) |
+                    (a, b) if a == b
+                )
+            },
+            // Allow conversion between signature types if sizes match
+            (Type::Signature(a), Type::Signature(b)) => {
+                a.size_in_bytes() == b.size_in_bytes()
+            },
+            // Allow array to proof/signature conversion if sizes match
+            (Type::Array(inner, len), Type::ZkProof(proof_type)) => {
+                if let Type::U8 = **inner {
+                    let proof_size = match proof_type {
+                        ZkProofType::Bls => 96,
+                        ZkProofType::Dilithium => 2420,
+                        ZkProofType::Generic => 0,
+                    };
+                    *len == proof_size
+                } else {
+                    false
+                }
+            },
+            (Type::Array(inner, len), Type::Signature(sig_type)) => {
+                if let Type::U8 = **inner {
+                    let sig_size = match sig_type {
+                        SignatureType::Ed25519 => 64,
+                        SignatureType::Bls => 96,
+                        SignatureType::Dilithium => 2420,
+                    };
+                    *len == sig_size
+                } else {
+                    false
+                }
+            },
+            // ... existing conversion rules ...
+            _ => self == target,
+        }
+    }
+}
+
+impl fmt::Display for Type {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Type::ZkProof(proof_type) => match proof_type {
+                ZkProofType::Bls => write!(f, "zkproof<bls>"),
+                ZkProofType::Dilithium => write!(f, "zkproof<dilithium>"),
+                ZkProofType::Generic => write!(f, "zkproof"),
+            },
+            Type::Signature(sig_type) => match sig_type {
+                SignatureType::Ed25519 => write!(f, "signature<ed25519>"),
+                SignatureType::Bls => write!(f, "signature<bls>"),
+                SignatureType::Dilithium => write!(f, "signature<dilithium>"),
+            },
+            // ... existing display implementations ...
+            _ => write!(f, "{:?}", self),
+        }
+    }
+}
+
+/// Runtime value representation
+#[derive(Debug, Clone)]
+pub enum Value {
+    // ... existing values ...
+    U8(u8),
+    U32(u32),
+    U64(u64),
+    Bool(bool),
+    String(String),
+    Array(Vec<Value>),
+    Tuple(Vec<Value>),
+    
+    /// Zero-knowledge proof value
+    ZkProof(RuntimeZkProof),
+    
+    /// Signature value
+    Signature(Vec<u8>),
+}
+
+impl Value {
+    /// Get the type of a value
+    pub fn get_type(&self) -> Type {
+        match self {
+            Value::ZkProof(proof) => Type::ZkProof(match proof.scheme() {
+                ZkScheme::BLS => ZkProofType::Bls,
+                ZkScheme::Dilithium => ZkProofType::Dilithium,
+            }),
+            Value::Signature(bytes) => Type::Signature(match bytes.len() {
+                64 => SignatureType::Ed25519,
+                96 => SignatureType::Bls,
+                2420 => SignatureType::Dilithium,
+                _ => panic!("Invalid signature length"),
+            }),
+            // ... existing type implementations ...
+            _ => panic!("Unknown value type"),
+        }
+    }
+
+    /// Try to convert a value to a different type
+    pub fn try_convert(&self, target_type: &Type) -> Result<Value, KslError> {
+        match (self, target_type) {
+            (Value::Array(bytes), Type::ZkProof(proof_type)) => {
+                let scheme = match proof_type {
+                    ZkProofType::Bls => ZkScheme::BLS,
+                    ZkProofType::Dilithium => ZkScheme::Dilithium,
+                    ZkProofType::Generic => return Err(KslError::TypeError("Cannot convert to generic proof type".into())),
+                };
+                let bytes_vec: Vec<u8> = bytes.iter().map(|v| match v {
+                    Value::U8(b) => *b,
+                    _ => panic!("Array must contain u8 values"),
+                }).collect();
+                Ok(Value::ZkProof(RuntimeZkProof::from_bytes(scheme, bytes_vec)?))
+            },
+            // ... existing conversion implementations ...
+            _ => Err(KslError::TypeError(format!(
+                "Cannot convert {:?} to {:?}",
+                self.get_type(),
+                target_type
+            ))),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -769,5 +934,43 @@ mod tests {
             let result = TypeSystem::infer_type(&node, &ctx, 0);
             assert_eq!(result, Ok(expected));
         }
+    }
+
+    #[test]
+    fn test_zkproof_type_size() {
+        assert_eq!(Type::ZkProof(ZkProofType::Bls).size_in_bytes(), Some(96));
+        assert_eq!(Type::ZkProof(ZkProofType::Dilithium).size_in_bytes(), Some(2420));
+        assert_eq!(Type::ZkProof(ZkProofType::Generic).size_in_bytes(), Some(0));
+    }
+
+    #[test]
+    fn test_signature_type_size() {
+        assert_eq!(Type::Signature(SignatureType::Ed25519).size_in_bytes(), Some(64));
+        assert_eq!(Type::Signature(SignatureType::Bls).size_in_bytes(), Some(96));
+        assert_eq!(Type::Signature(SignatureType::Dilithium).size_in_bytes(), Some(2420));
+    }
+
+    #[test]
+    fn test_type_conversion() {
+        let bls_proof = Type::ZkProof(ZkProofType::Bls);
+        let generic_proof = Type::ZkProof(ZkProofType::Generic);
+        assert!(bls_proof.can_convert_to(&generic_proof));
+        assert!(generic_proof.can_convert_to(&bls_proof));
+
+        let bls_array = Type::Array(Box::new(Type::U8), 96);
+        assert!(bls_array.can_convert_to(&Type::ZkProof(ZkProofType::Bls)));
+        assert!(!bls_array.can_convert_to(&Type::ZkProof(ZkProofType::Dilithium)));
+    }
+
+    #[test]
+    fn test_type_display() {
+        assert_eq!(
+            Type::ZkProof(ZkProofType::Bls).to_string(),
+            "zkproof<bls>"
+        );
+        assert_eq!(
+            Type::Signature(SignatureType::Ed25519).to_string(),
+            "signature<ed25519>"
+        );
     }
 }

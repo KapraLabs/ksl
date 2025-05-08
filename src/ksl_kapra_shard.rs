@@ -14,6 +14,9 @@ use packed_simd::{u8x32, u32x8, u64x4};
 use rand::Rng;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
+use crate::ksl_metrics::{BlockResult, log_metrics};
+use std::time::{Instant};
+use tokio::sync::Mutex;
 
 /// Represents KSL bytecode (aligned with ksl_bytecode.rs).
 #[derive(Debug, Clone)]
@@ -79,6 +82,32 @@ pub struct ShardState {
     pub last_block: [u8; 32],
     pub validators: Vec<[u8; 32]>,
     pub signatures: HashMap<[u8; 32], [u8; 2420]>, // validator_id -> signature
+    id: usize,
+    validator_count: usize,
+    processed_txs: usize,
+    failed_txs: usize,
+    gas_used: u64,
+}
+
+impl ShardState {
+    pub fn new(id: usize, validator_count: usize) -> Self {
+        Self {
+            id,
+            validator_count,
+            processed_txs: 0,
+            failed_txs: 0,
+            gas_used: 0,
+            last_block: [0; 32],
+            validators: Vec::new(),
+            signatures: HashMap::new(),
+        }
+    }
+
+    pub fn update(&mut self, processed: usize, failed: usize, gas: u64) {
+        self.processed_txs += processed;
+        self.failed_txs += failed;
+        self.gas_used += gas;
+    }
 }
 
 /// Lock-free transaction pool for a shard
@@ -107,7 +136,7 @@ pub struct TransactionPoolMetrics {
 #[derive(Debug, Clone)]
 pub struct Transaction {
     /// Transaction ID
-    id: [u8; 32],
+    id: u64,
     /// Transaction data (SIMD-aligned)
     data: Vec<u8>,
     /// Source shard
@@ -116,6 +145,51 @@ pub struct Transaction {
     dest_shard: u32,
     /// Timestamp
     timestamp: u64,
+    sender: String,
+    receiver: String,
+    amount: u64,
+    signature: String,
+    shard_id: usize,
+}
+
+impl Transaction {
+    pub fn new(id: u64, sender: String, receiver: String, amount: u64, shard_id: usize) -> Self {
+        let mut rng = rand::thread_rng();
+        Transaction {
+            id,
+            sender,
+            receiver,
+            amount,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            signature: format!("0x{:x}", rng.gen::<u128>()),
+            shard_id,
+            data: vec![],
+            source_shard: 0,
+            dest_shard: 0,
+        }
+    }
+
+    pub fn mock(id: u64, shard_id: usize) -> Self {
+        let mut rng = rand::thread_rng();
+        Transaction {
+            id,
+            sender: format!("0x{:x}", rng.gen::<u64>()),
+            receiver: format!("0x{:x}", rng.gen::<u64>()),
+            amount: rng.gen_range(1..1000),
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            signature: format!("0x{:x}", rng.gen::<u128>()),
+            shard_id,
+            data: vec![],
+            source_shard: 0,
+            dest_shard: 0,
+        }
+    }
 }
 
 /// Sharding runtime for Kapra Chain (integrates with ksl_stdlib_net.rs).
@@ -469,6 +543,68 @@ impl ShardCompiler {
 ///     shard_id
 /// }
 
+fn validate_kaprekar(tx: &Transaction) -> bool {
+    // Kaprekar validation logic
+    let mut rng = rand::thread_rng();
+    rng.gen_bool(0.95) // 95% success rate for simulation
+}
+
+pub async fn run_shard_benchmark(shard_id: usize, txs: Vec<Transaction>) -> BlockResult {
+    let state = Arc::new(Mutex::new(ShardState::new(shard_id, 100)));
+    let start_time = Instant::now();
+
+    // Process transactions in parallel chunks
+    let chunks: Vec<_> = txs.chunks(1000).collect();
+    let mut handles = vec![];
+
+    for chunk in chunks {
+        let chunk = chunk.to_vec();
+        let state = Arc::clone(&state);
+        let handle = tokio::spawn(async move {
+            let mut processed = 0;
+            let mut failed = 0;
+            let mut gas = 0;
+
+            for tx in chunk {
+                if validate_kaprekar(&tx) {
+                    processed += 1;
+                    gas += rand::thread_rng().gen_range(1000..10000);
+                } else {
+                    failed += 1;
+                }
+            }
+
+            let mut state_guard = state.lock().await;
+            state_guard.update(processed, failed, gas);
+        });
+        handles.push(handle);
+    }
+
+    // Wait for all chunks to complete
+    for handle in handles {
+        handle.await.unwrap();
+    }
+
+    let duration = start_time.elapsed();
+    let state_guard = state.lock().await;
+    let kaprekar_successes = state_guard.processed_txs;
+    let kaprekar_ratio = kaprekar_successes as f64 / txs.len() as f64;
+
+    let result = BlockResult {
+        processed_txs: state_guard.processed_txs,
+        failed_txs: state_guard.failed_txs,
+        gas_used: state_guard.gas_used,
+        block_time: duration.as_millis() as u64,
+        validator_count: state_guard.validator_count,
+        kaprekar_pass_ratio: kaprekar_ratio,
+    };
+
+    // Log metrics
+    log_metrics(txs.len(), duration, &result);
+
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -547,5 +683,40 @@ mod tests {
         let shard_id2 = shard_runtime.shard_route(&account);
         assert_eq!(shard_id1, shard_id2); // Should use cached value
         assert_eq!(shard_runtime.route_cache.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_shard_benchmark() {
+        let shard_id = 1;
+        let tx_count = 1000;
+        let txs: Vec<Transaction> = (0..tx_count)
+            .map(|i| Transaction::mock(i as u64, shard_id))
+            .collect();
+
+        let result = run_shard_benchmark(shard_id, txs).await;
+
+        assert!(result.processed_txs > 0);
+        assert!(result.gas_used > 0);
+        assert!(result.block_time > 0);
+        assert_eq!(result.validator_count, 100);
+        assert!(result.kaprekar_pass_ratio > 0.0);
+        assert!(result.kaprekar_pass_ratio <= 1.0);
+    }
+
+    #[test]
+    fn test_transaction_validation() {
+        let tx = Transaction::mock(1, 1);
+        let success = validate_kaprekar(&tx);
+        assert!(success);
+    }
+
+    #[test]
+    fn test_shard_state() {
+        let mut state = ShardState::new(1, 100);
+        state.update(10, 2, 5000);
+        
+        assert_eq!(state.processed_txs, 10);
+        assert_eq!(state.failed_txs, 2);
+        assert_eq!(state.gas_used, 5000);
     }
 }

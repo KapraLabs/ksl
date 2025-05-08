@@ -561,32 +561,49 @@ use packed_simd::{u8x32, u32x8, u64x4};
 use std::time::{Instant, Duration};
 use std::sync::atomic::{AtomicU64, Ordering};
 use rayon::prelude::*;
+use std::sync::Arc;
+use crate::ksl_kapra_zkp::{ZkValidator, ZkProof, ZkScheme};
+use crate::ksl_stdlib_crypto::Crypto;
 
-/// Consensus algorithm type
-#[derive(Debug, Clone, PartialEq)]
-pub enum ConsensusAlgorithm {
-    ProofOfStake,    // PoS with VRF-based leader election
-    ProofOfAuthority, // PoA with fixed validators
-    ByzantineFaultTolerant, // BFT with 2/3 majority
+/// Represents a block in the Kapra Chain
+#[derive(Debug, Clone)]
+pub struct Block {
+    /// Block hash
+    pub hash: [u8; 32],
+    /// Previous block hash
+    pub prev_hash: [u8; 32],
+    /// Block height
+    pub height: u64,
+    /// Block timestamp
+    pub timestamp: i64,
+    /// Transactions in the block
+    pub transactions: Vec<Transaction>,
+    /// Zero-knowledge proof of block validity
+    pub zkp: Vec<u8>,
+    /// Public key of the validator that created the block
+    pub validator_pubkey: Vec<u8>,
+    /// The cryptographic scheme used for the proof
+    pub proof_scheme: ZkScheme,
 }
 
-/// Consensus configuration
+/// Represents a transaction in the block
 #[derive(Debug, Clone)]
-pub struct ConsensusConfig {
-    algorithm: ConsensusAlgorithm,
-    shard_count: u32,
-    threshold: u64,
-    validators: HashMap<[u8; 32], u64>, // validator_id -> stake/weight
-    is_embedded: bool,
+pub struct Transaction {
+    pub hash: [u8; 32],
+    pub data: Vec<u8>,
 }
 
-/// Consensus state
-#[derive(Debug, Clone)]
+/// Consensus state for tracking validators and blocks
+#[derive(Debug)]
 pub struct ConsensusState {
-    current_leader: Option<[u8; 32]>,
-    last_block_hash: [u8; 32],
-    validator_set: HashMap<[u8; 32], u64>,
-    shard_states: HashMap<u32, ShardState>,
+    /// Current block height
+    pub height: u64,
+    /// Latest block hash
+    pub latest_hash: [u8; 32],
+    /// Validator public keys
+    pub validators: Vec<Vec<u8>>,
+    /// Shard states
+    pub shards: Arc<RwLock<Vec<ShardState>>>,
 }
 
 /// Shard state

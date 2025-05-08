@@ -9,7 +9,7 @@ use crate::ksl_bytecode::{KapraBytecode, KapraInstruction, KapraOpCode, Operand}
 use crate::kapra_vm::{KapraVM, run};
 use crate::ksl_module::ModuleSystem;
 use crate::ksl_errors::{KslError, SourcePosition};
-use crate::ksl_metrics::{MetricsCollector, MetricType, MetricValue};
+use crate::ksl_metrics::{MetricsCollector, MetricType, MetricValue, log_metrics};
 use crate::ksl_async::{AsyncContext, AsyncCommand};
 use crate::ksl_benchmark::{BenchmarkConfig, BenchmarkSuite};
 use std::fs;
@@ -18,6 +18,7 @@ use std::time::{Instant, Duration};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use serde::{Serialize, Deserialize};
+use rand::Rng;
 
 /// Detailed benchmark results with metrics
 #[derive(Debug, Serialize, Deserialize)]
@@ -267,7 +268,7 @@ mod ksl_errors {
 }
 
 mod ksl_metrics {
-    pub use super::{MetricsCollector, MetricType, MetricValue};
+    pub use super::{MetricsCollector, MetricType, MetricValue, log_metrics};
 }
 
 mod ksl_async {
@@ -312,5 +313,182 @@ mod tests {
         let result = run_benchmarks(&temp_file.path().to_path_buf(), BenchmarkConfig::default());
         assert!(result.is_err());
         assert!(result.unwrap_err()[0].to_string().contains("No benchmark functions found"));
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Transaction {
+    id: u64,
+    sender: String,
+    receiver: String,
+    amount: u64,
+    timestamp: u64,
+    signature: String,
+}
+
+impl Transaction {
+    pub fn mock(id: u64) -> Self {
+        let mut rng = rand::thread_rng();
+        Transaction {
+            id,
+            sender: format!("0x{:x}", rng.gen::<u64>()),
+            receiver: format!("0x{:x}", rng.gen::<u64>()),
+            amount: rng.gen_range(1..1000),
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            signature: format!("0x{:x}", rng.gen::<u128>()),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct BlockResult {
+    processed_txs: usize,
+    failed_txs: usize,
+    gas_used: u64,
+    block_time: u64,
+}
+
+pub struct BenchmarkState {
+    total_processed: usize,
+    total_failed: usize,
+    total_gas: u64,
+}
+
+impl BenchmarkState {
+    pub fn new() -> Self {
+        Self {
+            total_processed: 0,
+            total_failed: 0,
+            total_gas: 0,
+        }
+    }
+
+    pub fn update(&mut self, result: &BlockResult) {
+        self.total_processed += result.processed_txs;
+        self.total_failed += result.failed_txs;
+        self.total_gas += result.gas_used;
+    }
+}
+
+pub async fn run_benchmark() {
+    let state = Arc::new(Mutex::new(BenchmarkState::new()));
+    let tps_targets = [10_000, 25_000, 50_000, 100_000];
+
+    println!("[BENCH] Starting KSL high-TPS benchmark...");
+    println!("[BENCH] Testing TPS targets: {:?}", tps_targets);
+
+    for &tps in tps_targets.iter() {
+        println!("\n[BENCH] Running benchmark at {} TPS...", tps);
+        let txs = generate_mock_transactions(tps);
+        
+        let start = Instant::now();
+        let result = simulate_block(txs).await;
+        let duration = start.elapsed();
+
+        // Update benchmark state
+        let mut state_guard = state.lock().await;
+        state_guard.update(&result);
+
+        // Log metrics
+        log_metrics(tps, duration, &result);
+
+        // Print detailed results
+        println!("[BENCH] Results for {} TPS:", tps);
+        println!("  - Processed transactions: {}", result.processed_txs);
+        println!("  - Failed transactions: {}", result.failed_txs);
+        println!("  - Gas used: {}", result.gas_used);
+        println!("  - Block time: {} ms", result.block_time);
+        println!("  - Actual TPS: {:.2}", result.processed_txs as f64 / duration.as_secs_f64());
+    }
+
+    // Print final summary
+    let final_state = state.lock().await;
+    println!("\n[BENCH] Final Summary:");
+    println!("  - Total processed transactions: {}", final_state.total_processed);
+    println!("  - Total failed transactions: {}", final_state.total_failed);
+    println!("  - Total gas used: {}", final_state.total_gas);
+}
+
+fn generate_mock_transactions(count: usize) -> Vec<Transaction> {
+    (0..count).map(|i| Transaction::mock(i as u64)).collect()
+}
+
+async fn simulate_block(transactions: Vec<Transaction>) -> BlockResult {
+    let mut processed = 0;
+    let mut failed = 0;
+    let mut total_gas = 0;
+    let start_time = Instant::now();
+
+    // Simulate parallel processing of transactions
+    let chunks: Vec<_> = transactions.chunks(1000).collect();
+    let mut handles = vec![];
+
+    for chunk in chunks {
+        let chunk = chunk.to_vec();
+        let handle = tokio::spawn(async move {
+            let mut chunk_processed = 0;
+            let mut chunk_failed = 0;
+            let mut chunk_gas = 0;
+
+            for tx in chunk {
+                // Simulate transaction processing
+                if rand::random::<f64>() < 0.95 {
+                    chunk_processed += 1;
+                    chunk_gas += rand::thread_rng().gen_range(1000..10000);
+                } else {
+                    chunk_failed += 1;
+                }
+            }
+
+            (chunk_processed, chunk_failed, chunk_gas)
+        });
+        handles.push(handle);
+    }
+
+    // Collect results
+    for handle in handles {
+        if let Ok((p, f, g)) = handle.await {
+            processed += p;
+            failed += f;
+            total_gas += g;
+        }
+    }
+
+    let block_time = start_time.elapsed().as_millis() as u64;
+
+    BlockResult {
+        processed_txs: processed,
+        failed_txs: failed,
+        gas_used: total_gas,
+        block_time,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_benchmark() {
+        let txs = generate_mock_transactions(1000);
+        let result = simulate_block(txs).await;
+        
+        assert!(result.processed_txs > 0);
+        assert!(result.gas_used > 0);
+        assert!(result.block_time > 0);
+    }
+
+    #[test]
+    fn test_transaction_mock() {
+        let tx = Transaction::mock(1);
+        assert_eq!(tx.id, 1);
+        assert!(!tx.sender.is_empty());
+        assert!(!tx.receiver.is_empty());
+        assert!(tx.amount > 0);
+        assert!(tx.timestamp > 0);
+        assert!(!tx.signature.is_empty());
     }
 }

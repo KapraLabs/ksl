@@ -5,6 +5,8 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use std::fs;
 use std::path::PathBuf;
+use std::process;
+use structopt::StructOpt;
 
 use crate::ksl_parser::{parse, AstNode, ExprKind};
 use crate::ksl_checker::check;
@@ -14,6 +16,39 @@ use crate::kapra_vm::run;
 use crate::ksl_errors::{KslError, SourcePosition};
 use crate::ksl_docgen::generate_docs;
 use crate::ksl_debugger::Debugger;
+use crate::ksl_repl::Repl;
+use crate::ksl_analyzer::analyze;
+use crate::ksl_fuzzer::fuzz;
+use crate::ksl_hot_reload::HotReloader;
+use crate::ksl_contract_verifier::verify_contract;
+use crate::ksl_package::Package;
+use crate::ksl_package_publish::publish_package;
+use crate::ksl_bind::generate_bindings;
+use crate::ksl_plugin::load_plugin;
+use crate::ksl_stdlib::print;
+use crate::ksl_stdlib_net::http_get;
+use crate::ksl_stdlib_crypto::hash;
+use crate::ksl_kapra_crypto::sign;
+use crate::ksl_kapra_consensus::ConsensusRuntime;
+use crate::ksl_kapra_shard::ShardRuntime;
+use crate::ksl_kapra_scheduler::Scheduler;
+use crate::ksl_ai::run_model;
+use crate::ksl_iot::device_comm;
+use crate::ksl_game::render;
+use crate::ksl_template::generate_template;
+use crate::ksl_doc_lsp::start_lsp;
+use crate::ksl_analyzer::profile;
+use crate::ksl_jit::compile_jit;
+use crate::ksl_aot::compile_aot;
+use crate::ksl_generics::compile_generic;
+use crate::ksl_macros::expand_macro;
+use crate::ksl_contract::deploy_contract;
+use crate::ksl_kapra_shard::run_shard_benchmark;
+use crate::ksl_metrics::{BlockResult, log_metrics};
+use tokio::runtime::Runtime;
+use std::sync::Arc;
+
+mod ksl_bench;
 
 /// Compilation optimization level
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
@@ -248,6 +283,224 @@ mod ksl_docgen {
 
 mod ksl_debugger {
     pub use super::Debugger;
+}
+
+mod ksl_repl {
+    pub use super::Repl;
+}
+
+mod ksl_analyzer {
+    pub use super::analyze;
+}
+
+mod ksl_fuzzer {
+    pub use super::fuzz;
+}
+
+mod ksl_hot_reload {
+    pub use super::HotReloader;
+}
+
+mod ksl_contract_verifier {
+    pub use super::verify_contract;
+}
+
+mod ksl_package {
+    pub use super::Package;
+}
+
+mod ksl_package_publish {
+    pub use super::publish_package;
+}
+
+mod ksl_bind {
+    pub use super::generate_bindings;
+}
+
+mod ksl_plugin {
+    pub use super::load_plugin;
+}
+
+mod ksl_stdlib {
+    pub use super::print;
+}
+
+mod ksl_stdlib_net {
+    pub use super::http_get;
+}
+
+mod ksl_stdlib_crypto {
+    pub use super::hash;
+}
+
+mod ksl_kapra_crypto {
+    pub use super::sign;
+}
+
+mod ksl_kapra_consensus {
+    pub use super::ConsensusRuntime;
+}
+
+mod ksl_kapra_shard {
+    pub use super::ShardRuntime;
+}
+
+mod ksl_kapra_scheduler {
+    pub use super::Scheduler;
+}
+
+mod ksl_ai {
+    pub use super::run_model;
+}
+
+mod ksl_iot {
+    pub use super::device_comm;
+}
+
+mod ksl_game {
+    pub use super::render;
+}
+
+mod ksl_template {
+    pub use super::generate_template;
+}
+
+mod ksl_doc_lsp {
+    pub use super::start_lsp;
+}
+
+mod ksl_analyzer {
+    pub use super::profile;
+}
+
+mod ksl_jit {
+    pub use super::compile_jit;
+}
+
+mod ksl_aot {
+    pub use super::compile_aot;
+}
+
+mod ksl_generics {
+    pub use super::compile_generic;
+}
+
+mod ksl_macros {
+    pub use super::expand_macro;
+}
+
+mod ksl_contract {
+    pub use super::deploy_contract;
+}
+
+mod ksl_kapra_shard {
+    pub use super::run_shard_benchmark;
+}
+
+mod ksl_metrics {
+    pub use super::{BlockResult, log_metrics};
+}
+
+mod ksl_bench {
+    pub use super::run_benchmark;
+}
+
+#[derive(StructOpt)]
+#[structopt(name = "ksl", about = "KSL compiler and runtime")]
+struct Opt {
+    /// Input file to compile and run
+    #[structopt(parse(from_os_str))]
+    input: Option<PathBuf>,
+
+    /// Output file for compiled bytecode
+    #[structopt(short, long, parse(from_os_str))]
+    output: Option<PathBuf>,
+
+    /// Run in REPL mode
+    #[structopt(short, long)]
+    repl: bool,
+
+    /// Generate documentation
+    #[structopt(short, long)]
+    doc: bool,
+
+    /// Run static analysis
+    #[structopt(short, long)]
+    analyze: bool,
+
+    /// Run fuzzing tests
+    #[structopt(short, long)]
+    fuzz: bool,
+
+    /// Enable hot reloading
+    #[structopt(short, long)]
+    hot_reload: bool,
+
+    /// Verify smart contract
+    #[structopt(short, long)]
+    verify: bool,
+
+    /// Package management command
+    #[structopt(short, long)]
+    package: Option<String>,
+
+    /// Publish package
+    #[structopt(short, long)]
+    publish: bool,
+
+    /// Generate language bindings
+    #[structopt(short, long)]
+    bind: bool,
+
+    /// Load plugin
+    #[structopt(short, long)]
+    plugin: Option<String>,
+
+    /// Run LSP server
+    #[structopt(short, long)]
+    lsp: bool,
+
+    /// Profile performance
+    #[structopt(short, long)]
+    profile: bool,
+
+    /// Use JIT compilation
+    #[structopt(short, long)]
+    jit: bool,
+
+    /// Use AOT compilation
+    #[structopt(short, long)]
+    aot: bool,
+
+    /// Compile generic code
+    #[structopt(short, long)]
+    generic: bool,
+
+    /// Expand macro
+    #[structopt(short, long)]
+    macro: bool,
+
+    /// Deploy smart contract
+    #[structopt(short, long)]
+    deploy: bool,
+
+    /// Run shard benchmark
+    #[structopt(short, long)]
+    benchmark: bool,
+}
+
+fn main() {
+    let opt = Opt::from_args();
+
+    // Handle benchmark option
+    if opt.benchmark {
+        println!("Starting full benchmark suite...");
+        ksl_bench::run_benchmark();
+        return;
+    }
+
+    // Rest of the main function implementation...
+    // ... existing code ...
 }
 
 #[cfg(test)]

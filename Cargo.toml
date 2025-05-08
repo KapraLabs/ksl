@@ -20,3 +20,9 @@ quote = "1.0"
 proc-macro2 = "1.0"
 walkdir = "2.3"
 tempfile = "3.8"
+
+# BLS12-381 signature lib
+blst = "0.3"
+
+# Post-quantum Dilithium support (via PQClean)
+pqcrypto-dilithium = { version = "0.7", features = ["dilithium5"] }

@@ -5,6 +5,32 @@
 use crate::ksl_types::{Type, TypeError};
 use crate::ksl_bytecode::{KapraOpCode, Operand, KapraInstruction};
 use crate::ksl_errors::{KslError, SourcePosition};
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use rand::Rng;
+use sha3::{Digest, Keccak256};
+use ed25519_dalek::{
+    Keypair as EdKeypair,
+    PublicKey as EdPublicKey,
+    SecretKey as EdSecretKey,
+    Signature as EdSignature,
+    Verifier,
+};
+use blst::{
+    min_pk::{
+        SecretKey as BlsSecretKey,
+        PublicKey as BlsPublicKey,
+        Signature as BlsSignature,
+    },
+    BLST_ERROR,
+};
+use pqcrypto_dilithium::dilithium5;
+use pqcrypto_traits::sign::{
+    DetachedSignature as DilithiumSignature,
+    PublicKey as DilithiumPublicKey,
+    SecretKey as DilithiumSecretKey,
+};
 
 /// Cryptographic function signature with async support
 #[derive(Debug, PartialEq, Clone)]
@@ -193,6 +219,151 @@ impl CryptoStdLib {
     }
 }
 
+/// BLS12-381 keypair
+#[derive(Clone)]
+pub struct BlsKeypair {
+    pub sk: BlsSecretKey,
+    pub pk: BlsPublicKey,
+}
+
+/// Dilithium keypair
+#[derive(Clone)]
+pub struct DilithiumKeypair {
+    pub sk: DilithiumSecretKey,
+    pub pk: DilithiumPublicKey,
+}
+
+/// Ed25519 keypair
+#[derive(Clone)]
+pub struct Ed25519Keypair {
+    pub sk: EdSecretKey,
+    pub pk: EdPublicKey,
+}
+
+/// Crypto operations for KSL
+pub struct Crypto {
+    /// Cache of Ed25519 public keys
+    ed25519_cache: Arc<RwLock<HashMap<[u8; 32], EdPublicKey>>>,
+    /// BLS keypairs
+    bls_keys: Arc<RwLock<HashMap<[u8; 32], BlsKeypair>>>,
+    /// Dilithium keypairs
+    dilithium_keys: Arc<RwLock<HashMap<[u8; 32], DilithiumKeypair>>>,
+}
+
+impl Crypto {
+    pub fn new() -> Self {
+        Self {
+            ed25519_cache: Arc::new(RwLock::new(HashMap::new())),
+            bls_keys: Arc::new(RwLock::new(HashMap::new())),
+            dilithium_keys: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// Generate Ed25519 keypair
+    pub fn generate_ed25519_keypair(&self) -> Result<Ed25519Keypair, KslError> {
+        let mut rng = rand::thread_rng();
+        let keypair = EdKeypair::generate(&mut rng);
+        Ok(Ed25519Keypair {
+            sk: keypair.secret,
+            pk: keypair.public,
+        })
+    }
+
+    /// Generate BLS12-381 keypair
+    pub fn bls_generate_keypair(&self) -> Result<BlsKeypair, KslError> {
+        let ikm = b"kapra-bls-key"; // TODO: Replace with proper entropy source
+        let sk = BlsSecretKey::key_gen(ikm);
+        let pk = sk.sk_to_pk();
+        Ok(BlsKeypair { sk, pk })
+    }
+
+    /// Generate Dilithium keypair
+    pub fn dilithium_generate_keypair(&self) -> Result<DilithiumKeypair, KslError> {
+        let (pk, sk) = dilithium5::keypair();
+        Ok(DilithiumKeypair { sk, pk })
+    }
+
+    /// Sign message with Ed25519
+    pub fn ed25519_sign(&self, sk: &EdSecretKey, message: &[u8]) -> Result<EdSignature, KslError> {
+        let keypair = EdKeypair {
+            secret: *sk,
+            public: EdPublicKey::from(sk),
+        };
+        Ok(keypair.sign(message))
+    }
+
+    /// Sign message with BLS12-381
+    pub fn bls_sign(&self, sk: &BlsSecretKey, message: &[u8]) -> Result<BlsSignature, KslError> {
+        Ok(sk.sign(message, b"", &[]))
+    }
+
+    /// Sign message with Dilithium
+    pub fn dilithium_sign(&self, sk: &DilithiumSecretKey, message: &[u8]) -> Result<DilithiumSignature, KslError> {
+        Ok(dilithium5::sign_detached(message, sk))
+    }
+
+    /// Verify Ed25519 signature
+    pub fn ed25519_verify(&self, pk: &EdPublicKey, message: &[u8], sig: &EdSignature) -> Result<bool, KslError> {
+        Ok(pk.verify(message, sig).is_ok())
+    }
+
+    /// Verify BLS12-381 signature
+    pub fn bls_verify(&self, pk: &BlsPublicKey, message: &[u8], sig: &BlsSignature) -> Result<bool, KslError> {
+        Ok(sig.verify(true, message, b"", &[], pk, true) == BLST_ERROR::BLST_SUCCESS)
+    }
+
+    /// Verify Dilithium signature
+    pub fn dilithium_verify(&self, pk: &DilithiumPublicKey, message: &[u8], sig: &DilithiumSignature) -> Result<bool, KslError> {
+        Ok(dilithium5::verify_detached(sig, message, pk).is_ok())
+    }
+
+    /// Hash data using Keccak-256
+    pub fn hash(&self, data: &[u8]) -> [u8; 32] {
+        let mut hasher = Keccak256::new();
+        hasher.update(data);
+        let result = hasher.finalize();
+        let mut hash = [0u8; 32];
+        hash.copy_from_slice(&result);
+        hash
+    }
+
+    /// Cache an Ed25519 public key
+    pub async fn cache_ed25519_key(&self, id: [u8; 32], pk: EdPublicKey) {
+        let mut cache = self.ed25519_cache.write().await;
+        cache.insert(id, pk);
+    }
+
+    /// Get cached Ed25519 public key
+    pub async fn get_cached_ed25519_key(&self, id: &[u8; 32]) -> Option<EdPublicKey> {
+        let cache = self.ed25519_cache.read().await;
+        cache.get(id).copied()
+    }
+
+    /// Cache a BLS keypair
+    pub async fn cache_bls_keypair(&self, id: [u8; 32], keypair: BlsKeypair) {
+        let mut keys = self.bls_keys.write().await;
+        keys.insert(id, keypair);
+    }
+
+    /// Get cached BLS keypair
+    pub async fn get_cached_bls_keypair(&self, id: &[u8; 32]) -> Option<BlsKeypair> {
+        let keys = self.bls_keys.read().await;
+        keys.get(id).cloned()
+    }
+
+    /// Cache a Dilithium keypair
+    pub async fn cache_dilithium_keypair(&self, id: [u8; 32], keypair: DilithiumKeypair) {
+        let mut keys = self.dilithium_keys.write().await;
+        keys.insert(id, keypair);
+    }
+
+    /// Get cached Dilithium keypair
+    pub async fn get_cached_dilithium_keypair(&self, id: &[u8; 32]) -> Option<DilithiumKeypair> {
+        let keys = self.dilithium_keys.read().await;
+        keys.get(id).cloned()
+    }
+}
+
 // Assume ksl_types.rs, ksl_bytecode.rs, and ksl_errors.rs are in the same crate
 mod ksl_types {
     pub use super::{Type, TypeError};
@@ -277,5 +448,65 @@ mod tests {
             ]
         );
         assert_eq!(instructions[0].type_info, Some(Type::U32));
+    }
+
+    #[tokio::test]
+    async fn test_ed25519_operations() {
+        let crypto = Crypto::new();
+        let keypair = crypto.generate_ed25519_keypair().unwrap();
+        let message = b"test message";
+        let sig = crypto.ed25519_sign(&keypair.sk, message).unwrap();
+        assert!(crypto.ed25519_verify(&keypair.pk, message, &sig).unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_bls_operations() {
+        let crypto = Crypto::new();
+        let keypair = crypto.bls_generate_keypair().unwrap();
+        let message = b"test message";
+        let sig = crypto.bls_sign(&keypair.sk, message).unwrap();
+        assert!(crypto.bls_verify(&keypair.pk, message, &sig).unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_dilithium_operations() {
+        let crypto = Crypto::new();
+        let keypair = crypto.dilithium_generate_keypair().unwrap();
+        let message = b"test message";
+        let sig = crypto.dilithium_sign(&keypair.sk, message).unwrap();
+        assert!(crypto.dilithium_verify(&keypair.pk, message, &sig).unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_key_caching() {
+        let crypto = Crypto::new();
+        let keypair = crypto.generate_ed25519_keypair().unwrap();
+        let id = [1u8; 32];
+        
+        crypto.cache_ed25519_key(id, keypair.pk).await;
+        let cached_pk = crypto.get_cached_ed25519_key(&id).await;
+        assert!(cached_pk.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_bls_key_caching() {
+        let crypto = Crypto::new();
+        let keypair = crypto.bls_generate_keypair().unwrap();
+        let id = [1u8; 32];
+        
+        crypto.cache_bls_keypair(id, keypair.clone()).await;
+        let cached_keypair = crypto.get_cached_bls_keypair(&id).await;
+        assert!(cached_keypair.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_dilithium_key_caching() {
+        let crypto = Crypto::new();
+        let keypair = crypto.dilithium_generate_keypair().unwrap();
+        let id = [1u8; 32];
+        
+        crypto.cache_dilithium_keypair(id, keypair.clone()).await;
+        let cached_keypair = crypto.get_cached_dilithium_keypair(&id).await;
+        assert!(cached_keypair.is_some());
     }
 }
