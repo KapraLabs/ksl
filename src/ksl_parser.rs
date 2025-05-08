@@ -103,6 +103,9 @@ enum AstNode {
         state: Vec<(String, TypeAnnotation)>,
         methods: Vec<AstNode>,
     },
+    VerifyBlock {
+        conditions: Vec<AstNode>,
+    },
 }
 
 /// Type annotations for variables and parameters.
@@ -370,6 +373,7 @@ impl<'a> Parser<'a> {
             Token::Keyword(k) if k == "if" => self.parse_if(),
             Token::Keyword(k) if k == "match" => self.parse_match(),
             Token::Keyword(k) if k == "macro" => self.parse_macro_def(),
+            Token::Keyword(k) if k == "verify" => self.parse_verify_block(),
             _ => self.parse_expr(),
         }
     }
@@ -974,6 +978,32 @@ impl<'a> Parser<'a> {
             methods,
         })
     }
+
+    /// Parses a verify block containing postconditions/assertions
+    fn parse_verify_block(&mut self) -> Result<AstNode, ParseError> {
+        self.expect(Token::Keyword("verify".to_string()))?;
+        self.expect(Token::Symbol("{".to_string()))?;
+        
+        let mut conditions = Vec::new();
+        while self.current != Token::Symbol("}".to_string()) && self.current != Token::EOF {
+            let condition = self.parse_expr()?;
+            conditions.push(condition);
+            
+            // Expect semicolon after each condition
+            if self.current == Token::Symbol(";".to_string()) {
+                self.advance()?;
+            } else if self.current != Token::Symbol("}".to_string()) {
+                return Err(ParseError {
+                    message: "Expected semicolon after condition".to_string(),
+                    position: self.lexer.position,
+                });
+            }
+        }
+        
+        self.expect(Token::Symbol("}".to_string()))?;
+        
+        Ok(AstNode::VerifyBlock { conditions })
+    }
 }
 
 /// Public API to parse KSL source code into an AST.
@@ -1304,5 +1334,57 @@ mod tests {
         let mut parser = Parser::new(input);
         let result = parser.parse_program();
         assert!(result.is_ok()); // Should recover and continue parsing
+    }
+
+    #[test]
+    fn test_parse_verify_block() {
+        let input = r#"
+            verify {
+                x >= 0;
+                y == z;
+            }
+        "#;
+        let ast = parse(input).unwrap();
+        assert_eq!(ast.len(), 1);
+        
+        if let AstNode::VerifyBlock { conditions } = &ast[0] {
+            assert_eq!(conditions.len(), 2);
+            
+            // Check first condition: x >= 0
+            if let AstNode::Expr { kind: ExprKind::BinaryOp { op, left, right } } = &conditions[0] {
+                assert_eq!(op, ">=");
+                if let AstNode::Expr { kind: ExprKind::Ident(name) } = &**left {
+                    assert_eq!(name, "x");
+                } else {
+                    panic!("Expected identifier 'x'");
+                }
+                if let AstNode::Expr { kind: ExprKind::Number(num) } = &**right {
+                    assert_eq!(num, "0");
+                } else {
+                    panic!("Expected number '0'");
+                }
+            } else {
+                panic!("Expected binary operation");
+            }
+            
+            // Check second condition: y == z
+            if let AstNode::Expr { kind: ExprKind::BinaryOp { op, left, right } } = &conditions[1] {
+                assert_eq!(op, "==");
+                if let AstNode::Expr { kind: ExprKind::Ident(name) } = &**left {
+                    assert_eq!(name, "y");
+                } else {
+                    panic!("Expected identifier 'y'");
+                }
+                if let AstNode::Expr { kind: ExprKind::Ident(name) } = &**right {
+                    assert_eq!(name, "z");
+                } else {
+                    panic!("Expected identifier 'z'");
+                }
+            } else {
+                panic!("Expected binary operation");
+            }
+        } else {
+            panic!("Expected VerifyBlock");
+        }
     }
 }

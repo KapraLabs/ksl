@@ -2,7 +2,7 @@
 // Command-line interface for compiling and running KSL programs.
 // Provides tools for development, testing, and documentation generation.
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand, ValueEnum, App, Arg, SubCommand};
 use std::fs;
 use std::path::PathBuf;
 use std::process;
@@ -10,7 +10,7 @@ use structopt::StructOpt;
 
 use crate::ksl_parser::{parse, AstNode, ExprKind};
 use crate::ksl_checker::check;
-use crate::ksl_compiler::compile;
+use crate::ksl_compiler::{compile, CompilerOptions};
 use crate::ksl_bytecode::KapraBytecode;
 use crate::kapra_vm::run;
 use crate::ksl_errors::{KslError, SourcePosition};
@@ -109,6 +109,12 @@ enum Commands {
         /// Enable debug mode
         #[arg(short = 'D', long)]
         debug: bool,
+        /// Emit IR representation to .ksl.ir file
+        #[arg(short, long)]
+        emit_ir: bool,
+        /// Specify custom path for IR output file
+        #[arg(short, long)]
+        ir_output: Option<PathBuf>,
     },
     /// Run a KSL file
     Run {
@@ -144,11 +150,11 @@ pub fn run_cli() -> Result<(), KslError> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Compile { file, output, opt_level, target, async, jit, debug } => {
-            compile_file(&file, output.as_ref(), opt_level, target, async, jit, debug)
+        Commands::Compile { file, output, opt_level, target, async_support, jit, debug, emit_ir, ir_output } => {
+            compile_file(&file, output.as_ref(), opt_level, target, async_support, jit, debug, emit_ir, ir_output)
         }
-        Commands::Run { file, async, jit, debug } => {
-            run_file(&file, async, jit, debug)
+        Commands::Run { file, async_support, jit, debug } => {
+            run_file(&file, async_support, jit, debug)
         }
         Commands::Doc { input, output, private } => {
             generate_docs(&input, output.as_ref(), private)
@@ -165,6 +171,8 @@ fn compile_file(
     async_support: bool,
     jit: bool,
     debug: bool,
+    emit_ir: bool,
+    ir_output: Option<PathBuf>,
 ) -> Result<(), KslError> {
     // Read source file
     let source = fs::read_to_string(file)
@@ -181,12 +189,38 @@ fn compile_file(
     check(&ast)
         .map_err(|errors| KslError::type_errors(errors))?;
 
+    // Set up compiler options
+    let mut options = CompilerOptions::default();
+    options.source_file = file.to_string_lossy().into_owned();
+    options.opt_level = match opt_level {
+        OptLevel::O0 => 0,
+        OptLevel::O1 => 1,
+        OptLevel::O2 => 2,
+        OptLevel::O3 => 3,
+    };
+    options.target = match target {
+        Target::Native => "native".to_string(),
+        Target::Wasm => "wasm".to_string(),
+        Target::Jit => "jit".to_string(),
+    };
+    options.async_support = async_support;
+    options.jit = jit;
+    options.debug = debug;
+    options.emit_ir = emit_ir;
+    options.ir_output_path = ir_output.map(|p| p.to_string_lossy().into_owned());
+
+    // If IR output is enabled but no path specified, use default
+    if options.emit_ir && options.ir_output_path.is_none() {
+        let ir_path = file.with_extension("ksl.ir");
+        options.ir_output_path = Some(ir_path.to_string_lossy().into_owned());
+    }
+
     // Compile with options
-    let bytecode = compile(&ast)
+    let mut bytecode = compile(&ast, &options)
         .map_err(|errors| KslError::compile_errors(errors))?;
 
     // Apply optimizations based on level
-    let bytecode = match opt_level {
+    bytecode = match opt_level {
         OptLevel::O0 => bytecode,
         OptLevel::O1 => bytecode.optimize_basic(),
         OptLevel::O2 => bytecode.optimize_aggressive(),
@@ -525,6 +559,8 @@ mod tests {
             false,
             false,
             false,
+            false,
+            None,
         );
         assert!(result.is_ok());
     }
@@ -545,6 +581,8 @@ mod tests {
             true,
             false,
             false,
+            false,
+            None,
         );
         assert!(result.is_ok());
     }
@@ -565,6 +603,8 @@ mod tests {
             false,
             true,
             false,
+            false,
+            None,
         );
         assert!(result.is_ok());
     }
@@ -588,6 +628,8 @@ mod tests {
             false,
             false,
             false,
+            false,
+            None,
         );
         assert!(result.is_ok());
         assert!(output_file.path().exists());

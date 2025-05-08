@@ -21,7 +21,7 @@ use crate::ksl_macros::{MacroDef, MacroKind};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::collections::{HashMap, HashSet};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, Instant};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use serde::{Deserialize, Serialize};
@@ -42,6 +42,14 @@ use seccompiler;
 use nix;
 use rlimit;
 use humantime;
+use crate::kapra_vm::{KapraVM, KapraInstruction, KapraOpCode, Operand};
+use crate::ksl_kapra_consensus::{KapraVM as ConsensusVM, Bytecode, Constant};
+use crate::ksl_types::{Type, TypeError};
+use rand::{thread_rng, Rng};
+use std::panic;
+use log;
+use env_logger;
+use clap;
 
 /// Fuzzer configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -558,37 +566,60 @@ impl Fuzzer {
         let ast_diff = if let Ok(source) = String::from_utf8(input.to_vec()) {
             if let Ok(ast) = parse(&source) {
                 Some(format!("{:?}", ast))
-                } else {
+            } else {
                 None
             }
         } else {
             None
         };
 
+        // Generate random seed for reproducibility
+        let seed = rand::random();
+
         // Save crash info
         let crash = CrashInfo {
             input: hex::encode(input),
             stack_trace,
-            seed: rand::random(),
+            seed,
             ast_diff,
             module: module.to_string(),
             severity: self.determine_severity(&error),
             shrunk_input: None,
         };
 
+        // Log crash details
+        log::error!(
+            "Crash detected in module '{}'\nSeverity: {:?}\nSeed: {}\nInput: {}\nError: {}\n",
+            module,
+            crash.severity,
+            crash.seed,
+            crash.input,
+            error
+        );
+
         // Save to corpus
-        let corpus_path = self.config.corpus_dir.join(format!("crash_{}.json", self.crashes.len()));
+        let corpus_path = self.config.corpus_dir.join(format!(
+            "crash_{}_{:016x}.json",
+            self.crashes.len(),
+            seed
+        ));
         fs::write(&corpus_path, serde_json::to_string_pretty(&crash)?)
             .map_err(|e| format!("Failed to save crash: {}", e))?;
 
-        // Shrink input
+        // Attempt to shrink input
         if let Some(shrunk) = self.shrink_input(input).await? {
             crash.shrunk_input = Some(hex::encode(&shrunk));
             
             // Save shrunk input
-            let shrunk_path = self.config.shrunk_dir.join(format!("reduced_{}.json", self.crashes.len()));
+            let shrunk_path = self.config.shrunk_dir.join(format!(
+                "reduced_{}_{:016x}.json",
+                self.crashes.len(),
+                seed
+            ));
             fs::write(&shrunk_path, serde_json::to_string_pretty(&crash)?)
                 .map_err(|e| format!("Failed to save shrunk input: {}", e))?;
+
+            log::info!("Shrunk input saved to {}", shrunk_path.display());
         }
 
         self.crashes.push(crash);
@@ -1276,52 +1307,78 @@ pub fn run_fuzzer_sync(config: FuzzerConfig) -> Result<FuzzerResult, String> {
 
 /// CLI wrapper for fuzzer
 pub fn run_fuzzer_cli() -> Result<(), String> {
-    let matches = App::new("ksl-fuzz")
+    let matches = clap::App::new("ksl-fuzz")
         .version("1.0")
         .author("KSL Team")
         .about("KSL Fuzzing Framework")
-        .arg(Arg::with_name("domain")
+        .arg(clap::Arg::with_name("domain")
             .short('d')
             .long("domain")
             .value_name("DOMAIN")
             .help("Fuzzing domain (contract, validator, sharding, consensus)")
             .required(true)
             .takes_value(true))
-        .arg(Arg::with_name("cases")
+        .arg(clap::Arg::with_name("cases")
             .short('c')
             .long("cases")
             .value_name("NUM")
             .help("Number of test cases")
             .default_value("1000")
             .takes_value(true))
-        .arg(Arg::with_name("parallel")
+        .arg(clap::Arg::with_name("parallel")
             .short('p')
             .long("parallel")
             .help("Run tests in parallel"))
-        .arg(Arg::with_name("symbolic")
+        .arg(clap::Arg::with_name("symbolic")
             .long("symbolic")
             .help("Use symbolic execution"))
-        .arg(Arg::with_name("coverage")
+        .arg(clap::Arg::with_name("coverage")
             .long("coverage")
             .help("Track coverage"))
-        .arg(Arg::with_name("replay")
+        .arg(clap::Arg::with_name("replay")
             .long("replay")
             .value_name("FILE")
             .help("Replay specific crash file")
             .takes_value(true))
-        .arg(Arg::with_name("pattern")
+        .arg(clap::Arg::with_name("pattern")
             .long("pattern")
             .value_name("PATTERN")
             .help("Expected panic pattern for replay")
             .takes_value(true))
-        .arg(Arg::with_name("output")
+        .arg(clap::Arg::with_name("output")
             .short('o')
             .long("output")
             .value_name("DIR")
             .help("Output directory")
             .default_value("fuzz_output")
             .takes_value(true))
+        .arg(clap::Arg::with_name("log-level")
+            .long("log-level")
+            .value_name("LEVEL")
+            .help("Log level (debug, info, warn, error)")
+            .default_value("info")
+            .takes_value(true))
+        .arg(clap::Arg::with_name("shrink")
+            .long("shrink")
+            .help("Enable input shrinking"))
+        .arg(clap::Arg::with_name("save-all")
+            .long("save-all")
+            .help("Save all inputs, not just failing ones"))
         .get_matches();
+
+    // Set up logging
+    let log_level = match matches.value_of("log-level").unwrap() {
+        "debug" => log::LevelFilter::Debug,
+        "info" => log::LevelFilter::Info,
+        "warn" => log::LevelFilter::Warn,
+        "error" => log::LevelFilter::Error,
+        _ => log::LevelFilter::Info,
+    };
+
+    env_logger::Builder::new()
+        .filter_level(log_level)
+        .format_timestamp_millis()
+        .init();
 
     // Parse domain
     let domain = match matches.value_of("domain").unwrap() {
@@ -1345,6 +1402,17 @@ pub fn run_fuzzer_cli() -> Result<(), String> {
         _ => return Err("Invalid domain".to_string()),
     };
 
+    // Create output directories
+    let output_dir = PathBuf::from(matches.value_of("output").unwrap());
+    let corpus_dir = output_dir.join("corpus");
+    let shrunk_dir = output_dir.join("shrunk");
+    let coverage_dir = output_dir.join("coverage");
+
+    fs::create_dir_all(&output_dir)?;
+    fs::create_dir_all(&corpus_dir)?;
+    fs::create_dir_all(&shrunk_dir)?;
+    fs::create_dir_all(&coverage_dir)?;
+
     // Create config
     let config = FuzzerConfig {
         domain,
@@ -1355,26 +1423,41 @@ pub fn run_fuzzer_cli() -> Result<(), String> {
         parallel: matches.is_present("parallel"),
         symbolic: matches.is_present("symbolic"),
         track_coverage: matches.is_present("coverage"),
-        corpus_dir: PathBuf::from("fuzz_corpus"),
-        shrunk_dir: PathBuf::from("shrunk"),
+        corpus_dir,
+        shrunk_dir,
         replay: matches.value_of("replay").map(PathBuf::from),
         timeout: Duration::from_secs(30),
         mutators: vec![],
-        output_dir: PathBuf::from("fuzz_output"),
+        output_dir: coverage_dir,
     };
 
     // Run fuzzer
-    let result = run_fuzzer_sync(config)?;
+    log::info!("Starting fuzzer with {} test cases", config.num_cases);
+    let start_time = Instant::now();
+    let result = run_fuzzer_sync(config.clone())?;
+    let duration = start_time.elapsed();
+
+    // Log results
+    log::info!("Fuzzing completed in {:.2}s", duration.as_secs_f64());
+    log::info!("Pass rate: {:.2}%", result.pass_rate * 100.0);
+    log::info!("Total cases: {}", result.total_cases);
+    log::info!("Failures: {}", result.failures);
+    log::info!("High risk issues: {}", result.high_risk);
 
     // Generate reports
     let mut fuzzer = Fuzzer::new(config)?;
+    
     if result.coverage.is_some() {
+        log::info!("Generating coverage report...");
         fuzzer.generate_coverage_html()?;
     }
+
+    log::info!("Generating crash explorer...");
     fuzzer.generate_crash_explorer()?;
 
     // Check replay pattern if specified
     if let (Some(replay), Some(pattern)) = (matches.value_of("replay"), matches.value_of("pattern")) {
+        log::info!("Replaying crash with pattern...");
         let matches = fuzzer.replay_with_pattern(Path::new(replay), pattern).await?;
         if !matches {
             return Err("Panic pattern did not match".to_string());
@@ -1434,6 +1517,291 @@ pub struct CorpusBrowserCommand {
     pub view_type: String,
     pub filter: Option<String>,
     pub sort_by: Option<String>,
+}
+
+/// Maximum iterations for a single fuzzing run
+const MAX_ITERATIONS: usize = 10_000;
+
+/// Maximum instructions per bytecode
+const MAX_INSTRUCTIONS: usize = 50;
+
+/// Maximum gas limit for VM execution
+const MAX_GAS: u64 = 5000;
+
+/// Fuzz the VM runtime with random bytecode
+pub fn fuzz_vm_runtime(iterations: usize) -> FuzzStats {
+    let mut stats = FuzzStats::default();
+    let start = Instant::now();
+
+    for i in 0..iterations.min(MAX_ITERATIONS) {
+        let bytecode = random_vm_bytecode();
+        let mut vm = KapraVM::new(bytecode, None, Some(MAX_GAS));
+        
+        let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+            vm.run(false, false)
+        }));
+
+        match result {
+            Ok(run_result) => {
+                match run_result {
+                    Ok(_) => stats.successes += 1,
+                    Err(e) => {
+                        stats.runtime_errors += 1;
+                        eprintln!("⚠️ VM runtime error on iteration {}: {:?}", i, e);
+                    }
+                }
+            }
+            Err(_) => {
+                stats.panics += 1;
+                eprintln!("💥 Panic in VM runtime on iteration {}", i);
+            }
+        }
+
+        // Check gas usage
+        if let Some(gas_used) = vm.get_gas_used() {
+            stats.total_gas += gas_used;
+            stats.max_gas = stats.max_gas.max(gas_used);
+        }
+    }
+
+    stats.duration = start.elapsed();
+    stats
+}
+
+/// Generate random VM bytecode
+fn random_vm_bytecode() -> KapraBytecode {
+    let mut rng = thread_rng();
+    let mut bytecode = KapraBytecode::new();
+    
+    // Available opcodes for fuzzing
+    let opcodes = [
+        // Arithmetic
+        KapraOpCode::Add,
+        KapraOpCode::Sub,
+        KapraOpCode::Mul,
+        KapraOpCode::Div,
+        // Cryptographic
+        KapraOpCode::Sha3,
+        KapraOpCode::BLSVerify,
+        KapraOpCode::DilithiumVerify,
+        KapraOpCode::Ed25519Verify,
+        KapraOpCode::MerkleVerify,
+        // Control flow
+        KapraOpCode::Jump,
+        KapraOpCode::JumpIf,
+        KapraOpCode::Call,
+        KapraOpCode::Return,
+        KapraOpCode::Halt,
+    ];
+
+    let num_instructions = rng.gen_range(5..MAX_INSTRUCTIONS);
+    
+    for _ in 0..num_instructions {
+        let opcode = opcodes[rng.gen_range(0..opcodes.len())].clone();
+        
+        let instr = match opcode {
+            // Arithmetic operations
+            KapraOpCode::Add | KapraOpCode::Sub | KapraOpCode::Mul | KapraOpCode::Div => {
+                KapraInstruction::new(
+                    opcode,
+                    vec![
+                        Operand::Register(rng.gen_range(0..8)),
+                        Operand::Register(rng.gen_range(0..8)),
+                        Operand::Register(rng.gen_range(0..8)),
+                    ],
+                    Some(Type::U32),
+                )
+            }
+
+            // Cryptographic operations
+            KapraOpCode::Sha3 => {
+                KapraInstruction::new(
+                    opcode,
+                    vec![
+                        Operand::Register(rng.gen_range(0..8)),
+                        Operand::Register(rng.gen_range(0..8)),
+                    ],
+                    Some(Type::Array(Box::new(Type::U8), 32)),
+                )
+            }
+
+            KapraOpCode::BLSVerify => {
+                KapraInstruction::new(
+                    opcode,
+                    vec![
+                        Operand::Register(rng.gen_range(0..8)), // pubkey
+                        Operand::Register(rng.gen_range(0..8)), // signature
+                        Operand::Register(rng.gen_range(0..8)), // message
+                    ],
+                    Some(Type::Bool),
+                )
+            }
+
+            KapraOpCode::DilithiumVerify | KapraOpCode::Ed25519Verify => {
+                KapraInstruction::new(
+                    opcode,
+                    vec![
+                        Operand::Register(rng.gen_range(0..8)), // pubkey
+                        Operand::Register(rng.gen_range(0..8)), // signature
+                        Operand::Register(rng.gen_range(0..8)), // message
+                    ],
+                    Some(Type::Bool),
+                )
+            }
+
+            // Control flow
+            KapraOpCode::Jump => {
+                KapraInstruction::new(
+                    opcode,
+                    vec![Operand::Immediate(rng.gen_range(0..num_instructions as u64))],
+                    None,
+                )
+            }
+
+            KapraOpCode::JumpIf => {
+                KapraInstruction::new(
+                    opcode,
+                    vec![
+                        Operand::Register(rng.gen_range(0..8)),
+                        Operand::Immediate(rng.gen_range(0..num_instructions as u64)),
+                    ],
+                    None,
+                )
+            }
+
+            KapraOpCode::Call => {
+                KapraInstruction::new(
+                    opcode,
+                    vec![
+                        Operand::Immediate(rng.gen_range(0..num_instructions as u64)),
+                        Operand::Register(rng.gen_range(0..8)),
+                    ],
+                    None,
+                )
+            }
+
+            // Simple operations
+            _ => KapraInstruction::new(opcode, vec![], None),
+        };
+
+        bytecode.add_instruction(instr);
+    }
+
+    // Always end with Halt
+    bytecode.add_instruction(KapraInstruction::new(KapraOpCode::Halt, vec![], None));
+    
+    bytecode
+}
+
+/// Fuzz the consensus runtime with random bytecode
+pub fn fuzz_consensus_runtime(iterations: usize) -> FuzzStats {
+    let mut stats = FuzzStats::default();
+    let start = Instant::now();
+
+    for i in 0..iterations.min(MAX_ITERATIONS) {
+        let bytecode = random_consensus_bytecode();
+        let mut vm = ConsensusVM::new(8, 1000, false); // 8 shards, low threshold
+
+        let result = panic::catch_unwind(|| vm.execute(&bytecode));
+        
+        match result {
+            Ok(exec_result) => {
+                match exec_result {
+                    Ok(_) => stats.successes += 1,
+                    Err(e) => {
+                        stats.runtime_errors += 1;
+                        eprintln!("⚠️ Consensus error on iteration {}: {:?}", i, e);
+                    }
+                }
+            }
+            Err(_) => {
+                stats.panics += 1;
+                eprintln!("🧨 Consensus panic on iteration {}", i);
+            }
+        }
+    }
+
+    stats.duration = start.elapsed();
+    stats
+}
+
+/// Generate random consensus bytecode
+fn random_consensus_bytecode() -> Bytecode {
+    let mut rng = thread_rng();
+    
+    // Generate random constants
+    let mut constants = vec![
+        Constant::Array32([1u8; 32]), // seed
+        Constant::Array32([2u8; 32]), // key
+    ];
+
+    // Add some random array constants
+    for _ in 0..rng.gen_range(1..5) {
+        let mut arr = [0u8; 32];
+        rng.fill(&mut arr[..]);
+        constants.push(Constant::Array32(arr));
+    }
+
+    // Basic consensus operations
+    let mut instructions = vec![
+        0x05, 0x00, // PUSH 0 (seed)
+        0x05, 0x01, // PUSH 1 (key)
+        0x01,       // VRF_GENERATE
+        0x02,       // LEADER_ELECT
+    ];
+
+    // Add some random operations
+    for _ in 0..rng.gen_range(5..15) {
+        instructions.extend_from_slice(&[
+            0x05, rng.gen_range(0..constants.len()) as u8, // PUSH random constant
+            rng.gen_range(0x01..0x08), // Random operation
+        ]);
+    }
+
+    // End with validation
+    instructions.extend_from_slice(&[
+        0x07, // FAIL_IF_FALSE
+    ]);
+
+    Bytecode::new(instructions, constants)
+}
+
+/// Statistics for fuzzing runs
+#[derive(Debug, Default)]
+pub struct FuzzStats {
+    /// Number of successful executions
+    pub successes: usize,
+    /// Number of runtime errors
+    pub runtime_errors: usize,
+    /// Number of panics
+    pub panics: usize,
+    /// Total gas used
+    pub total_gas: u64,
+    /// Maximum gas used in a single execution
+    pub max_gas: u64,
+    /// Duration of the fuzzing run
+    pub duration: Duration,
+}
+
+impl FuzzStats {
+    /// Get average gas usage
+    pub fn avg_gas(&self) -> f64 {
+        if self.successes > 0 {
+            self.total_gas as f64 / self.successes as f64
+        } else {
+            0.0
+        }
+    }
+
+    /// Get success rate
+    pub fn success_rate(&self) -> f64 {
+        let total = self.successes + self.runtime_errors + self.panics;
+        if total > 0 {
+            self.successes as f64 / total as f64
+        } else {
+            0.0
+        }
+    }
 }
 
 #[cfg(test)]

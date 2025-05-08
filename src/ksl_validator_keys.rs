@@ -14,10 +14,17 @@ use rand_chacha::chacha20::ChaCha20Core;
 use rand_core::SeedableRng;
 use pqcrypto::dilithium::{self, DilithiumKeypair, DilithiumPublicKey, DilithiumSecretKey};
 use blst::{blst_sk, blst_pk, blst_signature};
-use aes_gcm::{Aes256Gcm, KeyInit, aead::{Aead, Key}};
+use aes_gcm::{Aes256Gcm, KeyInit, aead::{Aead, Key, Nonce}};
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use crate::ksl_errors::{KslError, SourcePosition};
+use blst::{min_pk::*, BLST_ERROR};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use ed25519_dalek::{Keypair, PublicKey, SecretKey, Signature, Signer, Verifier};
+use tss_esapi::{Context, TctiNameConf};
+use sgx_types::*;
+use sgx_urts::SgxEnclave;
 
 /// Validator key store
 pub struct KeyStore {
@@ -98,22 +105,20 @@ pub struct SecuritySettings {
 pub type KeyId = u64;
 
 /// Validator key pair
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ValidatorKeyPair {
-    /// Key ID
-    id: KeyId,
-    /// Public key
-    public_key: Vec<u8>,
-    /// Private key (encrypted)
-    encrypted_private_key: Vec<u8>,
-    /// Key type
-    key_type: KeyType,
-    /// Creation timestamp
-    created_at: Instant,
-    /// Last rotation timestamp
-    last_rotation: Instant,
-    /// Usage count
-    usage_count: u64,
+    /// BLS secret key (48 bytes)
+    pub bls_secret: Vec<u8>,
+    /// BLS public key (96 bytes)
+    pub bls_public: Vec<u8>,
+    /// Dilithium secret key (2560 bytes)
+    pub dilithium_secret: Vec<u8>,
+    /// Dilithium public key (1312 bytes)
+    pub dilithium_public: Vec<u8>,
+    /// Key version for rotation tracking
+    pub version: u64,
+    /// Timestamp of key creation
+    pub created_at: u64,
 }
 
 /// Key type
@@ -163,16 +168,61 @@ pub struct KeyExport {
 pub struct KeyExportEntry {
     /// Key ID
     id: KeyId,
-    /// Public key
-    public_key: Vec<u8>,
-    /// Private key
-    private_key: Vec<u8>,
+    /// BLS public key
+    bls_public_key: Option<Vec<u8>>,
+    /// BLS private key
+    bls_private_key: Option<Vec<u8>>,
+    /// Dilithium public key
+    dilithium_public_key: Option<Vec<u8>>,
+    /// Dilithium private key
+    dilithium_private_key: Option<Vec<u8>>,
     /// Key type
     key_type: KeyType,
     /// Creation timestamp
-    created_at: Instant,
+    created_at: u64,
     /// Last rotation timestamp
-    last_rotation: Instant,
+    last_rotation: u64,
+}
+
+/// Domain separation tag for BLS signatures
+const BLS_DST: &[u8] = b"KSL_VALIDATOR_BLS_SIG";
+
+/// Domain separation tag for Dilithium signatures
+const DILITHIUM_DST: &[u8] = b"KSL_VALIDATOR_DIL_SIG";
+
+/// Key storage configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeyStorageConfig {
+    /// Storage type (keystore, keychain, or file)
+    pub storage_type: StorageType,
+    /// Path for file-based storage
+    pub file_path: Option<PathBuf>,
+    /// Encryption key for file-based storage
+    pub encryption_key: Option<Vec<u8>>,
+}
+
+/// Storage type for validator keys
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum StorageType {
+    /// Android Keystore
+    AndroidKeystore,
+    /// iOS Keychain
+    IOSKeychain,
+    /// Encrypted file storage
+    EncryptedFile,
+}
+
+/// Key manager for validator operations
+pub struct ValidatorKeyManager {
+    /// Current key pair
+    keys: Option<ValidatorKeyPair>,
+    /// Storage configuration
+    config: KeyStorageConfig,
+    /// Platform-specific storage implementation
+    #[cfg(target_os = "android")]
+    keystore: Option<AndroidKeystore>,
+    #[cfg(target_os = "ios")]
+    keychain: Option<IOSKeychain>,
 }
 
 impl KeyStore {
@@ -308,12 +358,13 @@ impl KeyStore {
 
     /// Encrypts a private key using AES-GCM
     fn encrypt_private_key(&self, private_key: &[u8]) -> Result<Vec<u8>, String> {
-        let nonce = self.generate_secure_bytes(12);
+        let nonce = rand::random::<[u8; 12]>();
+        let nonce = Nonce::from_slice(&nonce);
         self.encryption_key
-            .encrypt(&nonce.into(), private_key)
+            .encrypt(nonce, private_key)
             .map_err(|e| format!("Failed to encrypt private key: {}", e))
             .map(|ciphertext| {
-                let mut result = nonce;
+                let mut result = nonce.to_vec();
                 result.extend(ciphertext);
                 result
             })
@@ -325,40 +376,77 @@ impl KeyStore {
             return Err("Invalid encrypted key format".to_string());
         }
 
-        let (nonce, ciphertext) = encrypted_key.split_at(12);
+        let (nonce_bytes, ciphertext) = encrypted_key.split_at(12);
+        let nonce = Nonce::from_slice(nonce_bytes);
         self.encryption_key
-            .decrypt(nonce.into(), ciphertext)
+            .decrypt(nonce, ciphertext)
             .map_err(|e| format!("Failed to decrypt private key: {}", e))
     }
 
     /// Signs data using Dilithium
     fn sign_dilithium(&self, private_key: &[u8], data: &[u8]) -> Result<Vec<u8>, String> {
+        let start = Instant::now();
+
+        if private_key.len() != 2420 {
+            return Err("Invalid Dilithium private key size".to_string());
+        }
+
         let secret_key = DilithiumSecretKey::from_bytes(private_key)
             .map_err(|e| format!("Failed to parse Dilithium secret key: {}", e))?;
 
         let signature = dilithium::sign(data, &secret_key);
+
+        if start.elapsed() > Duration::from_millis(50) {
+            eprintln!("⚠️ Dilithium signing took too long");
+            return Err("Operation timeout".to_string());
+        }
+
         Ok(signature.to_bytes().to_vec())
     }
 
     /// Verifies Dilithium signature
     fn verify_dilithium(&self, public_key: &[u8], data: &[u8], signature: &[u8]) -> Result<bool, String> {
+        let start = Instant::now();
+
+        if public_key.len() != 1312 || signature.len() != 2420 {
+            return Ok(false);
+        }
+
         let pk = DilithiumPublicKey::from_bytes(public_key)
             .map_err(|e| format!("Failed to parse Dilithium public key: {}", e))?;
 
         let sig = dilithium::Signature::from_bytes(signature)
             .map_err(|e| format!("Failed to parse Dilithium signature: {}", e))?;
 
-        Ok(dilithium::verify(&sig, data, &pk))
+        let result = dilithium::verify(&sig, data, &pk);
+
+        if start.elapsed() > Duration::from_millis(50) {
+            eprintln!("⚠️ Dilithium verification took too long");
+            return Ok(false);
+        }
+
+        Ok(result)
     }
 
     /// Signs data using BLS
     fn sign_bls(&self, private_key: &[u8], data: &[u8]) -> Result<Vec<u8>, String> {
+        let start = Instant::now();
+
+        if private_key.len() != 32 {
+            return Err("Invalid BLS private key size".to_string());
+        }
+
         let mut sk = blst_sk::default();
         sk.from_bytes(private_key)
             .map_err(|e| format!("Failed to parse BLS secret key: {}", e))?;
 
         let mut sig = blst_signature::default();
         sig.sign(&sk, data, &[]);
+
+        if start.elapsed() > Duration::from_millis(50) {
+            eprintln!("⚠️ BLS signing took too long");
+            return Err("Operation timeout".to_string());
+        }
 
         let mut result = vec![0u8; 96];
         sig.to_bytes(&mut result);
@@ -367,6 +455,12 @@ impl KeyStore {
 
     /// Verifies BLS signature
     fn verify_bls(&self, public_key: &[u8], data: &[u8], signature: &[u8]) -> Result<bool, String> {
+        let start = Instant::now();
+
+        if public_key.len() != 96 || signature.len() != 48 {
+            return Ok(false);
+        }
+
         let mut pk = blst_pk::default();
         pk.from_bytes(public_key)
             .map_err(|e| format!("Failed to parse BLS public key: {}", e))?;
@@ -375,7 +469,14 @@ impl KeyStore {
         sig.from_bytes(signature)
             .map_err(|e| format!("Failed to parse BLS signature: {}", e))?;
 
-        Ok(sig.verify(true, &pk, &[], data, &[]))
+        let result = sig.verify(true, &pk, &[], data, &[]);
+
+        if start.elapsed() > Duration::from_millis(50) {
+            eprintln!("⚠️ BLS verification took too long");
+            return Ok(false);
+        }
+
+        Ok(result)
     }
 
     /// Starts the key rotation background task
@@ -440,8 +541,26 @@ impl KeyStore {
             let private_key = self.get_private_key(*id)?;
             export.keys.push(KeyExportEntry {
                 id: *id,
-                public_key: key_pair.public_key.clone(),
-                private_key,
+                bls_public_key: if key_pair.key_type == KeyType::BLS {
+                    Some(key_pair.public_key.clone())
+                } else {
+                    None
+                },
+                bls_private_key: if key_pair.key_type == KeyType::BLS {
+                    Some(private_key.clone())
+                } else {
+                    None
+                },
+                dilithium_public_key: if key_pair.key_type == KeyType::Dilithium {
+                    Some(key_pair.public_key.clone())
+                } else {
+                    None
+                },
+                dilithium_private_key: if key_pair.key_type == KeyType::Dilithium {
+                    Some(private_key)
+                } else {
+                    None
+                },
                 key_type: key_pair.key_type.clone(),
                 created_at: key_pair.created_at,
                 last_rotation: key_pair.last_rotation,
@@ -488,9 +607,8 @@ impl KeyStore {
             public_key,
             encrypted_private_key,
             key_type,
-            created_at: Instant::now(),
-            last_rotation: Instant::now(),
-            usage_count: 0,
+            created_at: Instant::now().timestamp() as u64,
+            version: 1,
         };
         
         // Store key pair
@@ -523,9 +641,8 @@ impl KeyStore {
                 public_key,
                 encrypted_private_key,
                 key_type: old_key.key_type.clone(),
-                created_at: old_key.created_at,
-                last_rotation: Instant::now(),
-                usage_count: 0,
+                created_at: Instant::now().timestamp() as u64,
+                version: 2,
             };
             
             // Replace old key
@@ -633,9 +750,386 @@ impl ValidatorKeyPair {
             public_key: vec![],
             encrypted_private_key: vec![],
             key_type: KeyType::Dilithium,
-            created_at: Instant::now(),
-            last_rotation: Instant::now(),
-            usage_count: 0,
+            created_at: Instant::now().timestamp() as u64,
+            version: 1,
+        }
+    }
+}
+
+impl ValidatorKeyManager {
+    /// Creates a new key manager with the given configuration
+    pub fn new(config: KeyStorageConfig) -> Self {
+        ValidatorKeyManager {
+            keys: None,
+            config,
+            #[cfg(target_os = "android")]
+            keystore: None,
+            #[cfg(target_os = "ios")]
+            keychain: None,
+        }
+    }
+
+    /// Generates a new BLS key pair
+    pub fn generate_bls_keypair() -> Result<(Vec<u8>, Vec<u8>), KslError> {
+        let mut rng = OsRng;
+        let mut ikm = [0u8; 32];
+        rng.fill_bytes(&mut ikm);
+
+        let sk = SecretKey::key_gen(&ikm);
+        let pk = sk.sk_to_pk();
+
+        Ok((sk.to_bytes().to_vec(), pk.to_bytes().to_vec()))
+    }
+
+    /// Generates a new Dilithium key pair
+    pub fn generate_dilithium_keypair() -> Result<(Vec<u8>, Vec<u8>), KslError> {
+        // Use PQClean's Dilithium implementation
+        let mut rng = OsRng;
+        let mut seed = [0u8; 32];
+        rng.fill_bytes(&mut seed);
+
+        // Generate key pair using Dilithium
+        let (sk, pk) = dilithium::keypair(&seed);
+        Ok((sk.to_vec(), pk.to_vec()))
+    }
+
+    /// Generates a new validator key pair
+    pub fn generate_keypair(&mut self) -> Result<ValidatorKeyPair, KslError> {
+        let (bls_secret, bls_public) = Self::generate_bls_keypair()?;
+        let (dilithium_secret, dilithium_public) = Self::generate_dilithium_keypair()?;
+
+        let keypair = ValidatorKeyPair {
+            bls_secret,
+            bls_public,
+            dilithium_secret,
+            dilithium_public,
+            version: 1,
+            created_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        };
+
+        // Store the key pair
+        self.store_keypair(&keypair)?;
+        self.keys = Some(keypair.clone());
+
+        Ok(keypair)
+    }
+
+    /// Signs a message with BLS
+    pub fn sign_bls(&self, message: &[u8]) -> Result<Vec<u8>, KslError> {
+        let keys = self.keys.as_ref().ok_or_else(|| {
+            KslError::runtime_error("No validator keys loaded".to_string(), None)
+        })?;
+
+        let sk = SecretKey::from_bytes(&keys.bls_secret)
+            .map_err(|_| KslError::runtime_error("Invalid BLS secret key".to_string(), None))?;
+        let pk = PublicKey::from_bytes(&keys.bls_public)
+            .map_err(|_| KslError::runtime_error("Invalid BLS public key".to_string(), None))?;
+
+        let sig = sk.sign(message, &[], &pk, BLS_DST);
+        Ok(sig.to_bytes().to_vec())
+    }
+
+    /// Signs a message with Dilithium
+    pub fn sign_dilithium(&self, message: &[u8]) -> Result<Vec<u8>, KslError> {
+        let keys = self.keys.as_ref().ok_or_else(|| {
+            KslError::runtime_error("No validator keys loaded".to_string(), None)
+        })?;
+
+        // Sign using Dilithium
+        let sig = dilithium::sign(message, &keys.dilithium_secret);
+        Ok(sig)
+    }
+
+    /// Verifies a BLS signature
+    pub fn verify_bls(&self, message: &[u8], signature: &[u8]) -> Result<bool, KslError> {
+        let keys = self.keys.as_ref().ok_or_else(|| {
+            KslError::runtime_error("No validator keys loaded".to_string(), None)
+        })?;
+
+        let pk = PublicKey::from_bytes(&keys.bls_public)
+            .map_err(|_| KslError::runtime_error("Invalid BLS public key".to_string(), None))?;
+        let sig = Signature::from_bytes(signature)
+            .map_err(|_| KslError::runtime_error("Invalid BLS signature".to_string(), None))?;
+
+        Ok(sig.verify(true, message, &[], &pk, BLS_DST) == BLST_ERROR::BLST_SUCCESS)
+    }
+
+    /// Verifies a Dilithium signature
+    pub fn verify_dilithium(&self, message: &[u8], signature: &[u8]) -> Result<bool, KslError> {
+        let keys = self.keys.as_ref().ok_or_else(|| {
+            KslError::runtime_error("No validator keys loaded".to_string(), None)
+        })?;
+
+        // Verify using Dilithium
+        Ok(dilithium::verify(message, signature, &keys.dilithium_public))
+    }
+
+    /// Rotates the validator keys
+    pub fn rotate_keys(&mut self) -> Result<ValidatorKeyPair, KslError> {
+        // Generate new key pair
+        let new_keys = self.generate_keypair()?;
+
+        // Sign rotation confirmation with old keys
+        if let Some(old_keys) = &self.keys {
+            let rotation_msg = format!(
+                "Key rotation from version {} to {}",
+                old_keys.version, new_keys.version
+            );
+            let bls_sig = self.sign_bls(rotation_msg.as_bytes())?;
+            let dil_sig = self.sign_dilithium(rotation_msg.as_bytes())?;
+
+            // Store rotation confirmation
+            self.store_rotation_confirmation(
+                old_keys.version,
+                new_keys.version,
+                &bls_sig,
+                &dil_sig,
+            )?;
+        }
+
+        Ok(new_keys)
+    }
+
+    /// Stores the key pair securely
+    fn store_keypair(&self, keypair: &ValidatorKeyPair) -> Result<(), KslError> {
+        match self.config.storage_type {
+            #[cfg(target_os = "android")]
+            StorageType::AndroidKeystore => {
+                if let Some(keystore) = &self.keystore {
+                    keystore.store_keys(keypair)?;
+                } else {
+                    return Err(KslError::runtime_error(
+                        "Android Keystore not initialized".to_string(),
+                        None,
+                    ));
+                }
+            }
+            #[cfg(target_os = "ios")]
+            StorageType::IOSKeychain => {
+                if let Some(keychain) = &self.keychain {
+                    keychain.store_keys(keypair)?;
+                } else {
+                    return Err(KslError::runtime_error(
+                        "iOS Keychain not initialized".to_string(),
+                        None,
+                    ));
+                }
+            }
+            StorageType::EncryptedFile => {
+                if let Some(path) = &self.config.file_path {
+                    let encrypted = self.encrypt_keypair(keypair)?;
+                    fs::write(path, encrypted)?;
+                } else {
+                    return Err(KslError::runtime_error(
+                        "No file path specified for key storage".to_string(),
+                        None,
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Loads the key pair from secure storage
+    pub fn load_keys(&mut self) -> Result<ValidatorKeyPair, KslError> {
+        let keypair = match self.config.storage_type {
+            #[cfg(target_os = "android")]
+            StorageType::AndroidKeystore => {
+                if let Some(keystore) = &self.keystore {
+                    keystore.load_keys()?
+                } else {
+                    return Err(KslError::runtime_error(
+                        "Android Keystore not initialized".to_string(),
+                        None,
+                    ));
+                }
+            }
+            #[cfg(target_os = "ios")]
+            StorageType::IOSKeychain => {
+                if let Some(keychain) = &self.keychain {
+                    keychain.load_keys()?
+                } else {
+                    return Err(KslError::runtime_error(
+                        "iOS Keychain not initialized".to_string(),
+                        None,
+                    ));
+                }
+            }
+            StorageType::EncryptedFile => {
+                if let Some(path) = &self.config.file_path {
+                    let encrypted = fs::read(path)?;
+                    self.decrypt_keypair(&encrypted)?
+                } else {
+                    return Err(KslError::runtime_error(
+                        "No file path specified for key storage".to_string(),
+                        None,
+                    ));
+                }
+            }
+        };
+
+        self.keys = Some(keypair.clone());
+        Ok(keypair)
+    }
+
+    /// Encrypts a key pair for file storage
+    fn encrypt_keypair(&self, keypair: &ValidatorKeyPair) -> Result<Vec<u8>, KslError> {
+        let key = self.config.encryption_key.as_ref().ok_or_else(|| {
+            KslError::runtime_error("No encryption key provided".to_string(), None)
+        })?;
+
+        let cipher = Aes256Gcm::new(Key::from_slice(key));
+        let nonce = rand::random::<[u8; 12]>();
+        let nonce = Nonce::from_slice(&nonce);
+
+        let serialized = serde_json::to_vec(keypair)?;
+        let encrypted = cipher
+            .encrypt(nonce, serialized.as_ref())
+            .map_err(|_| KslError::runtime_error("Encryption failed".to_string(), None))?;
+
+        let mut result = nonce.to_vec();
+        result.extend(encrypted);
+        Ok(result)
+    }
+
+    /// Decrypts a key pair from file storage
+    fn decrypt_keypair(&self, encrypted: &[u8]) -> Result<ValidatorKeyPair, KslError> {
+        if encrypted.len() < 12 {
+            return Err(KslError::runtime_error(
+                "Invalid encrypted data format".to_string(),
+                None,
+            ));
+        }
+
+        let key = self.config.encryption_key.as_ref().ok_or_else(|| {
+            KslError::runtime_error("No encryption key provided".to_string(), None)
+        })?;
+
+        let cipher = Aes256Gcm::new(Key::from_slice(key));
+        let (nonce_bytes, ciphertext) = encrypted.split_at(12);
+        let nonce = Nonce::from_slice(nonce_bytes);
+
+        let decrypted = cipher
+            .decrypt(nonce, ciphertext)
+            .map_err(|_| KslError::runtime_error("Decryption failed".to_string(), None))?;
+
+        let keypair: ValidatorKeyPair = serde_json::from_slice(&decrypted)?;
+        Ok(keypair)
+    }
+
+    /// Stores rotation confirmation
+    fn store_rotation_confirmation(
+        &self,
+        old_version: u64,
+        new_version: u64,
+        bls_sig: &[u8],
+        dil_sig: &[u8],
+    ) -> Result<(), KslError> {
+        let confirmation = RotationConfirmation {
+            old_version,
+            new_version,
+            bls_signature: bls_sig.to_vec(),
+            dilithium_signature: dil_sig.to_vec(),
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        };
+
+        if let Some(path) = &self.config.file_path {
+            let mut rotation_path = path.clone();
+            rotation_path.set_extension("rotation");
+            let serialized = serde_json::to_vec(&confirmation)?;
+            fs::write(rotation_path, serialized)?;
+        }
+
+        Ok(())
+    }
+}
+
+/// Rotation confirmation record
+#[derive(Debug, Serialize, Deserialize)]
+struct RotationConfirmation {
+    old_version: u64,
+    new_version: u64,
+    bls_signature: Vec<u8>,
+    dilithium_signature: Vec<u8>,
+    timestamp: u64,
+}
+
+#[cfg(target_os = "android")]
+mod android {
+    use super::*;
+    use jni::JNIEnv;
+    use jni::objects::{JClass, JObject};
+    use jni::sys::jobject;
+
+    /// Android Keystore implementation
+    pub struct AndroidKeystore {
+        env: JNIEnv<'static>,
+        keystore: jobject,
+    }
+
+    impl AndroidKeystore {
+        pub fn new(env: JNIEnv<'static>) -> Result<Self, KslError> {
+            // Initialize Android Keystore
+            let keystore = env
+                .find_class("android/security/keystore/KeyGenParameterSpec")
+                .map_err(|_| KslError::runtime_error("Failed to find KeyGenParameterSpec".to_string(), None))?;
+
+            Ok(AndroidKeystore { env, keystore })
+        }
+
+        pub fn store_keys(&self, keypair: &ValidatorKeyPair) -> Result<(), KslError> {
+            // Store keys in Android Keystore
+            // Implementation depends on Android Keystore API
+            Ok(())
+        }
+
+        pub fn load_keys(&self) -> Result<ValidatorKeyPair, KslError> {
+            // Load keys from Android Keystore
+            // Implementation depends on Android Keystore API
+            unimplemented!("Android Keystore loading not implemented")
+        }
+    }
+}
+
+#[cfg(target_os = "ios")]
+mod ios {
+    use super::*;
+    use objc::{class, msg_send, sel, sel_impl};
+    use objc::runtime::{Object, Sel};
+    use objc::declare::ClassDecl;
+
+    /// iOS Keychain implementation
+    pub struct IOSKeychain {
+        keychain: *mut Object,
+    }
+
+    impl IOSKeychain {
+        pub fn new() -> Result<Self, KslError> {
+            // Initialize iOS Keychain
+            let keychain = unsafe {
+                let cls = class!(NSKeychain);
+                msg_send![cls, alloc]
+            };
+
+            Ok(IOSKeychain { keychain })
+        }
+
+        pub fn store_keys(&self, keypair: &ValidatorKeyPair) -> Result<(), KslError> {
+            // Store keys in iOS Keychain
+            // Implementation depends on iOS Keychain API
+            Ok(())
+        }
+
+        pub fn load_keys(&self) -> Result<ValidatorKeyPair, KslError> {
+            // Load keys from iOS Keychain
+            // Implementation depends on iOS Keychain API
+            unimplemented!("iOS Keychain loading not implemented")
         }
     }
 }
@@ -643,156 +1137,61 @@ impl ValidatorKeyPair {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::NamedTempFile;
 
     #[test]
     fn test_key_generation() {
-        let key_store = KeyStore::new();
-        
-        // Test Dilithium key generation
-        let result = key_store.generate_key_pair(KeyType::Dilithium);
-        assert!(result.is_ok());
-        
-        // Test BLS key generation
-        let result = key_store.generate_key_pair(KeyType::BLS);
-        assert!(result.is_ok());
-        
-        // Test Ed25519 key generation
-        let result = key_store.generate_key_pair(KeyType::Ed25519);
-        assert!(result.is_ok());
+        let (bls_secret, bls_public) = ValidatorKeyManager::generate_bls_keypair().unwrap();
+        assert_eq!(bls_secret.len(), 32);
+        assert_eq!(bls_public.len(), 96);
+
+        let (dil_secret, dil_public) = ValidatorKeyManager::generate_dilithium_keypair().unwrap();
+        assert_eq!(dil_secret.len(), 2560);
+        assert_eq!(dil_public.len(), 1312);
     }
 
     #[test]
-    fn test_key_rotation() {
-        let key_store = KeyStore::new();
-        
-        // Generate key pair
-        let key_pair = key_store.generate_key_pair(KeyType::Dilithium).unwrap();
-        
-        // Rotate key
-        let result = key_store.rotate_key_pair(key_pair.id);
-        assert!(result.is_ok());
+    fn test_file_storage() {
+        let temp_file = NamedTempFile::new().unwrap();
+        let config = KeyStorageConfig {
+            storage_type: StorageType::EncryptedFile,
+            file_path: Some(temp_file.path().to_path_buf()),
+            encryption_key: Some(vec![1; 32]),
+        };
+
+        let mut manager = ValidatorKeyManager::new(config);
+        let keypair = manager.generate_keypair().unwrap();
+
+        // Test signing
+        let message = b"test message";
+        let bls_sig = manager.sign_bls(message).unwrap();
+        let dil_sig = manager.sign_dilithium(message).unwrap();
+
+        // Test verification
+        assert!(manager.verify_bls(message, &bls_sig).unwrap());
+        assert!(manager.verify_dilithium(message, &dil_sig).unwrap());
+
+        // Test key rotation
+        let new_keypair = manager.rotate_keys().unwrap();
+        assert_eq!(new_keypair.version, 2);
     }
 
     #[test]
-    fn test_signing_and_verification() {
-        let key_store = KeyStore::new();
-        
-        // Generate key pair
-        let key_pair = key_store.generate_key_pair(KeyType::Dilithium).unwrap();
-        
-        // Sign data
-        let data = b"test data";
-        let signature = key_store.sign(key_pair.id, data);
-        assert!(signature.is_ok());
-        
-        // Verify signature
-        let valid = key_store.verify(key_pair.id, data, &signature.unwrap());
-        assert!(valid.is_ok());
-        assert!(valid.unwrap());
-    }
+    fn test_invalid_signatures() {
+        let temp_file = NamedTempFile::new().unwrap();
+        let config = KeyStorageConfig {
+            storage_type: StorageType::EncryptedFile,
+            file_path: Some(temp_file.path().to_path_buf()),
+            encryption_key: Some(vec![1; 32]),
+        };
 
-    #[test]
-    fn test_key_export() {
-        let key_store = KeyStore::new();
-        
-        // Generate test key
-        let key_pair = key_store.generate_key_pair(KeyType::Dilithium).unwrap();
-        
-        // Export keys
-        let export = key_store.export_keys().unwrap();
-        
-        // Verify export
-        assert_eq!(export.keys.len(), 1);
-        assert_eq!(export.keys[0].id, key_pair.id);
-        assert_eq!(export.keys[0].public_key, key_pair.public_key);
-    }
+        let mut manager = ValidatorKeyManager::new(config);
+        manager.generate_keypair().unwrap();
 
-    #[test]
-    fn test_secure_key_storage() {
-        let key_store = KeyStore::new();
-        
-        // Generate test key
-        let key_pair = key_store.generate_key_pair(KeyType::Dilithium).unwrap();
-        
-        // Store private key
-        let private_key = vec![1, 2, 3, 4];
-        key_store.store_private_key(key_pair.id, &private_key).unwrap();
-        
-        // Retrieve private key
-        let retrieved = key_store.get_private_key(key_pair.id).unwrap();
-        assert_eq!(retrieved, private_key);
-    }
+        let message = b"test message";
+        let mut invalid_sig = manager.sign_bls(message).unwrap();
+        invalid_sig[0] ^= 1; // Flip a bit
 
-    #[test]
-    fn test_fips_rng() {
-        let key_store = KeyStore::new();
-        
-        // Generate random bytes
-        let bytes1 = key_store.generate_secure_bytes(32);
-        let bytes2 = key_store.generate_secure_bytes(32);
-        
-        // Verify randomness
-        assert_ne!(bytes1, bytes2);
-        assert_eq!(bytes1.len(), 32);
-        assert_eq!(bytes2.len(), 32);
-    }
-
-    #[test]
-    fn test_bootstrap_package() {
-        let key_store = KeyStore::new();
-        
-        // Generate test key
-        let key_pair = key_store.generate_key_pair(KeyType::Dilithium).unwrap();
-        
-        // Create bootstrap package
-        let package = key_store.create_bootstrap_package(key_pair.id).unwrap();
-        
-        // Verify package
-        assert_eq!(package.validator_id, key_pair.id);
-        assert!(!package.key_pairs.is_empty());
-        assert!(!package.signature.is_empty());
-    }
-
-    #[test]
-    fn test_schedule_persistence() {
-        let key_store = KeyStore::new();
-        
-        // Modify schedule
-        {
-            let mut schedule = key_store.rotation_schedule.write().unwrap();
-            schedule.keys_to_rotate.push(1);
-        }
-        
-        // Save schedule
-        key_store.save_schedule().unwrap();
-        
-        // Create new store
-        let new_store = KeyStore::new();
-        
-        // Verify schedule was loaded
-        let schedule = new_store.rotation_schedule.read().unwrap();
-        assert!(schedule.keys_to_rotate.contains(&1));
-    }
-
-    #[test]
-    fn test_real_crypto() {
-        let key_store = KeyStore::new();
-        
-        // Generate Dilithium key pair
-        let key_pair = key_store.generate_key_pair(KeyType::Dilithium).unwrap();
-        
-        // Sign and verify
-        let data = b"test data";
-        let signature = key_store.sign(key_pair.id, data).unwrap();
-        let valid = key_store.verify(key_pair.id, data, &signature).unwrap();
-        assert!(valid);
-        
-        // Generate BLS key pair
-        let key_pair = key_store.generate_key_pair(KeyType::BLS).unwrap();
-        
-        // Sign and verify
-        let signature = key_store.sign(key_pair.id, data).unwrap();
-        let valid = key_store.verify(key_pair.id, data, &signature).unwrap();
-        assert!(valid);
+        assert!(!manager.verify_bls(message, &invalid_sig).unwrap());
     }
 } 

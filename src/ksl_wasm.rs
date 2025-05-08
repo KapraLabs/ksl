@@ -12,6 +12,9 @@ use wasm_encoder::{
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use crate::ksl_abi::{ABIGenerator, ContractABI};
+use crate::ksl_version::{ContractVersion, VersionManager};
+use serde_json;
 
 /// WASM generation error with async support
 #[derive(Debug, PartialEq)]
@@ -56,7 +59,7 @@ impl WasmGenerator {
         }
     }
 
-    /// Generates WASM module with async support
+    /// Generates WASM module with ABI and versioning support
     pub async fn generate_async(&mut self) -> Result<Vec<u8>, Vec<WasmError>> {
         // Define types
         let mut type_section = TypeSection::new();
@@ -141,6 +144,18 @@ impl WasmGenerator {
 
         self.module.section(&code_section);
 
+        // Add ABI custom section
+        let mut abi_gen = ABIGenerator::new();
+        let abi = abi_gen.generate_contract_abi(&self.bytecode.instructions, "contract").unwrap();
+        let abi_json = serde_json::to_string(&abi).unwrap();
+        self.module.custom_section("ksl_abi", abi_json.as_bytes());
+
+        // Add version custom section
+        let mut version = ContractVersion::new(1, 0, 0);
+        version.update_checksum(&self.bytecode.instructions);
+        let version_json = serde_json::to_string(&version).unwrap();
+        self.module.custom_section("ksl_version", version_json.as_bytes());
+
         if self.errors.is_empty() {
             Ok(self.module.finish())
         } else {
@@ -148,13 +163,36 @@ impl WasmGenerator {
         }
     }
 
-    // Generate WASM instructions for a bytecode instruction with async support
+    /// Generates WASM instructions with gas metering
     fn generate_instruction(
         &mut self,
         instr: &KapraInstruction,
         instr_index: usize,
         function: &mut Function,
     ) -> Result<(), WasmError> {
+        // Add gas metering
+        let gas_cost = match instr.opcode {
+            KapraOpCode::Add | KapraOpCode::Sub | KapraOpCode::Mul => 3,
+            KapraOpCode::Sha3 => 30,
+            KapraOpCode::Sha3_512 => 60,
+            KapraOpCode::BlsVerify => 100,
+            KapraOpCode::DilVerify => 120,
+            KapraOpCode::MerkleVerify => 50,
+            _ => 1,
+        };
+
+        // Add gas check
+        function.instruction(&Instruction::LocalGet(0)); // gas counter
+        function.instruction(&Instruction::I32Const(gas_cost));
+        function.instruction(&Instruction::I32Sub);
+        function.instruction(&Instruction::LocalTee(0)); // Update gas counter
+        function.instruction(&Instruction::I32Const(0));
+        function.instruction(&Instruction::I32LtS);
+        function.instruction(&Instruction::If(BlockType::Empty));
+        function.instruction(&Instruction::Unreachable); // Out of gas
+        function.instruction(&Instruction::End);
+
+        // Generate actual instruction
         match instr.opcode {
             KapraOpCode::Mov => {
                 let dst = self.get_register(&instr.operands[0], instr_index)?;
@@ -388,6 +426,20 @@ impl WasmGenerator {
                 // Store promise handle
                 function.instruction(&Instruction::LocalSet(dst));
             }
+            KapraOpCode::Assert => {
+                let cond = self.get_register(&instr.operands[0], instr_index)?;
+                
+                // Load condition value
+                function.instruction(&Instruction::LocalGet(cond));
+                
+                // Check if condition is false (0)
+                function.instruction(&Instruction::I32Eqz);
+                
+                // If condition is false, trap (unreachable)
+                function.instruction(&Instruction::If(BlockType::Empty));
+                function.instruction(&Instruction::Unreachable);
+                function.instruction(&Instruction::End);
+            }
             _ => {
                 return Err(WasmError::new(
                     format!("Unsupported opcode: {:?}", instr.opcode),
@@ -607,5 +659,48 @@ mod tests {
             }
         }
         assert!(has_async_export, "Expected main_async export");
+    }
+
+    #[test]
+    async fn test_wasm_generation_with_abi() {
+        let bytecode = KapraBytecode {
+            instructions: vec![
+                KapraInstruction {
+                    opcode: KapraOpCode::Add,
+                    operands: vec![
+                        Operand::Register(0),
+                        Operand::Register(1),
+                        Operand::Register(2),
+                    ],
+                },
+            ],
+        };
+
+        let mut generator = WasmGenerator::new(bytecode);
+        let wasm = generator.generate_async().await.unwrap();
+
+        // Verify ABI custom section
+        let module = wasmparser::Parser::new(0).parse_all(&wasm).unwrap();
+        let mut found_abi = false;
+        let mut found_version = false;
+
+        for section in module {
+            if let Ok(wasmparser::Section::Custom(custom)) = section {
+                if custom.name() == "ksl_abi" {
+                    found_abi = true;
+                    let abi: ContractABI = serde_json::from_slice(custom.data()).unwrap();
+                    assert_eq!(abi.name, "contract");
+                } else if custom.name() == "ksl_version" {
+                    found_version = true;
+                    let version: ContractVersion = serde_json::from_slice(custom.data()).unwrap();
+                    assert_eq!(version.major, 1);
+                    assert_eq!(version.minor, 0);
+                    assert_eq!(version.patch, 0);
+                }
+            }
+        }
+
+        assert!(found_abi);
+        assert!(found_version);
     }
 }

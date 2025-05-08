@@ -30,6 +30,8 @@ use tempfile::TempDir;
 use std::fs::{self, File};
 use std::io::Write;
 use serde::{Serialize, Deserialize};
+use crate::ksl_irgen::generate_ir;
+use crate::ksl_export::export_ir_to_json;
 
 // Re-export dependencies
 mod ksl_parser {
@@ -95,6 +97,8 @@ pub struct CompileOptions {
     pub opt_level: u8,
     /// Hot reload configuration
     pub hot_reload: Option<HotReloadConfig>,
+    pub emit_ir: bool,
+    pub ir_output_path: Option<String>,
 }
 
 impl Default for CompileOptions {
@@ -104,6 +108,8 @@ impl Default for CompileOptions {
             debug_info: true,
             opt_level: 2,
             hot_reload: None,
+            emit_ir: false,
+            ir_output_path: None,
         }
     }
 }
@@ -393,6 +399,65 @@ impl<'ctx> LLVMCodegen<'ctx> {
             }
             AstNode::AsyncFnDecl { name, params, body, .. } => {
                 self.generate_async_function(name, params, body)
+            }
+            AstNode::VerifyBlock { conditions } => {
+                // Generate code for each condition
+                for condition in conditions {
+                    let cond_value = self.generate_node(condition)?;
+                    
+                    // Convert condition to boolean if needed
+                    let bool_value = if cond_value.get_type().is_int_type() {
+                        self.builder.build_int_compare(
+                            inkwell::IntPredicate::NE,
+                            cond_value.into_int_value(),
+                            self.context.i32_type().const_int(0, false),
+                            "verify_cond"
+                        )
+                    } else {
+                        cond_value.into_int_value()
+                    };
+
+                    // Create error message for assertion failure
+                    let error_msg = self.builder.build_global_string_ptr(
+                        "Verification condition failed",
+                        "verify_error"
+                    );
+
+                    // Create assertion failure block
+                    let fail_bb = self.context.append_basic_block(
+                        self.fn_value_opt.unwrap(),
+                        "verify_fail"
+                    );
+
+                    // Create success block
+                    let success_bb = self.context.append_basic_block(
+                        self.fn_value_opt.unwrap(),
+                        "verify_success"
+                    );
+
+                    // Branch based on condition
+                    self.builder.build_conditional_branch(
+                        bool_value,
+                        success_bb,
+                        fail_bb
+                    );
+
+                    // Generate failure block code
+                    self.builder.position_at_end(fail_bb);
+                    let printf_fn = self.module.get_function("printf").unwrap();
+                    self.builder.build_call(
+                        printf_fn,
+                        &[error_msg.as_pointer_value().into()],
+                        "print_error"
+                    );
+                    self.builder.build_unconditional_branch(success_bb);
+
+                    // Continue with success block
+                    self.builder.position_at_end(success_bb);
+                }
+
+                // Return void for verify block
+                Ok(self.context.void_type().const_void().as_basic_value_enum())
             }
             _ => Err(KslError::type_error(
                 format!("Unsupported AST node: {:?}", node),
@@ -1215,5 +1280,60 @@ mod tests {
         assert!(ir.contains("br i1"));
         assert!(ir.contains("phi i32"));
         assert!(feedback.compilation_time_ms > 0);
+    }
+
+    #[test]
+    fn test_verify_block_compilation() {
+        let verify_node = AstNode::VerifyBlock {
+            conditions: vec![
+                AstNode::Expr {
+                    kind: ExprKind::BinaryOp {
+                        op: ">=".to_string(),
+                        left: Box::new(AstNode::Expr {
+                            kind: ExprKind::Ident("x".to_string())
+                        }),
+                        right: Box::new(AstNode::Expr {
+                            kind: ExprKind::Number("0".to_string())
+                        }),
+                    }
+                },
+                AstNode::Expr {
+                    kind: ExprKind::BinaryOp {
+                        op: "==".to_string(),
+                        left: Box::new(AstNode::Expr {
+                            kind: ExprKind::Ident("y".to_string())
+                        }),
+                        right: Box::new(AstNode::Expr {
+                            kind: ExprKind::Ident("z".to_string())
+                        }),
+                    }
+                },
+            ],
+        };
+
+        let context = Context::create();
+        let mut codegen = LLVMCodegen::new(&context, "test", CompileTarget::Native, true, None);
+        
+        // Create a test function to contain the verify block
+        let fn_type = context.void_type().fn_type(&[], false);
+        let fn_value = codegen.module.add_function("test_fn", fn_type, None);
+        let entry_bb = context.append_basic_block(fn_value, "entry");
+        codegen.builder.position_at_end(entry_bb);
+        codegen.fn_value_opt = Some(fn_value);
+
+        // Add printf function for error messages
+        let printf_type = context.i32_type().fn_type(&[context.i8_type().ptr_type(AddressSpace::Generic).into()], true);
+        codegen.module.add_function("printf", printf_type, None);
+
+        // Compile the verify block
+        let result = codegen.generate_node(&verify_node);
+        assert!(result.is_ok());
+
+        // Verify the generated code
+        let module_str = codegen.module.print_to_string().to_string();
+        assert!(module_str.contains("verify_cond"));
+        assert!(module_str.contains("verify_fail"));
+        assert!(module_str.contains("verify_success"));
+        assert!(module_str.contains("Verification condition failed"));
     }
 }

@@ -92,10 +92,14 @@ pub enum KapraOpCode {
     Mul,         // Mul dst_reg, src_reg1, src_reg2
     Halt,        // Halt program
     Fail,        // Immediate failure
+    Assert,      // Assert condition_reg
     // Control flow
     Jump,        // Jump to offset (immediate)
     Call,        // Call function (immediate index)
     Return,      // Return from function
+    // Auth operations
+    Auth,        // Auth delegatee_reg (push delegated context)
+    AuthCall,    // AuthCall target_reg (call with delegated auth)
     // Crypto operations
     Sha3,        // Sha3 dst_reg, src_reg (string or array)
     Sha3_512,    // Sha3_512 dst_reg, src_reg (string or array)
@@ -137,28 +141,31 @@ impl KapraOpCode {
             KapraOpCode::Mul => 0x04,
             KapraOpCode::Halt => 0x05,
             KapraOpCode::Fail => 0x06,
-            KapraOpCode::Jump => 0x07,
-            KapraOpCode::Call => 0x08,
-            KapraOpCode::Return => 0x09,
-            KapraOpCode::Sha3 => 0x0A,
-            KapraOpCode::Sha3_512 => 0x0C,
-            KapraOpCode::Kaprekar => 0x0B,
-            KapraOpCode::BlsVerify => 0x0D,
-            KapraOpCode::DilithiumVerify => 0x0E,
-            KapraOpCode::MerkleVerify => 0x0F,
-            KapraOpCode::AsyncCall => 0x10,
+            KapraOpCode::Assert => 0x07,
+            KapraOpCode::Jump => 0x08,
+            KapraOpCode::Call => 0x09,
+            KapraOpCode::Return => 0x0A,
+            KapraOpCode::Auth => 0x0B,
+            KapraOpCode::AuthCall => 0x0C,
+            KapraOpCode::Sha3 => 0x0D,
+            KapraOpCode::Sha3_512 => 0x0E,
+            KapraOpCode::Kaprekar => 0x0F,
+            KapraOpCode::BlsVerify => 0x10,
+            KapraOpCode::DilithiumVerify => 0x11,
+            KapraOpCode::MerkleVerify => 0x12,
+            KapraOpCode::AsyncCall => 0x13,
             // New opcodes
-            KapraOpCode::TcpConnect => 0x11,
-            KapraOpCode::UdpSend => 0x12,
-            KapraOpCode::HttpPost => 0x13,
-            KapraOpCode::HttpGet => 0x14,
-            KapraOpCode::Print => 0x15,
-            KapraOpCode::DeviceSensor => 0x16,
-            KapraOpCode::Sin => 0x17,
-            KapraOpCode::Cos => 0x18,
-            KapraOpCode::Sqrt => 0x19,
-            KapraOpCode::MatrixMul => 0x1A,
-            KapraOpCode::TensorReduce => 0x1B,
+            KapraOpCode::TcpConnect => 0x14,
+            KapraOpCode::UdpSend => 0x15,
+            KapraOpCode::HttpPost => 0x16,
+            KapraOpCode::HttpGet => 0x17,
+            KapraOpCode::Print => 0x18,
+            KapraOpCode::DeviceSensor => 0x19,
+            KapraOpCode::Sin => 0x1A,
+            KapraOpCode::Cos => 0x1B,
+            KapraOpCode::Sqrt => 0x1C,
+            KapraOpCode::MatrixMul => 0x1D,
+            KapraOpCode::TensorReduce => 0x1E,
         }
     }
 
@@ -178,28 +185,31 @@ impl KapraOpCode {
             0x04 => Some(KapraOpCode::Mul),
             0x05 => Some(KapraOpCode::Halt),
             0x06 => Some(KapraOpCode::Fail),
-            0x07 => Some(KapraOpCode::Jump),
-            0x08 => Some(KapraOpCode::Call),
-            0x09 => Some(KapraOpCode::Return),
-            0x0A => Some(KapraOpCode::Sha3),
-            0x0C => Some(KapraOpCode::Sha3_512),
-            0x0B => Some(KapraOpCode::Kaprekar),
-            0x0D => Some(KapraOpCode::BlsVerify),
-            0x0E => Some(KapraOpCode::DilithiumVerify),
-            0x0F => Some(KapraOpCode::MerkleVerify),
-            0x10 => Some(KapraOpCode::AsyncCall),
+            0x07 => Some(KapraOpCode::Assert),
+            0x08 => Some(KapraOpCode::Jump),
+            0x09 => Some(KapraOpCode::Call),
+            0x0A => Some(KapraOpCode::Return),
+            0x0B => Some(KapraOpCode::Auth),
+            0x0C => Some(KapraOpCode::AuthCall),
+            0x0D => Some(KapraOpCode::Sha3),
+            0x0E => Some(KapraOpCode::Sha3_512),
+            0x0F => Some(KapraOpCode::Kaprekar),
+            0x10 => Some(KapraOpCode::BlsVerify),
+            0x11 => Some(KapraOpCode::DilithiumVerify),
+            0x12 => Some(KapraOpCode::MerkleVerify),
+            0x13 => Some(KapraOpCode::AsyncCall),
             // New opcodes
-            0x11 => Some(KapraOpCode::TcpConnect),
-            0x12 => Some(KapraOpCode::UdpSend),
-            0x13 => Some(KapraOpCode::HttpPost),
-            0x14 => Some(KapraOpCode::HttpGet),
-            0x15 => Some(KapraOpCode::Print),
-            0x16 => Some(KapraOpCode::DeviceSensor),
-            0x17 => Some(KapraOpCode::Sin),
-            0x18 => Some(KapraOpCode::Cos),
-            0x19 => Some(KapraOpCode::Sqrt),
-            0x1A => Some(KapraOpCode::MatrixMul),
-            0x1B => Some(KapraOpCode::TensorReduce),
+            0x14 => Some(KapraOpCode::TcpConnect),
+            0x15 => Some(KapraOpCode::UdpSend),
+            0x16 => Some(KapraOpCode::HttpPost),
+            0x17 => Some(KapraOpCode::HttpGet),
+            0x18 => Some(KapraOpCode::Print),
+            0x19 => Some(KapraOpCode::DeviceSensor),
+            0x1A => Some(KapraOpCode::Sin),
+            0x1B => Some(KapraOpCode::Cos),
+            0x1C => Some(KapraOpCode::Sqrt),
+            0x1D => Some(KapraOpCode::MatrixMul),
+            0x1E => Some(KapraOpCode::TensorReduce),
             _ => None,
         }
     }
@@ -220,9 +230,12 @@ impl KapraOpCode {
             KapraOpCode::Mul => ("Multiplies two registers", 3),
             KapraOpCode::Halt => ("Halts program execution", 0),
             KapraOpCode::Fail => ("Triggers immediate failure", 0),
+            KapraOpCode::Assert => ("Asserts condition in register", 1),
             KapraOpCode::Jump => ("Jumps to offset", 1),
             KapraOpCode::Call => ("Calls function by index", 1),
             KapraOpCode::Return => ("Returns from function", 0),
+            KapraOpCode::Auth => ("Authenticates delegatee", 1),
+            KapraOpCode::AuthCall => ("Calls function with delegated authentication", 1),
             KapraOpCode::Sha3 => ("Computes SHA3 hash", 2),
             KapraOpCode::Sha3_512 => ("Computes SHA3-512 hash", 2),
             KapraOpCode::Kaprekar => ("Applies Kaprekar operation", 2),
@@ -331,6 +344,7 @@ impl KapraInstruction {
             KapraOpCode::Mov => 2, // dst, src
             KapraOpCode::Add | KapraOpCode::Sub | KapraOpCode::Mul => 3, // dst, src1, src2
             KapraOpCode::Halt | KapraOpCode::Fail | KapraOpCode::Return => 0,
+            KapraOpCode::Assert => 1, // condition
             KapraOpCode::Jump | KapraOpCode::Call => 1, // offset or index
             KapraOpCode::Sha3 | KapraOpCode::Sha3_512 | KapraOpCode::Kaprekar => 2, // dst, src
             KapraOpCode::BlsVerify | KapraOpCode::DilithiumVerify => 4, // dst, msg, pubkey, sig
@@ -343,6 +357,8 @@ impl KapraInstruction {
             KapraOpCode::Sin | KapraOpCode::Cos | KapraOpCode::Sqrt => 2, // dst, src
             KapraOpCode::MatrixMul => 3, // dst, a, b
             KapraOpCode::TensorReduce => 2, // dst, src
+            KapraOpCode::Auth => 1, // delegatee_reg
+            KapraOpCode::AuthCall => 1, // target_reg
         };
 
         for _ in 0..operand_count {
@@ -441,6 +457,20 @@ impl KapraInstruction {
                 }
             }
             KapraOpCode::Return => "ret void".to_string(),
+            KapraOpCode::Auth => {
+                if let [Operand::Register(delegatee)] = self.operands.as_slice() {
+                    format!("call void @auth(i32 %r{})", delegatee)
+                } else {
+                    "unreachable".to_string()
+                }
+            }
+            KapraOpCode::AuthCall => {
+                if let [Operand::Register(target)] = self.operands.as_slice() {
+                    format!("call void @auth_call(i32 %r{})", target)
+                } else {
+                    "unreachable".to_string()
+                }
+            }
             KapraOpCode::Sha3 => {
                 if let [Operand::Register(dst), Operand::Register(src)] = self.operands.as_slice() {
                     format!("%r{} = call [32 x i8] @sha3(i32 %r{})", dst, src)
@@ -580,6 +610,16 @@ impl KapraInstruction {
             KapraOpCode::TensorReduce => {
                 if let [Operand::Register(dst), Operand::Register(src)] = self.operands.as_slice() {
                     format!("%r{} = call [32 x i8] @tensor_reduce(i32 %r{}, i32 %r{})", dst, src)
+                } else {
+                    "unreachable".to_string()
+                }
+            }
+            KapraOpCode::Assert => {
+                if let [Operand::Register(cond)] = self.operands.as_slice() {
+                    format!(
+                        "br i1 %r{}, label %continue, label %fail",
+                        cond
+                    )
                 } else {
                     "unreachable".to_string()
                 }
@@ -1036,10 +1076,10 @@ mod tests {
     #[test]
     fn encode_decode_networking() {
         let opcodes = vec![
-            (KapraOpCode::TcpConnect, 0x11),
-            (KapraOpCode::UdpSend, 0x12),
-            (KapraOpCode::HttpPost, 0x13),
-            (KapraOpCode::HttpGet, 0x14),
+            (KapraOpCode::TcpConnect, 0x14),
+            (KapraOpCode::UdpSend, 0x15),
+            (KapraOpCode::HttpPost, 0x16),
+            (KapraOpCode::HttpGet, 0x17),
         ];
 
         for (opcode, byte) in opcodes {
@@ -1051,8 +1091,8 @@ mod tests {
     #[test]
     fn encode_decode_io() {
         let opcodes = vec![
-            (KapraOpCode::Print, 0x15),
-            (KapraOpCode::DeviceSensor, 0x16),
+            (KapraOpCode::Print, 0x18),
+            (KapraOpCode::DeviceSensor, 0x19),
         ];
 
         for (opcode, byte) in opcodes {
@@ -1064,11 +1104,11 @@ mod tests {
     #[test]
     fn encode_decode_math() {
         let opcodes = vec![
-            (KapraOpCode::Sin, 0x17),
-            (KapraOpCode::Cos, 0x18),
-            (KapraOpCode::Sqrt, 0x19),
-            (KapraOpCode::MatrixMul, 0x1A),
-            (KapraOpCode::TensorReduce, 0x1B),
+            (KapraOpCode::Sin, 0x1A),
+            (KapraOpCode::Cos, 0x1B),
+            (KapraOpCode::Sqrt, 0x1C),
+            (KapraOpCode::MatrixMul, 0x1D),
+            (KapraOpCode::TensorReduce, 0x1E),
         ];
 
         for (opcode, byte) in opcodes {
@@ -1235,5 +1275,26 @@ mod tests {
             assert!(!ir.is_empty());
             assert!(!ir.contains("unreachable"));
         }
+    }
+
+    #[test]
+    fn test_assert_instruction() {
+        let instr = KapraInstruction::new(
+            KapraOpCode::Assert,
+            vec![Operand::Register(0)],
+            None
+        );
+        
+        // Test encoding/decoding
+        let encoded = instr.encode();
+        let mut offset = 0;
+        let decoded = KapraInstruction::decode(&encoded, &mut offset).unwrap();
+        assert_eq!(instr, decoded);
+        
+        // Test JIT IR generation
+        let ir = instr.to_jit_ir();
+        assert!(ir.contains("br i1 %r0"));
+        assert!(ir.contains("label %continue"));
+        assert!(ir.contains("label %fail"));
     }
 }

@@ -22,7 +22,28 @@ walkdir = "2.3"
 tempfile = "3.8"
 
 # BLS12-381 signature lib
-blst = "0.3"
+blst = "0.3.11"
 
 # Post-quantum Dilithium support (via PQClean)
 pqcrypto-dilithium = { version = "0.7", features = ["dilithium5"] }
+
+# ABI and versioning support
+sha2 = "0.10"
+wasm-encoder = "0.20"
+wasmparser = "0.100"
+tokio = { version = "1.0", features = ["full"] }
+
+# New dependencies
+dilithium = "0.1.0"
+aes-gcm = "0.10.3"
+rand_core = "0.6.4"
+base64 = "0.21.7"
+
+env_logger = "0.10"
+clap = "3.0"
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21.1"
+
+[target.'cfg(target_os = "ios")'.dependencies]
+objc = "0.2.7"

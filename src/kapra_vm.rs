@@ -17,6 +17,8 @@ use std::fs::{self, File};
 use std::path::PathBuf;
 use bincode::{serialize, deserialize};
 use serde::{Serialize, Deserialize};
+use blst::min_pk::*;
+use std::time::Instant;
 
 // Re-export dependencies
 mod ksl_bytecode {
@@ -54,6 +56,14 @@ pub struct RuntimeError {
     pub pc: usize, // Program counter at error
 }
 
+/// Delegated authentication context
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DelegatedContext {
+    pub delegator: FixedArray<32>, // Original signer
+    pub delegatee: FixedArray<32>, // Temporary auth key
+    pub expires_at: u64,           // Block height or tx-scope
+}
+
 /// Virtual machine state for executing KapraBytecode.
 pub struct KapraVM {
     registers: Vec<u64>,
@@ -72,6 +82,10 @@ pub struct KapraVM {
     net_stdlib: Option<NetStdLib>, // Networking standard library
     runtime: Option<Arc<AsyncRuntime>>, // Async runtime
     debug_mode: bool,
+    gas_used: u64, // Gas used so far
+    gas_limit: u64, // Gas limit for execution
+    auth_stack: Vec<DelegatedContext>, // Stack of delegated auth contexts
+    current_sender: Option<FixedArray<32>>, // Current transaction sender
 }
 
 /// Contract state that can be serialized
@@ -97,13 +111,14 @@ impl KapraVM {
     /// Creates a new KapraVM instance.
     /// @param bytecode The bytecode program to execute.
     /// @param runtime Optional async runtime for networking operations.
+    /// @param gas_limit Optional gas limit for execution.
     /// @returns A new `KapraVM` instance.
     /// @example
     /// ```ksl
     /// let bytecode = KapraBytecode::new();
-    /// let vm = KapraVM::new(bytecode, None);
+    /// let vm = KapraVM::new(bytecode, None, None);
     /// ```
-    pub fn new(bytecode: KapraBytecode, runtime: Option<Arc<AsyncRuntime>>) -> Self {
+    pub fn new(bytecode: KapraBytecode, runtime: Option<Arc<AsyncRuntime>>, gas_limit: Option<u64>) -> Self {
         let net_stdlib = runtime.as_ref().map(|r| NetStdLib::new(r.clone()));
         KapraVM {
             registers: vec![0; 256],
@@ -122,6 +137,10 @@ impl KapraVM {
             net_stdlib,
             runtime,
             debug_mode: false,
+            gas_used: 0,
+            gas_limit: gas_limit.unwrap_or(u64::MAX),
+            auth_stack: Vec::new(),
+            current_sender: None,
         }
     }
 
@@ -133,26 +152,18 @@ impl KapraVM {
     /// @returns `Ok(())` if execution succeeds, or `Err` with a `RuntimeError`.
     /// @example
     /// ```ksl
-    /// let mut vm = KapraVM::new(bytecode, None);
+    /// let mut vm = KapraVM::new(bytecode, None, None);
     /// vm.run().unwrap();
     /// ```
-    pub fn run(&mut self, async_support: bool, debug_mode: bool) -> Result<i64, KslError> {
-        self.debug_mode = debug_mode;
-        if debug_mode {
-            println!("Running VM in debug mode");
-        }
-        
-        while self.pc < self.bytecode.instructions.len() {
-            if self.debug_mode {
-                self.print_debug_info();
-            }
-            
-            let instruction = &self.bytecode.instructions[self.pc];
-            self.execute_instruction(instruction, async_support)?;
+    pub fn run(&mut self) -> Result<(), RuntimeError> {
+        while !self.halted && self.pc < self.bytecode.instructions.len() {
+            let instr = &self.bytecode.instructions[self.pc];
+            self.execute_instruction(instr, self.runtime.is_some())?;
             self.pc += 1;
         }
-
-        Ok(self.registers[0])
+        // Clear auth stack after transaction
+        self.auth_stack.clear();
+        Ok(())
     }
 
     fn print_debug_info(&self) {
@@ -285,18 +296,33 @@ impl KapraVM {
                 }
             }
             KapraOpCode::BlsVerify => {
-                // Placeholder: ksl_kapra_crypto.rs lacks bls_verify
                 let dst = self.get_register(&instr.operands[0], self.pc)?;
-                let _msg = self.get_operand_value(&instr.operands[1], Some(&Type::Array(Box::new(Type::U8), 32)), self.pc)?;
-                let _pubkey = self.get_operand_value(&instr.operands[2], Some(&Type::Array(Box::new(Type::U8), 48)), self.pc)?;
-                let _sig = self.get_operand_value(&instr.operands[3], Some(&Type::Array(Box::new(Type::U8), 96)), self.pc)?;
-                self.registers[dst as usize] = 1u32.to_le_bytes().to_vec(); // Always true
+                let msg = self.get_operand_value(&instr.operands[1], Some(&Type::Array(Box::new(Type::U8), 32)), self.pc)?;
+                let pubkey = self.get_operand_value(&instr.operands[2], Some(&Type::Array(Box::new(Type::U8), 96)), self.pc)?;
+                let sig = self.get_operand_value(&instr.operands[3], Some(&Type::Array(Box::new(Type::U8), 48)), self.pc)?;
+                
+                // Convert to FixedArray
+                let msg_array: [u8; 32] = msg.try_into().map_err(|_| RuntimeError {
+                    message: "Invalid message size for BLS".to_string(),
+                    pc: self.pc,
+                })?;
+                let pubkey_array: [u8; 96] = pubkey.try_into().map_err(|_| RuntimeError {
+                    message: "Invalid pubkey size for BLS".to_string(),
+                    pc: self.pc,
+                })?;
+                let sig_array: [u8; 48] = sig.try_into().map_err(|_| RuntimeError {
+                    message: "Invalid signature size for BLS".to_string(),
+                    pc: self.pc,
+                })?;
+                
+                let result = self.crypto.bls_verify(
+                    &FixedArray::new(msg_array),
+                    &FixedArray::new(pubkey_array),
+                    &FixedArray::new(sig_array),
+                );
+                self.registers[dst as usize] = (result as u32).to_le_bytes().to_vec();
                 if self.metrics_data.is_some() {
                     ksl_metrics::MetricsCollector::increment_counter("crypto_ops");
-                }
-                // Log warning
-                if self.metrics_data.is_some() {
-                    ksl_metrics::MetricsCollector::increment_counter("bls_verify_placeholder_used");
                 }
             }
             KapraOpCode::DilithiumVerify => {
@@ -432,6 +458,81 @@ impl KapraVM {
                 let msg = self.get_string(&instr.operands[1], self.pc)?;
                 println!("{}", msg);
                 self.registers[self.get_register(&instr.operands[0], self.pc)? as usize] = Vec::new();
+            }
+            KapraOpCode::Assert => {
+                let cond = self.get_register(&instr.operands[0], self.pc)?;
+                let value = u32::from_le_bytes(
+                    self.registers[cond as usize]
+                        .as_slice()
+                        .try_into()
+                        .map_err(|_| RuntimeError {
+                            message: "Invalid condition value".to_string(),
+                            pc: self.pc,
+                        })?
+                );
+                
+                if value == 0 {
+                    return Err(RuntimeError {
+                        message: "Assertion failed".to_string(),
+                        pc: self.pc,
+                    });
+                }
+
+                if self.metrics_data.is_some() {
+                    ksl_metrics::MetricsCollector::increment_counter("assertions");
+                }
+            }
+            KapraOpCode::Auth => {
+                let delegatee = self.get_operand_value(&instr.operands[0], Some(&Type::Array(Box::new(Type::U8), 32)), self.pc)?;
+                let delegatee: [u8; 32] = delegatee.try_into().map_err(|_| RuntimeError {
+                    message: "Invalid delegatee address".to_string(),
+                    pc: self.pc,
+                })?;
+
+                let delegator = self.current_sender.ok_or_else(|| RuntimeError {
+                    message: "No current sender for delegation".to_string(),
+                    pc: self.pc,
+                })?;
+
+                self.auth_stack.push(DelegatedContext {
+                    delegator,
+                    delegatee: FixedArray(delegatee),
+                    expires_at: self.tx_context.tx_id, // Use tx_id as expiration
+                });
+
+                if self.metrics_data.is_some() {
+                    ksl_metrics::MetricsCollector::increment_counter("auth_delegations");
+                }
+            }
+            KapraOpCode::AuthCall => {
+                let target = self.get_operand_value(&instr.operands[0], Some(&Type::Array(Box::new(Type::U8), 32)), self.pc)?;
+                let target: [u8; 32] = target.try_into().map_err(|_| RuntimeError {
+                    message: "Invalid target address".to_string(),
+                    pc: self.pc,
+                })?;
+
+                let delegate = self.auth_stack.last().ok_or_else(|| RuntimeError {
+                    message: "No delegated context for auth call".to_string(),
+                    pc: self.pc,
+                })?;
+
+                // Save current sender
+                let saved_sender = self.current_sender;
+                
+                // Set delegated sender
+                self.current_sender = Some(delegate.delegatee);
+
+                // Execute the call
+                let result = self.execute_contract(FixedArray(target));
+
+                // Restore original sender
+                self.current_sender = saved_sender;
+
+                result?;
+
+                if self.metrics_data.is_some() {
+                    ksl_metrics::MetricsCollector::increment_counter("auth_calls");
+                }
             }
         }
         Ok(())
@@ -673,6 +774,26 @@ impl KapraVM {
 
         Ok(())
     }
+
+    /// Gets the current gas usage.
+    pub fn gas_used(&self) -> u64 {
+        self.gas_used
+    }
+
+    /// Gets the gas limit.
+    pub fn gas_limit(&self) -> u64 {
+        self.gas_limit
+    }
+
+    /// Sets a new gas limit.
+    pub fn set_gas_limit(&mut self, limit: u64) {
+        self.gas_limit = limit;
+    }
+
+    /// Resets gas usage to 0.
+    pub fn reset_gas(&mut self) {
+        self.gas_used = 0;
+    }
 }
 
 /// Simplified Kaprekar step (for u32 input).
@@ -697,18 +818,18 @@ fn kaprekar_step(input: u32) -> u32 {
 /// run(bytecode).unwrap();
 /// ```
 pub fn run(bytecode: KapraBytecode, async_support: bool, debug_mode: bool) -> Result<(), KslError> {
-    let mut vm = KapraVM::new(bytecode, None);
+    let mut vm = KapraVM::new(bytecode, None, None);
     if debug_mode {
         vm.enable_debug();
     }
-    vm.run(async_support, debug_mode)?;
+    vm.run()?;
     Ok(())
 }
 
 // Implement HotReloadableVM trait
 impl ksl_hot_reload::HotReloadableVM for KapraVM {
     fn new_with_state(bytecode: KapraBytecode) -> Self {
-        let mut vm = KapraVM::new(bytecode, None);
+        let mut vm = KapraVM::new(bytecode, None, None);
         vm.state = Some(HotReloadState {
             globals: HashMap::new(),
             networking_state: NetworkingState::default(),
@@ -807,7 +928,7 @@ impl ksl_hot_reload::HotReloadableVM for KapraVM {
 // Implement CoverageVM trait
 impl ksl_coverage::CoverageVM for KapraVM {
     fn new_with_coverage(bytecode: KapraBytecode) -> Self {
-        let mut vm = KapraVM::new(bytecode, None);
+        let mut vm = KapraVM::new(bytecode, None, None);
         vm.coverage_data = Some(HashSet::new());
         vm
     }
@@ -820,7 +941,7 @@ impl ksl_coverage::CoverageVM for KapraVM {
 // Implement MetricsVM trait
 impl ksl_metrics::MetricsVM for KapraVM {
     fn new_with_metrics(bytecode: KapraBytecode) -> Self {
-        let mut vm = KapraVM::new(bytecode, None);
+        let mut vm = KapraVM::new(bytecode, None, None);
         vm.metrics_data = Some(MetricsData {
             memory_usage: 0,
         });
@@ -838,7 +959,7 @@ impl ksl_metrics::MetricsVM for KapraVM {
 // Implement SimVM trait
 impl ksl_simulator::SimVM for KapraVM {
     fn new_with_simulation(bytecode: KapraBytecode) -> Self {
-        let mut vm = KapraVM::new(bytecode, None);
+        let mut vm = KapraVM::new(bytecode, None, None);
         vm.simulation_data = Some(SimulationData {
             tx_index: 0,
             sensor_reading: None,
@@ -1025,6 +1146,8 @@ mod tests {
     use super::*;
     use crate::ksl_bytecode::KapraBytecode;
     use tokio::runtime::Runtime;
+    use blst::min_pk::*;
+    use std::time::Instant;
 
     #[test]
     fn run_arithmetic() {
@@ -1052,7 +1175,7 @@ mod tests {
             None,
         ));
 
-        let mut vm = KapraVM::new(bytecode, None);
+        let mut vm = KapraVM::new(bytecode, None, None);
         vm.run().unwrap();
         assert_eq!(
             vm.registers[1],
@@ -1105,7 +1228,7 @@ mod tests {
             None,
         ));
 
-        let mut vm = KapraVM::new(bytecode, None);
+        let mut vm = KapraVM::new(bytecode, None, None);
         vm.run().unwrap();
         assert_eq!(
             vm.registers[2],
@@ -1134,7 +1257,7 @@ mod tests {
             None,
         ));
 
-        let mut vm = KapraVM::new(bytecode, None);
+        let mut vm = KapraVM::new(bytecode, None, None);
         vm.run().unwrap();
         let mut hasher = Sha3_256::new();
         hasher.update("test");
@@ -1176,7 +1299,7 @@ mod tests {
             None,
         ));
 
-        let mut vm = KapraVM::new(bytecode, None);
+        let mut vm = KapraVM::new(bytecode, None, None);
         vm.run().unwrap();
         assert_eq!(
             vm.registers[3],
@@ -1202,7 +1325,7 @@ mod tests {
             None,
         ));
 
-        let mut vm = KapraVM::new(bytecode, None);
+        let mut vm = KapraVM::new(bytecode, None, None);
         vm.run().unwrap();
         assert_eq!(
             vm.registers[0],
@@ -1288,7 +1411,7 @@ mod tests {
             None,
         ));
 
-        let mut vm = KapraVM::new(bytecode, Some(runtime.clone()));
+        let mut vm = KapraVM::new(bytecode, Some(runtime.clone()), None);
         let result = vm.run_with_async(&runtime).await;
         assert!(result.is_ok());
         
@@ -1321,7 +1444,7 @@ mod tests {
             None,
         ));
 
-        let mut vm = KapraVM::new(bytecode, Some(runtime.clone()));
+        let mut vm = KapraVM::new(bytecode, Some(runtime.clone()), None);
         let result = vm.run_with_async(&runtime).await;
         assert!(result.is_ok());
         
@@ -1354,7 +1477,7 @@ mod tests {
             None,
         ));
 
-        let mut vm = KapraVM::new(bytecode, Some(runtime.clone()));
+        let mut vm = KapraVM::new(bytecode, Some(runtime.clone()), None);
         let result = vm.run_with_async(&runtime).await;
         assert!(result.is_ok());
     }
@@ -1385,7 +1508,7 @@ mod tests {
             None,
         ));
 
-        let mut vm = KapraVM::new(bytecode, Some(runtime.clone()));
+        let mut vm = KapraVM::new(bytecode, Some(runtime.clone()), None);
         let result = vm.run_with_async(&runtime).await;
         assert!(result.is_ok());
         
@@ -1413,7 +1536,7 @@ mod tests {
             None,
         ));
 
-        let mut vm = KapraVM::new(bytecode, None);
+        let mut vm = KapraVM::new(bytecode, None, None);
         let result = vm.run();
         assert!(result.is_ok());
     }
@@ -1436,7 +1559,7 @@ mod tests {
             }),
         ));
 
-        let mut vm = KapraVM::new(original_bytecode, Some(runtime.clone()));
+        let mut vm = KapraVM::new(original_bytecode, Some(runtime.clone()), None);
         
         // Create new bytecode
         let mut new_bytecode = KapraBytecode::new();
@@ -1463,5 +1586,380 @@ mod tests {
         // Check response
         let response = String::from_utf8(vm.registers[0].clone()).unwrap();
         assert!(response.contains("\"reloaded\": true"));
+    }
+
+    #[test]
+    fn test_gas_metering() {
+        // Create bytecode with various operations
+        let mut bytecode = KapraBytecode::new();
+        
+        // Add some instructions with different gas costs
+        bytecode.add_instruction(KapraInstruction::new(
+            KapraOpCode::Mov,
+            vec![Operand::Register(0), Operand::Immediate(vec![42])],
+            Some(Type::U32),
+        ));
+        bytecode.add_instruction(KapraInstruction::new(
+            KapraOpCode::Add,
+            vec![
+                Operand::Register(1),
+                Operand::Register(0),
+                Operand::Register(0),
+            ],
+            Some(Type::U32),
+        ));
+        bytecode.add_instruction(KapraInstruction::new(
+            KapraOpCode::Sha3,
+            vec![Operand::Register(2), Operand::Register(1)],
+            Some(Type::Array(Box::new(Type::U8), 32)),
+        ));
+
+        // Test with sufficient gas
+        let mut vm = KapraVM::new(bytecode.clone(), None, Some(200));
+        let result = vm.run(false, false);
+        assert!(result.is_ok());
+        assert_eq!(vm.gas_used(), 55); // 2 + 3 + 50
+
+        // Test with insufficient gas
+        let mut vm = KapraVM::new(bytecode, None, Some(50));
+        let result = vm.run(false, false);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Gas limit exceeded"));
+    }
+
+    #[test]
+    fn test_gas_reset() {
+        let mut bytecode = KapraBytecode::new();
+        bytecode.add_instruction(KapraInstruction::new(
+            KapraOpCode::Mov,
+            vec![Operand::Register(0), Operand::Immediate(vec![42])],
+            Some(Type::U32),
+        ));
+
+        let mut vm = KapraVM::new(bytecode, None, Some(100));
+        vm.run(false, false).unwrap();
+        assert_eq!(vm.gas_used(), 2);
+
+        vm.reset_gas();
+        assert_eq!(vm.gas_used(), 0);
+    }
+
+    #[test]
+    fn test_gas_limit_update() {
+        let mut bytecode = KapraBytecode::new();
+        bytecode.add_instruction(KapraInstruction::new(
+            KapraOpCode::Sha3,
+            vec![Operand::Register(0), Operand::Register(1)],
+            Some(Type::Array(Box::new(Type::U8), 32)),
+        ));
+
+        let mut vm = KapraVM::new(bytecode, None, Some(40));
+        let result = vm.run(false, false);
+        assert!(result.is_err()); // Should fail with 40 gas limit
+
+        vm.set_gas_limit(60);
+        vm.reset_gas();
+        let result = vm.run(false, false);
+        assert!(result.is_ok()); // Should succeed with 60 gas limit
+    }
+
+    #[test]
+    fn test_bls_verify() {
+        use blst::min_pk::*;
+
+        // Generate a keypair
+        let ikm = b"test-key";
+        let sk = SecretKey::key_gen(ikm);
+        let pk = sk.sk_to_pk();
+
+        // Create a message and sign it
+        let message = b"test message";
+        let sig = sk.sign(message, &[], &pk, b"KSL_BLS_SIG");
+
+        // Convert to bytes
+        let msg_bytes = message.to_vec();
+        let pk_bytes = pk.to_bytes();
+        let sig_bytes = sig.to_bytes();
+
+        // Create bytecode
+        let mut bytecode = KapraBytecode::new();
+        
+        // Load message
+        bytecode.add_instruction(KapraInstruction::new(
+            KapraOpCode::Mov,
+            vec![
+                Operand::Register(0),
+                Operand::Immediate(msg_bytes),
+            ],
+            Some(Type::Array(Box::new(Type::U8), 32)),
+        ));
+
+        // Load public key
+        bytecode.add_instruction(KapraInstruction::new(
+            KapraOpCode::Mov,
+            vec![
+                Operand::Register(1),
+                Operand::Immediate(pk_bytes.to_vec()),
+            ],
+            Some(Type::Array(Box::new(Type::U8), 96)),
+        ));
+
+        // Load signature
+        bytecode.add_instruction(KapraInstruction::new(
+            KapraOpCode::Mov,
+            vec![
+                Operand::Register(2),
+                Operand::Immediate(sig_bytes.to_vec()),
+            ],
+            Some(Type::Array(Box::new(Type::U8), 48)),
+        ));
+
+        // Verify signature
+        bytecode.add_instruction(KapraInstruction::new(
+            KapraOpCode::BlsVerify,
+            vec![
+                Operand::Register(3),
+                Operand::Register(0),
+                Operand::Register(1),
+                Operand::Register(2),
+            ],
+            Some(Type::U32),
+        ));
+
+        // Halt
+        bytecode.add_instruction(KapraInstruction::new(
+            KapraOpCode::Halt,
+            vec![],
+            None,
+        ));
+
+        // Run VM
+        let mut vm = KapraVM::new(bytecode, None, None);
+        vm.run(false, false).unwrap();
+
+        // Check result
+        let result = u32::from_le_bytes(vm.registers[3][..4].try_into().unwrap());
+        assert_eq!(result, 1, "BLS verification should succeed");
+
+        // Test with invalid signature
+        let mut invalid_sig = sig_bytes;
+        invalid_sig[0] ^= 1; // Flip a bit
+
+        let mut bytecode = KapraBytecode::new();
+        
+        // Load message
+        bytecode.add_instruction(KapraInstruction::new(
+            KapraOpCode::Mov,
+            vec![
+                Operand::Register(0),
+                Operand::Immediate(msg_bytes),
+            ],
+            Some(Type::Array(Box::new(Type::U8), 32)),
+        ));
+
+        // Load public key
+        bytecode.add_instruction(KapraInstruction::new(
+            KapraOpCode::Mov,
+            vec![
+                Operand::Register(1),
+                Operand::Immediate(pk_bytes.to_vec()),
+            ],
+            Some(Type::Array(Box::new(Type::U8), 96)),
+        ));
+
+        // Load invalid signature
+        bytecode.add_instruction(KapraInstruction::new(
+            KapraOpCode::Mov,
+            vec![
+                Operand::Register(2),
+                Operand::Immediate(invalid_sig.to_vec()),
+            ],
+            Some(Type::Array(Box::new(Type::U8), 48)),
+        ));
+
+        // Verify signature
+        bytecode.add_instruction(KapraInstruction::new(
+            KapraOpCode::BlsVerify,
+            vec![
+                Operand::Register(3),
+                Operand::Register(0),
+                Operand::Register(1),
+                Operand::Register(2),
+            ],
+            Some(Type::U32),
+        ));
+
+        // Halt
+        bytecode.add_instruction(KapraInstruction::new(
+            KapraOpCode::Halt,
+            vec![],
+            None,
+        ));
+
+        // Run VM
+        let mut vm = KapraVM::new(bytecode, None, None);
+        vm.run(false, false).unwrap();
+
+        // Check result
+        let result = u32::from_le_bytes(vm.registers[3][..4].try_into().unwrap());
+        assert_eq!(result, 0, "BLS verification should fail with invalid signature");
+    }
+
+    #[test]
+    fn benchmark_vm_bls_verify() {
+        // Generate a keypair
+        let ikm = b"test-key";
+        let sk = SecretKey::key_gen(ikm);
+        let pk = sk.sk_to_pk();
+
+        // Create a message and sign it
+        let message = b"test message";
+        let sig = sk.sign(message, &[], &pk, DST);
+
+        // Convert to bytes
+        let msg_bytes = message.to_vec();
+        let pk_bytes = pk.to_bytes();
+        let sig_bytes = sig.to_bytes();
+
+        // Create bytecode for BLS verification
+        let mut bytecode = Vec::new();
+        
+        // Load message into register 1
+        bytecode.extend_from_slice(&[KapraOpCode::Load as u8]);
+        bytecode.extend_from_slice(&1u8.to_le_bytes());
+        bytecode.extend_from_slice(&msg_bytes);
+        
+        // Load public key into register 2
+        bytecode.extend_from_slice(&[KapraOpCode::Load as u8]);
+        bytecode.extend_from_slice(&2u8.to_le_bytes());
+        bytecode.extend_from_slice(&pk_bytes);
+        
+        // Load signature into register 3
+        bytecode.extend_from_slice(&[KapraOpCode::Load as u8]);
+        bytecode.extend_from_slice(&3u8.to_le_bytes());
+        bytecode.extend_from_slice(&sig_bytes);
+        
+        // Perform BLS verification, store result in register 0
+        bytecode.extend_from_slice(&[KapraOpCode::BlsVerify as u8]);
+        bytecode.extend_from_slice(&0u8.to_le_bytes());
+        bytecode.extend_from_slice(&1u8.to_le_bytes());
+        bytecode.extend_from_slice(&2u8.to_le_bytes());
+        bytecode.extend_from_slice(&3u8.to_le_bytes());
+
+        // Create VM
+        let mut vm = KapraVM::new(Some(1000000)); // Set gas limit to 1M
+
+        // Warm up
+        for _ in 0..10 {
+            vm.reset();
+            vm.load_bytecode(&bytecode);
+            vm.run().unwrap();
+        }
+
+        // Benchmark
+        let iterations = 100;
+        let start = Instant::now();
+        for _ in 0..iterations {
+            vm.reset();
+            vm.load_bytecode(&bytecode);
+            vm.run().unwrap();
+        }
+        let duration = start.elapsed();
+        let avg_time = duration.as_nanos() as f64 / iterations as f64;
+        println!("Average VM BLS verification time: {:.2} ns", avg_time);
+        println!("Average VM BLS verification time: {:.2} ms", avg_time / 1_000_000.0);
+
+        // Verify performance meets requirements
+        assert!(avg_time < 100_000_000.0, "VM BLS verification should complete in < 100ms");
+    }
+
+    #[test]
+    fn test_auth_delegation() {
+        let mut bytecode = KapraBytecode::new();
+        
+        // Create test addresses
+        let delegator = [1u8; 32];
+        let delegatee = [2u8; 32];
+        let target = [3u8; 32];
+        
+        // Set up AUTH instruction
+        bytecode.add_instruction(KapraInstruction::new(
+            KapraOpCode::Auth,
+            vec![Operand::Immediate(delegatee.to_vec())],
+            Some(Type::Array(Box::new(Type::U8), 32)),
+        ));
+        
+        // Set up AUTHCALL instruction
+        bytecode.add_instruction(KapraInstruction::new(
+            KapraOpCode::AuthCall,
+            vec![Operand::Immediate(target.to_vec())],
+            Some(Type::Array(Box::new(Type::U8), 32)),
+        ));
+        
+        let mut vm = KapraVM::new(bytecode, None, None);
+        vm.current_sender = Some(FixedArray(delegator));
+        
+        // Run the VM
+        vm.run().unwrap();
+        
+        // Verify auth stack is cleared after transaction
+        assert!(vm.auth_stack.is_empty());
+    }
+
+    #[test]
+    fn test_auth_call_without_delegation() {
+        let mut bytecode = KapraBytecode::new();
+        
+        // Set up AUTHCALL instruction without prior AUTH
+        bytecode.add_instruction(KapraInstruction::new(
+            KapraOpCode::AuthCall,
+            vec![Operand::Immediate([1u8; 32].to_vec())],
+            Some(Type::Array(Box::new(Type::U8), 32)),
+        ));
+        
+        let mut vm = KapraVM::new(bytecode, None, None);
+        
+        // Run should fail due to no delegation
+        assert!(vm.run().is_err());
+    }
+
+    #[test]
+    fn test_nested_delegation() {
+        let mut bytecode = KapraBytecode::new();
+        
+        // Create test addresses
+        let delegator = [1u8; 32];
+        let delegatee1 = [2u8; 32];
+        let delegatee2 = [3u8; 32];
+        let target = [4u8; 32];
+        
+        // Set up nested AUTH instructions
+        bytecode.add_instruction(KapraInstruction::new(
+            KapraOpCode::Auth,
+            vec![Operand::Immediate(delegatee1.to_vec())],
+            Some(Type::Array(Box::new(Type::U8), 32)),
+        ));
+        
+        bytecode.add_instruction(KapraInstruction::new(
+            KapraOpCode::Auth,
+            vec![Operand::Immediate(delegatee2.to_vec())],
+            Some(Type::Array(Box::new(Type::U8), 32)),
+        ));
+        
+        // Set up AUTHCALL instruction
+        bytecode.add_instruction(KapraInstruction::new(
+            KapraOpCode::AuthCall,
+            vec![Operand::Immediate(target.to_vec())],
+            Some(Type::Array(Box::new(Type::U8), 32)),
+        ));
+        
+        let mut vm = KapraVM::new(bytecode, None, None);
+        vm.current_sender = Some(FixedArray(delegator));
+        
+        // Run the VM
+        vm.run().unwrap();
+        
+        // Verify auth stack is cleared after transaction
+        assert!(vm.auth_stack.is_empty());
     }
 }

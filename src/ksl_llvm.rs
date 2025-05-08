@@ -12,6 +12,8 @@ use inkwell::AddressSpace;
 use inkwell::OptimizationLevel;
 use std::collections::HashMap;
 use log::{debug, info, warn};
+use crate::ksl_abi::{ABIGenerator, ContractABI};
+use crate::ksl_version::{ContractVersion, VersionManager};
 
 /// LLVM code generator for KSL
 pub struct LLVMCodegen<'ctx> {
@@ -96,6 +98,58 @@ impl<'ctx> LLVMCodegen<'ctx> {
             AstNode::Call { function, args } => self.generate_call(function, args),
             AstNode::Index { base, index } => self.generate_index(base, index),
             AstNode::ArrayLiteral { elements, element_type } => self.generate_array_literal(elements, element_type),
+            AstNode::VerifyBlock { conditions } => {
+                // Create blocks for assertion handling
+                let parent = self.fn_value_opt.unwrap();
+                let success_block = self.context.append_basic_block(parent, "assert_success");
+                let fail_block = self.context.append_basic_block(parent, "assert_fail");
+                let continue_block = self.context.append_basic_block(parent, "assert_continue");
+
+                // Add error message string
+                let error_msg = self.builder.build_global_string_ptr(
+                    "Assertion failed",
+                    "assert_error_msg"
+                );
+
+                // Generate code for each condition
+                for condition in conditions {
+                    let cond_value = self.generate_node(condition)?;
+                    
+                    // Convert condition to boolean if needed
+                    let bool_value = if cond_value.get_type().is_int_type() {
+                        self.builder.build_int_compare(
+                            inkwell::IntPredicate::NE,
+                            cond_value.into_int_value(),
+                            self.context.i32_type().const_int(0, false),
+                            "assert_cond"
+                        )
+                    } else {
+                        cond_value.into_int_value()
+                    };
+
+                    // Branch based on condition
+                    self.builder.build_conditional_branch(bool_value, success_block, fail_block);
+                    
+                    // Generate failure block
+                    self.builder.position_at_end(fail_block);
+                    let printf_fn = self.module.get_function("printf").unwrap();
+                    self.builder.build_call(
+                        printf_fn,
+                        &[error_msg.as_pointer_value().into()],
+                        "print_error"
+                    );
+                    self.builder.build_return(None);
+
+                    // Continue with success block
+                    self.builder.position_at_end(success_block);
+                }
+
+                // Branch to continue block after all conditions pass
+                self.builder.build_unconditional_branch(continue_block);
+                self.builder.position_at_end(continue_block);
+
+                Ok(self.context.void_type().const_void().as_basic_value_enum())
+            }
             _ => Err(KslError::type_error(
                 format!("Unsupported AST node: {:?}", node),
                 SourcePosition::new(1, 1),
@@ -285,24 +339,143 @@ impl<'ctx> LLVMCodegen<'ctx> {
             )),
         }
     }
+
+    /// Generates LLVM IR for a function definition
+    fn generate_function_def(&mut self, func: &Function) -> Result<(), KslError> {
+        // Convert parameter types to LLVM types
+        let param_types: Vec<BasicTypeEnum> = func.params.iter()
+            .map(|param| self.type_to_llvm_type(&param.ty))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // Get return type
+        let return_type = if let Some(ty) = &func.return_type {
+            self.type_to_llvm_type(ty)?
+        } else {
+            self.context.void_type().as_basic_type_enum()
+        };
+
+        // Create function type
+        let fn_type = return_type.fn_type(&param_types, false);
+
+        // Create function
+        let fn_value = self.module.add_function(&func.name, fn_type, None);
+        self.fn_value_opt = Some(fn_value);
+
+        // Create entry block
+        let entry_block = self.context.append_basic_block(fn_value, "entry");
+        self.builder.position_at_end(entry_block);
+
+        // Allocate parameters
+        for (i, param) in func.params.iter().enumerate() {
+            let param_value = fn_value.get_nth_param(i as u32).unwrap();
+            let alloca = self.builder.build_alloca(param_value.get_type(), &param.name);
+            self.builder.build_store(alloca, param_value);
+            self.variables.insert(param.name.clone(), alloca);
+        }
+
+        // Generate function body
+        for node in &func.body {
+            self.generate_node(node)?;
+        }
+
+        // Add return if not present
+        if !self.builder.get_insert_block().unwrap().get_terminator().is_some() {
+            if return_type.is_void_type() {
+                self.builder.build_return(None);
+            } else {
+                return Err(KslError::type_error(
+                    "Function must return a value".to_string(),
+                    SourcePosition::new(1, 1),
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Generates contract ABI
+    fn generate_contract_abi(&self, contract_name: &str) -> Result<ContractABI, KslError> {
+        let mut abi_gen = ABIGenerator::new();
+        let mut version_manager = VersionManager::new();
+
+        // Get all public functions
+        let mut public_fns = Vec::new();
+        for func in self.module.get_functions() {
+            if func.get_name().to_str().unwrap().starts_with("public_") {
+                public_fns.push(func);
+            }
+        }
+
+        // Generate ABI
+        let abi = abi_gen.generate_contract_abi(&public_fns, contract_name)?;
+
+        // Update version
+        let mut version = ContractVersion::new(1, 0, 0);
+        version.update_checksum(&self.module.print_to_string().as_bytes());
+        version_manager.add_version(version.clone());
+
+        Ok(abi)
+    }
+
+    /// Generates LLVM IR for an assertion
+    fn generate_assert(&mut self, cond: BasicValueEnum<'ctx>) -> Result<(), KslError> {
+        let parent = self.fn_value_opt.unwrap();
+        let success_block = self.context.append_basic_block(parent, "assert_success");
+        let fail_block = self.context.append_basic_block(parent, "assert_fail");
+        let continue_block = self.context.append_basic_block(parent, "assert_continue");
+
+        // Add error message string
+        let error_msg = self.builder.build_global_string_ptr(
+            "Assertion failed",
+            "assert_error_msg"
+        );
+
+        // Convert condition to boolean if needed
+        let bool_value = if cond.get_type().is_int_type() {
+            self.builder.build_int_compare(
+                inkwell::IntPredicate::NE,
+                cond.into_int_value(),
+                self.context.i32_type().const_int(0, false),
+                "assert_cond"
+            )
+        } else {
+            cond.into_int_value()
+        };
+
+        // Branch based on condition
+        self.builder.build_conditional_branch(bool_value, success_block, fail_block);
+        
+        // Generate failure block
+        self.builder.position_at_end(fail_block);
+        let printf_fn = self.module.get_function("printf").unwrap();
+        self.builder.build_call(
+            printf_fn,
+            &[error_msg.as_pointer_value().into()],
+            "print_error"
+        );
+        self.builder.build_return(None);
+
+        // Continue with success block
+        self.builder.position_at_end(success_block);
+        self.builder.build_unconditional_branch(continue_block);
+        self.builder.position_at_end(continue_block);
+
+        Ok(())
+    }
 }
 
-/// Public API to convert AST to LLVM IR
-pub fn ast_to_llvm(ast: &[AstNode], module_name: &str) -> Result<String, KslError> {
-    debug!("Converting AST to LLVM IR");
-
-    // Create LLVM context and code generator
+/// Public API to convert AST to LLVM IR with ABI generation
+pub fn ast_to_llvm(ast: &[AstNode], module_name: &str) -> Result<(String, ContractABI), KslError> {
     let context = Context::create();
     let mut codegen = LLVMCodegen::new(&context, module_name);
-
-    // Generate LLVM IR
+    
+    // Generate IR
     codegen.generate(ast)?;
 
-    // Get IR string
-    let ir = codegen.module.print_to_string().to_string();
-    debug!("Generated LLVM IR:\n{}", ir);
+    // Generate ABI
+    let abi = codegen.generate_contract_abi(module_name)?;
 
-    Ok(ir)
+    Ok((codegen.module.print_to_string(), abi))
 }
 
 #[cfg(test)]
@@ -369,5 +542,68 @@ mod tests {
 
         let ir = ast_to_llvm(&ast, "test_module").unwrap();
         assert!(ir.contains("getelementptr"));
+    }
+
+    #[test]
+    fn test_function_definition() {
+        let context = Context::create();
+        let mut codegen = LLVMCodegen::new(&context, "test");
+
+        let func = Function {
+            name: "add".to_string(),
+            params: vec![
+                Parameter {
+                    name: "a".to_string(),
+                    ty: Type::Primitive("i64".to_string()),
+                },
+                Parameter {
+                    name: "b".to_string(),
+                    ty: Type::Primitive("i64".to_string()),
+                },
+            ],
+            return_type: Some(Type::Primitive("i64".to_string())),
+            is_public: true,
+            body: vec![
+                AstNode::BinaryOp {
+                    left: Box::new(Expr::Identifier("a".to_string())),
+                    op: BinaryOperator::Add,
+                    right: Box::new(Expr::Identifier("b".to_string())),
+                },
+            ],
+        };
+
+        codegen.generate_function_def(&func).unwrap();
+        let ir = codegen.module.print_to_string();
+        assert!(ir.contains("define i64 @add(i64 %a, i64 %b)"));
+    }
+
+    #[test]
+    fn test_contract_abi_generation() {
+        let context = Context::create();
+        let mut codegen = LLVMCodegen::new(&context, "MyToken");
+
+        let func = Function {
+            name: "transfer".to_string(),
+            params: vec![
+                Parameter {
+                    name: "to".to_string(),
+                    ty: Type::Primitive("address".to_string()),
+                },
+                Parameter {
+                    name: "amount".to_string(),
+                    ty: Type::Primitive("u64".to_string()),
+                },
+            ],
+            return_type: Some(Type::Primitive("bool".to_string())),
+            is_public: true,
+            body: vec![],
+        };
+
+        codegen.generate_function_def(&func).unwrap();
+        let abi = codegen.generate_contract_abi("MyToken").unwrap();
+
+        assert_eq!(abi.name, "MyToken");
+        assert_eq!(abi.methods.len(), 1);
+        assert_eq!(abi.methods[0].name, "transfer");
     }
 } 

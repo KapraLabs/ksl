@@ -33,6 +33,8 @@ use std::path::PathBuf;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use crate::ksl_abi::{ABIGenerator, ContractABI};
+use crate::ksl_version::{ContractVersion, VersionManager};
 
 /// Backend type for AOT compilation
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -288,83 +290,97 @@ impl AotCompiler {
         }
     }
 
-    // Compile a KSL file to native code
+    /// Compiles a file with versioning and ABI support
     pub fn compile_file(&mut self, file: &PathBuf, output: &PathBuf) -> Result<(), KslError> {
-        let main_module_name = file.file_stem()
-            .and_then(|s| s.to_str())
-            .ok_or_else(|| KslError::type_error(
-                "Invalid main file name".to_string(),
-                SourcePosition::new(1, 1),
-            ))?;
-
         // Read source file
-        let source = fs::read_to_string(file)
-            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1)))?;
-
-        // Parse
-        let ast = parse(&source)
-            .map_err(|e| KslError::type_error(
-                format!("Parse error at position {}: {}", e.position, e.message),
+        let source = fs::read_to_string(file).map_err(|e| {
+            KslError::type_error(
+                format!("Failed to read file: {}", e),
                 SourcePosition::new(1, 1),
-            ))?;
+            )
+        })?;
 
-        // Type-check
-        check(&ast)
-            .map_err(|errors| errors)?;
+        // Parse and check
+        let ast = parse(&source)?;
+        check(&ast)?;
+
+        // Generate ABI
+        let mut abi_gen = ABIGenerator::new();
+        let contract_name = file.file_stem().unwrap().to_str().unwrap();
+        let abi = abi_gen.generate_contract_abi(&ast, contract_name)?;
+
+        // Write ABI file
+        let abi_path = output.with_extension("abi.json");
+        abi_gen.write_abi(contract_name, &abi_path)?;
+
+        // Generate version info
+        let mut version = ContractVersion::new(1, 0, 0);
+        version.update_checksum(source.as_bytes());
+
+        // Write version file
+        let ver_path = output.with_extension("ver.json");
+        version.write_to_file(&ver_path)?;
 
         // Compile to bytecode
-        let bytecode = compile(&ast)
-            .map_err(|errors| errors.into_iter().map(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1))).collect())?;
+        let bytecode = compile(&ast, CompileConfig::default())?;
 
-        // Generate native code
+        // Compile bytecode to native code
         self.compile_bytecode(&bytecode)?;
 
-        // Write object file
-        fs::create_dir_all(output.parent().unwrap_or(output))
-            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1)))?;
-        let object_data = self.module.finish()
-            .emit()
-            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1)))?;
-        let output_file = output.with_extension("o");
-        let mut file = File::create(&output_file)
-            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1)))?;
-        file.write_all(&object_data)
-            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1)))?;
+        // Write output file
+        let output_data = match self.config.backend {
+            Backend::Cranelift => {
+                self.module.finish().map_err(|e| {
+                    KslError::type_error(
+                        format!("Failed to finish module: {}", e),
+                        SourcePosition::new(1, 1),
+                    )
+                })?
+            }
+            Backend::LLVM => {
+                if let Some(module) = &self.llvm_module {
+                    module.print_to_string().as_bytes().to_vec()
+                } else {
+                    return Err(KslError::type_error(
+                        "LLVM module not initialized".to_string(),
+                        SourcePosition::new(1, 1),
+                    ));
+                }
+            }
+        };
 
-        Ok(())
+        fs::write(output, output_data).map_err(|e| {
+            KslError::type_error(
+                format!("Failed to write output file: {}", e),
+                SourcePosition::new(1, 1),
+            )
+        })
     }
 
-    // Compile bytecode to native code
+    /// Compiles bytecode with versioning support
     fn compile_bytecode(&mut self, bytecode: &KapraBytecode) -> Result<(), KslError> {
-        let mut context = self.module.make_context();
-        let mut func_builder_ctx = FunctionBuilderContext::new();
-        let main_func_id = self.module
-            .declare_function("main", Linkage::Export, &context.func.signature)
-            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1)))?;
-
-        // Define function signature (simplified: void main())
-        context.func.signature.returns.push(AbiParam::new(types::I32));
-
-        // Build function body
-        let mut builder = FunctionBuilder::new(&mut context.func, &mut func_builder_ctx);
-        let entry_block = builder.create_block();
-        builder.switch_to_block(entry_block);
-        builder.seal_block(entry_block);
+        // Create function builder
+        let mut builder = FunctionBuilder::new();
 
         // Initialize registers
         self.initialize_registers(&mut builder);
 
-        // Translate bytecode instructions
+        // Translate instructions
         self.translate_instructions(bytecode, &mut builder)?;
 
-        // Return 0 (simplified)
-        builder.ins().return_(&[builder.ins().iconst(types::I32, 0)]);
-        builder.finalize();
-
-        // Define function in module
-        self.module
-            .define_function(main_func_id, &mut context)
-            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1)))?;
+        // Apply optimizations
+        if self.config.platform_optimizations {
+            self.apply_platform_optimizations(&mut builder);
+        }
+        if self.config.enable_simd {
+            self.apply_simd_optimizations(&mut builder);
+        }
+        if self.config.enable_blockchain {
+            self.apply_blockchain_optimizations(&mut builder);
+        }
+        if self.config.enable_pgo {
+            self.apply_pgo_optimizations(&mut builder);
+        }
 
         Ok(())
     }
@@ -509,5 +525,52 @@ mod tests {
         let mut contents = Vec::new();
         File::open(&object_file).unwrap().read_to_end(&mut contents).unwrap();
         assert!(!contents.is_empty());
+    }
+
+    #[test]
+    fn test_aot_compile_with_versioning() {
+        let config = AotConfig {
+            target: "x86_64".to_string(),
+            opt_level: 2,
+            platform_optimizations: true,
+            pic: false,
+            backend: Backend::Cranelift,
+            enable_pgo: false,
+            enable_simd: true,
+            enable_blockchain: true,
+            pgo_profile: None,
+        };
+
+        let mut compiler = AotCompiler::new(config).unwrap();
+        let source = r#"
+            contract MyToken {
+                fn transfer(to: address, amount: u64) -> bool {
+                    return true;
+                }
+            }
+        "#;
+
+        let temp_dir = std::env::temp_dir();
+        let source_path = temp_dir.join("test.ksl");
+        let output_path = temp_dir.join("test");
+
+        fs::write(&source_path, source).unwrap();
+        compiler.compile_file(&source_path, &output_path).unwrap();
+
+        // Check ABI file
+        let abi_path = output_path.with_extension("abi.json");
+        assert!(abi_path.exists());
+        let abi: ContractABI = serde_json::from_str(&fs::read_to_string(abi_path).unwrap()).unwrap();
+        assert_eq!(abi.name, "MyToken");
+        assert_eq!(abi.methods.len(), 1);
+        assert_eq!(abi.methods[0].name, "transfer");
+
+        // Check version file
+        let ver_path = output_path.with_extension("ver.json");
+        assert!(ver_path.exists());
+        let version: ContractVersion = serde_json::from_str(&fs::read_to_string(ver_path).unwrap()).unwrap();
+        assert_eq!(version.major, 1);
+        assert_eq!(version.minor, 0);
+        assert_eq!(version.patch, 0);
     }
 }

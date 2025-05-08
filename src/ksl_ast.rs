@@ -94,6 +94,9 @@ pub enum Stmt {
         iterable: Expr,
         body: Vec<Stmt>,
     },
+    VerifyBlock {
+        conditions: Vec<Expr>, // Postconditions/assertions to verify
+    },
 }
 
 pub enum AssignTarget {
