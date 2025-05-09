@@ -7,6 +7,8 @@ use crate::ksl_types::TxAction;
 use crate::ksl_bytecode::KapraBytecode;
 use crate::ksl_value::Value;
 use std::collections::HashMap;
+use crate::ksl_types::{BlockHeader, Transaction, ValidatorInfo};
+use crate::ksl_errors::KslError;
 
 /// Syscall for delegating authentication
 /// @param delegatee The address to delegate authority to
@@ -548,6 +550,47 @@ mod finance {
         ];
 
         Ok(Value::Array(data))
+    }
+}
+
+/// Blockchain-specific system calls
+pub mod blockchain {
+    /// Gets the current block hash
+    /// @returns The current block hash as a byte array
+    pub fn get_block_hash() -> Result<Vec<u8>, KslError> {
+        // TODO: Implement actual block hash retrieval
+        // This is a placeholder that should be replaced with actual implementation
+        Ok(vec![0; 32])
+    }
+
+    /// Gets the validator's public key
+    /// @returns The validator's public key as a byte array
+    pub fn get_validator_pubkey() -> Result<Vec<u8>, KslError> {
+        // TODO: Implement actual validator pubkey retrieval
+        // This is a placeholder that should be replaced with actual implementation
+        Ok(vec![0; 32])
+    }
+
+    /// Gets the chain state for a given key
+    /// @param key The state key to retrieve
+    /// @returns The state value as a byte array
+    pub fn get_chain_state(key: &[u8]) -> Result<Vec<u8>, KslError> {
+        // TODO: Implement actual chain state retrieval
+        // This is a placeholder that should be replaced with actual implementation
+        Ok(vec![0; 32])
+    }
+
+    /// Asserts that a hash is Kaprekar stable
+    /// @param hash The hash to check
+    /// @returns Result indicating success or failure
+    pub fn assert_kaprekar_stable(hash: &[u8]) -> Result<(), KslError> {
+        use crate::ksl_stdlib_crypto::validation::kaprekar_valid;
+        
+        let num = u64::from_be_bytes(hash[..8].try_into().map_err(|_| KslError::InvalidInput)?);
+        if !kaprekar_valid(num) {
+            return Err(KslError::ValidationFailed("Hash is not Kaprekar stable".into()));
+        }
+        Ok(())
     }
 }
 

@@ -12,6 +12,10 @@ pub mod ksl_smart_account;
 pub mod ksl_ir;
 pub mod ksl_abi;
 pub mod ksl_lsp;
+pub mod ksl_types;
+pub mod ksl_stdlib_crypto;
+pub mod ksl_syscalls;
+pub mod ksl_validator_contract;
 
 pub use ksl_ast::*;
 pub use ksl_parser::*;

@@ -90,6 +90,7 @@ pub enum Type {
         size: usize,
         alignment: usize,
     },
+    Blockchain(BlockchainType),
 }
 
 /// Context for type inference (e.g., variable bindings).
@@ -547,6 +548,17 @@ pub enum SignatureType {
     Dilithium,
 }
 
+/// Blockchain-specific types
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+pub enum BlockchainType {
+    BlockHeader,
+    Transaction,
+    ValidatorInfo,
+    Hash,
+    Signature,
+    MerkleProof,
+}
+
 impl Type {
     /// Get the size in bytes for fixed-size types
     pub fn size_in_bytes(&self) -> Option<usize> {
@@ -801,6 +813,43 @@ impl KSLDataBlob {
             _ => panic!("Unsupported element type for data blob"),
         }
     }
+}
+
+/// Block header structure for KSL blockchain
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+pub struct BlockHeader {
+    pub parent: Vec<u8>, // Hash
+    pub nonce: u64,
+    pub timestamp: u64,
+    pub miner: Vec<u8>, // Address
+    pub shard: u16,
+}
+
+/// Transaction structure for KSL blockchain
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+pub struct Transaction {
+    pub sender: Vec<u8>, // Address
+    pub recipient: Vec<u8>, // Address
+    pub amount: u64,
+    pub nonce: u64,
+    pub signature: Vec<u8>,
+    pub data: Vec<u8>,
+}
+
+/// Validator information structure
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+pub struct ValidatorInfo {
+    pub public_key: Vec<u8>,
+    pub stake: u64,
+    pub shard: u16,
+    pub status: ValidatorStatus,
+}
+
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+pub enum ValidatorStatus {
+    Active,
+    Inactive,
+    Slashed,
 }
 
 #[cfg(test)]

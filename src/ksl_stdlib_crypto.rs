@@ -368,6 +368,372 @@ impl Crypto {
     }
 }
 
+/// Built-in validation functions for KSL blockchain
+pub mod validation {
+    use crate::ksl_types::{BlockHeader, Transaction, ValidatorInfo};
+    use sha3::{Digest, Keccak256};
+    use std::collections::{HashSet, HashMap};
+
+    /// Checks if a number is Kaprekar stable
+    /// @param num The number to check
+    /// @returns bool indicating if the number is Kaprekar stable
+    pub fn kaprekar_valid(num: u64) -> bool {
+        let mut n = num;
+        let mut seen = std::collections::HashSet::new();
+        
+        while !seen.contains(&n) {
+            seen.insert(n);
+            let digits: Vec<u8> = n.to_string().chars()
+                .map(|c| c.to_digit(10).unwrap() as u8)
+                .collect();
+            
+            let ascending: u64 = digits.iter()
+                .sorted()
+                .fold(0u64, |acc, &d| acc * 10 + d as u64);
+            
+            let descending: u64 = digits.iter()
+                .sorted_by(|a, b| b.cmp(a))
+                .fold(0u64, |acc, &d| acc * 10 + d as u64);
+            
+            n = descending - ascending;
+            if n == 0 || n == num {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Validates block hash modulo difficulty
+    /// @param hash The block hash to check
+    /// @param difficulty The difficulty target
+    /// @returns bool indicating if the hash meets the difficulty requirement
+    pub fn modulo_check(hash: u64, difficulty: u64) -> bool {
+        hash % difficulty == 0
+    }
+
+    /// Computes SHA3 hash of input data
+    /// @param input The input data to hash
+    /// @returns The computed hash as a byte array
+    pub fn sha3(input: &[u8]) -> Vec<u8> {
+        let mut hasher = Keccak256::new();
+        hasher.update(input);
+        hasher.finalize().to_vec()
+    }
+
+    /// Verifies a BLS signature
+    /// @param message The message that was signed
+    /// @param signature The signature to verify
+    /// @param public_key The public key to verify against
+    /// @returns bool indicating if the signature is valid
+    pub fn bls_verify(message: &[u8], signature: &[u8], public_key: &[u8]) -> bool {
+        // TODO: Implement actual BLS verification
+        // This is a placeholder that should be replaced with actual BLS implementation
+        false
+    }
+
+    /// Verifies an Ed25519 signature
+    /// @param message The message that was signed
+    /// @param signature The signature to verify
+    /// @param public_key The public key to verify against
+    /// @returns bool indicating if the signature is valid
+    pub fn ed25519_verify(message: &[u8], signature: &[u8], public_key: &[u8]) -> bool {
+        // TODO: Implement actual Ed25519 verification
+        // This is a placeholder that should be replaced with actual Ed25519 implementation
+        false
+    }
+
+    /// Verifies a Merkle proof for a given leaf and root
+    /// @param leaf The leaf hash to verify
+    /// @param root The expected root hash
+    /// @param proof The array of sibling hashes in the proof path
+    /// @param index The index of the leaf in the tree (0-based)
+    /// @returns bool indicating if the proof is valid
+    pub fn merkle_verify(leaf: &[u8], root: &[u8], proof: &[Vec<u8>], index: u64) -> bool {
+        let mut hash = leaf.to_vec();
+        let mut current_index = index;
+
+        for sibling in proof {
+            let (left, right) = if current_index % 2 == 0 {
+                (&hash, sibling)
+            } else {
+                (sibling, &hash)
+            };
+
+            let mut hasher = Keccak256::new();
+            hasher.update(left);
+            hasher.update(right);
+            hash = hasher.finalize().to_vec();
+            current_index /= 2;
+        }
+
+        hash == root
+    }
+
+    /// Computes the Merkle root for a list of transactions
+    /// @param transactions The list of transactions to compute the root for
+    /// @returns The computed Merkle root
+    pub fn compute_merkle_root(transactions: &[Transaction]) -> Vec<u8> {
+        if transactions.is_empty() {
+            return vec![0; 32];
+        }
+
+        let mut leaves: Vec<Vec<u8>> = transactions.iter()
+            .map(|tx| {
+                let mut hasher = Keccak256::new();
+                hasher.update(&tx.sender);
+                hasher.update(&tx.recipient);
+                hasher.update(&tx.amount.to_be_bytes());
+                hasher.update(&tx.nonce.to_be_bytes());
+                hasher.update(&tx.signature);
+                hasher.update(&tx.data);
+                hasher.finalize().to_vec()
+            })
+            .collect();
+
+        // Pad to power of 2
+        while leaves.len() & (leaves.len() - 1) != 0 {
+            leaves.push(vec![0; 32]);
+        }
+
+        let mut current = leaves;
+        while current.len() > 1 {
+            let mut next = Vec::new();
+            for i in (0..current.len()).step_by(2) {
+                let mut hasher = Keccak256::new();
+                hasher.update(&current[i]);
+                hasher.update(&current[i + 1]);
+                next.push(hasher.finalize().to_vec());
+            }
+            current = next;
+        }
+
+        current[0].clone()
+    }
+
+    /// Generates a Merkle proof for a transaction at a given index
+    /// @param transactions The list of transactions
+    /// @param index The index of the transaction to generate a proof for
+    /// @returns A tuple containing the proof and the root
+    pub fn generate_merkle_proof(transactions: &[Transaction], index: u64) -> (Vec<Vec<u8>>, Vec<u8>) {
+        let mut leaves: Vec<Vec<u8>> = transactions.iter()
+            .map(|tx| {
+                let mut hasher = Keccak256::new();
+                hasher.update(&tx.sender);
+                hasher.update(&tx.recipient);
+                hasher.update(&tx.amount.to_be_bytes());
+                hasher.update(&tx.nonce.to_be_bytes());
+                hasher.update(&tx.signature);
+                hasher.update(&tx.data);
+                hasher.finalize().to_vec()
+            })
+            .collect();
+
+        // Pad to power of 2
+        while leaves.len() & (leaves.len() - 1) != 0 {
+            leaves.push(vec![0; 32]);
+        }
+
+        let mut proof = Vec::new();
+        let mut current_index = index;
+        let mut current = leaves;
+
+        while current.len() > 1 {
+            let sibling_index = if current_index % 2 == 0 {
+                current_index + 1
+            } else {
+                current_index - 1
+            };
+
+            if sibling_index < current.len() as u64 {
+                proof.push(current[sibling_index as usize].clone());
+            }
+
+            let mut next = Vec::new();
+            for i in (0..current.len()).step_by(2) {
+                let mut hasher = Keccak256::new();
+                hasher.update(&current[i]);
+                hasher.update(&current[i + 1]);
+                next.push(hasher.finalize().to_vec());
+            }
+            current = next;
+            current_index /= 2;
+        }
+
+        (proof, current[0].clone())
+    }
+
+    /// Represents a cross-shard Merkle proof
+    #[derive(Debug, Clone)]
+    pub struct CrossShardProof {
+        pub source_shard: u16,
+        pub target_shard: u16,
+        pub transaction_proof: Vec<Vec<u8>>,
+        pub shard_proof: Vec<Vec<u8>>,
+        pub transaction_index: u64,
+        pub shard_index: u64,
+    }
+
+    /// Computes the shard Merkle root for a list of transaction roots
+    /// @param shard_roots The list of transaction roots per shard
+    /// @returns The computed shard Merkle root
+    pub fn compute_shard_root(shard_roots: &[(u16, Vec<u8>)]) -> Vec<u8> {
+        if shard_roots.is_empty() {
+            return vec![0; 32];
+        }
+
+        // Sort by shard ID to ensure consistent ordering
+        let mut sorted_roots = shard_roots.to_vec();
+        sorted_roots.sort_by_key(|(shard_id, _)| *shard_id);
+
+        let mut leaves: Vec<Vec<u8>> = sorted_roots.iter()
+            .map(|(_, root)| root.clone())
+            .collect();
+
+        // Pad to power of 2
+        while leaves.len() & (leaves.len() - 1) != 0 {
+            leaves.push(vec![0; 32]);
+        }
+
+        let mut current = leaves;
+        while current.len() > 1 {
+            let mut next = Vec::new();
+            for i in (0..current.len()).step_by(2) {
+                let mut hasher = Keccak256::new();
+                hasher.update(&current[i]);
+                hasher.update(&current[i + 1]);
+                next.push(hasher.finalize().to_vec());
+            }
+            current = next;
+        }
+
+        current[0].clone()
+    }
+
+    /// Generates a cross-shard Merkle proof
+    /// @param transactions The list of transactions in the source shard
+    /// @param shard_roots The list of transaction roots per shard
+    /// @param tx_index The index of the transaction in its shard
+    /// @param source_shard The source shard ID
+    /// @param target_shard The target shard ID
+    /// @returns A CrossShardProof containing both transaction and shard proofs
+    pub fn generate_cross_shard_proof(
+        transactions: &[Transaction],
+        shard_roots: &[(u16, Vec<u8>)],
+        tx_index: u64,
+        source_shard: u16,
+        target_shard: u16,
+    ) -> CrossShardProof {
+        // Generate transaction proof
+        let (tx_proof, _) = generate_merkle_proof(transactions, tx_index);
+
+        // Find shard index
+        let shard_index = shard_roots.iter()
+            .position(|(shard_id, _)| *shard_id == source_shard)
+            .unwrap_or(0) as u64;
+
+        // Generate shard proof
+        let mut sorted_roots = shard_roots.to_vec();
+        sorted_roots.sort_by_key(|(shard_id, _)| *shard_id);
+        let shard_leaves: Vec<Vec<u8>> = sorted_roots.iter()
+            .map(|(_, root)| root.clone())
+            .collect();
+
+        let mut shard_proof = Vec::new();
+        let mut current_index = shard_index;
+        let mut current = shard_leaves;
+
+        while current.len() > 1 {
+            let sibling_index = if current_index % 2 == 0 {
+                current_index + 1
+            } else {
+                current_index - 1
+            };
+
+            if sibling_index < current.len() as u64 {
+                shard_proof.push(current[sibling_index as usize].clone());
+            }
+
+            let mut next = Vec::new();
+            for i in (0..current.len()).step_by(2) {
+                let mut hasher = Keccak256::new();
+                hasher.update(&current[i]);
+                hasher.update(&current[i + 1]);
+                next.push(hasher.finalize().to_vec());
+            }
+            current = next;
+            current_index /= 2;
+        }
+
+        CrossShardProof {
+            source_shard,
+            target_shard,
+            transaction_proof: tx_proof,
+            shard_proof,
+            transaction_index: tx_index,
+            shard_index,
+        }
+    }
+
+    /// Verifies a cross-shard Merkle proof
+    /// @param tx The transaction to verify
+    /// @param proof The cross-shard proof
+    /// @param shard_root The root of the shard Merkle tree
+    /// @returns bool indicating if the proof is valid
+    pub fn verify_cross_shard_proof(
+        tx: &Transaction,
+        proof: &CrossShardProof,
+        shard_root: &[u8],
+    ) -> bool {
+        // Compute transaction hash
+        let mut hasher = Keccak256::new();
+        hasher.update(&tx.sender);
+        hasher.update(&tx.recipient);
+        hasher.update(&tx.amount.to_be_bytes());
+        hasher.update(&tx.nonce.to_be_bytes());
+        hasher.update(&tx.signature);
+        hasher.update(&tx.data);
+        let tx_hash = hasher.finalize().to_vec();
+
+        // Verify transaction proof
+        let mut current_hash = tx_hash.clone();
+        let mut current_index = proof.transaction_index;
+
+        for sibling in &proof.transaction_proof {
+            let (left, right) = if current_index % 2 == 0 {
+                (&current_hash, sibling)
+            } else {
+                (sibling, &current_hash)
+            };
+
+            let mut hasher = Keccak256::new();
+            hasher.update(left);
+            hasher.update(right);
+            current_hash = hasher.finalize().to_vec();
+            current_index /= 2;
+        }
+
+        // Verify shard proof
+        let mut current_hash = current_hash;
+        let mut current_index = proof.shard_index;
+
+        for sibling in &proof.shard_proof {
+            let (left, right) = if current_index % 2 == 0 {
+                (&current_hash, sibling)
+            } else {
+                (sibling, &current_hash)
+            };
+
+            let mut hasher = Keccak256::new();
+            hasher.update(left);
+            hasher.update(right);
+            current_hash = hasher.finalize().to_vec();
+            current_index /= 2;
+        }
+
+        current_hash == shard_root
+    }
+}
+
 // Assume ksl_types.rs, ksl_bytecode.rs, and ksl_errors.rs are in the same crate
 mod ksl_types {
     pub use super::{Type, TypeError};
