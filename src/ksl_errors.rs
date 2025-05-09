@@ -367,3 +367,24 @@ mod tests {
         err.log_with_trace(); // Just verify it doesn't panic
     }
 }
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ErrorType {
+    // ... existing error types ...
+    DataBlobError,
+    DataBlobVerificationError,
+    DataBlobAllocationError,
+    DataBlobTypeError,
+}
+
+impl ErrorType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            // ... existing matches ...
+            ErrorType::DataBlobError => "Data blob error",
+            ErrorType::DataBlobVerificationError => "Data blob verification failed",
+            ErrorType::DataBlobAllocationError => "Data blob allocation failed",
+            ErrorType::DataBlobTypeError => "Data blob type mismatch",
+        }
+    }
+}

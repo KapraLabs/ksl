@@ -1,0 +1,33 @@
+[plugin]
+name = "ksl_finance"
+namespace = "finance"
+version = "0.1.0"
+description = "Financial operations for KSL contracts"
+
+[[plugin.op]]
+name = "price_feed"
+args = ["String", "String"]  # asset_pair, source
+returns = "F64"
+handler = "native"
+description = "Get current price from oracle"
+
+[[plugin.op]]
+name = "risk_eval"
+args = ["Map<String, F64>"]  # portfolio positions
+returns = "Map<String, F64>"  # risk metrics
+handler = "native"
+description = "Evaluate portfolio risk metrics"
+
+[[plugin.op]]
+name = "option_price"
+args = ["String", "F64", "F64", "F64", "F64"]  # type, strike, spot, vol, time
+returns = "F64"
+handler = "native"
+description = "Calculate option price using Black-Scholes"
+
+[[plugin.op]]
+name = "get_market_data"
+args = ["String", "String", "u64"]  # asset, metric, timestamp
+returns = "Array<(u64, F64)>"  # time series data
+handler = "native"
+description = "Get historical market data" 

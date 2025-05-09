@@ -10,7 +10,9 @@ use crate::ksl_kapra_crypto::{FixedArray, KapraCrypto};
 use crate::ksl_errors::{KslError, SourcePosition};
 use crate::ksl_stdlib_crypto::{Crypto, BlsKeypair, DilithiumKeypair};
 use blst::{min_pk::*, BLST_ERROR};
+#[cfg(not(target_arch = "wasm32"))]
 use pqcrypto_dilithium::dilithium5;
+#[cfg(not(target_arch = "wasm32"))]
 use pqcrypto_traits::sign::{DetachedSignature, PublicKey as PqPublicKey};
 use std::convert::TryFrom;
 use serde::{Serialize, Deserialize};

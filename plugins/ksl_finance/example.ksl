@@ -1,0 +1,90 @@
+// Example KSL program using the Finance plugin
+use plugin "ksl_finance" finance
+
+fn evaluate_portfolio() requires { finance } {
+    // Get current prices
+    let eth_price = finance::price_feed("ETH/USD", "chainlink");
+    let btc_price = finance::price_feed("BTC/USD", "chainlink");
+
+    // Create portfolio
+    let portfolio = {
+        "ETH": 10.0 * eth_price,
+        "BTC": 1.0 * btc_price
+    };
+
+    // Calculate risk metrics
+    let risk = finance::risk_eval(portfolio);
+    assert(risk["var"] > 0.0, "Invalid VaR");
+    assert(risk["sharpe"] > 0.0, "Invalid Sharpe ratio");
+
+    return risk;
+}
+
+fn price_options() requires { finance } {
+    // Option parameters
+    let strike = 2000.0;  // Strike price
+    let spot = finance::price_feed("ETH/USD", "chainlink");
+    let vol = 0.5;        // 50% volatility
+    let time = 0.25;      // 3 months
+
+    // Price call and put options
+    let call_price = finance::option_price(
+        "call",
+        strike,
+        spot,
+        vol,
+        time
+    );
+
+    let put_price = finance::option_price(
+        "put",
+        strike,
+        spot,
+        vol,
+        time
+    );
+
+    return (call_price, put_price);
+}
+
+fn analyze_market_data() requires { finance } {
+    let now = current_timestamp();
+    let day_ago = now - 86400;  // 24 hours ago
+
+    // Get historical data
+    let volume = finance::get_market_data(
+        "ETH/USD",
+        "volume",
+        day_ago
+    );
+
+    let prices = finance::get_market_data(
+        "ETH/USD",
+        "price",
+        day_ago
+    );
+
+    // Calculate metrics
+    let total_volume = sum_volume(volume);
+    let avg_price = average_price(prices);
+
+    return (total_volume, avg_price);
+}
+
+fn sum_volume(data: Array<(u64, f64)>) : f64 {
+    let sum = 0.0;
+    for (_, vol) in data {
+        sum += vol;
+    }
+    return sum;
+}
+
+fn average_price(data: Array<(u64, f64)>) : f64 {
+    let sum = 0.0;
+    let count = 0;
+    for (_, price) in data {
+        sum += price;
+        count += 1;
+    }
+    return if count > 0 { sum / count } else { 0.0 };
+} 

@@ -1,0 +1,46 @@
+// Example KSL program using the Game plugin
+use plugin "ksl_game" game
+
+fn spawn_player() requires { game } {
+    // Create player entity
+    let properties = {
+        "health": "100",
+        "armor": "50",
+        "weapon": "sword"
+    };
+    
+    let player_id = game::spawn_entity("player", properties);
+    assert(player_id != "", "Failed to spawn player");
+
+    // Get initial state
+    let state = game::get_entity_state(player_id);
+    assert(state["health"] == "100");
+
+    // Move to starting position
+    let success = game::move_entity(player_id, [0.0, 1.0, 0.0]);
+    assert(success, "Failed to move player");
+
+    return player_id;
+}
+
+fn apply_physics() requires { game } {
+    let entity_id = spawn_player();
+
+    // Apply jump force
+    let success = game::apply_force(
+        entity_id,
+        [0.0, 10.0, 0.0]  // Vertical force
+    );
+    assert(success, "Failed to apply force");
+
+    // Apply forward movement
+    success = game::apply_force(
+        entity_id,
+        [5.0, 0.0, 0.0]  // Forward force
+    );
+    assert(success, "Failed to apply force");
+
+    // Check final state
+    let state = game::get_entity_state(entity_id);
+    assert(state["position"] != "[0,1,0]", "Entity didn't move");
+} 

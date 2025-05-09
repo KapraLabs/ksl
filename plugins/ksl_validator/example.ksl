@@ -1,0 +1,57 @@
+// Example KSL program using the Validator plugin
+use plugin "ksl_validator" validator
+
+fn validate_block() requires { validator } {
+    // Get current validator set
+    let epoch = 1;
+    let validators = validator::get_validator_set(epoch);
+    assert(validators.len() > 0, "No validators found");
+
+    // Get validator info
+    let validator_id = validators[0];
+    let info = validator::get_validator_info(validator_id);
+    assert(info["status"] == "active", "Validator not active");
+
+    // Verify block signature
+    let block_hash = sha3("block_header.epoch.validator_id");
+    let pubkey = info["pubkey"];
+    let signature = info["last_signature"];
+    
+    let is_valid = validator::verify_block(
+        block_hash,
+        pubkey,
+        signature
+    );
+    assert(is_valid, "Invalid block signature");
+
+    // Verify Kaprekar property
+    let hash_prefix = block_hash[0..4];
+    let has_kaprekar = validator::verify_kaprekar(hash_prefix);
+    assert(has_kaprekar, "Hash prefix does not have Kaprekar property");
+}
+
+fn validate_multiple_blocks() requires { validator } {
+    let epoch = 1;
+    let validators = validator::get_validator_set(epoch);
+    let valid_count = 0;
+
+    for validator_id in validators {
+        let info = validator::get_validator_info(validator_id);
+        if info["status"] != "active" {
+            continue;
+        }
+
+        let block_hash = sha3(format!("block_header.{}.{}", epoch, validator_id));
+        let is_valid = validator::verify_block(
+            block_hash,
+            info["pubkey"],
+            info["last_signature"]
+        );
+
+        if is_valid {
+            valid_count += 1;
+        }
+    }
+
+    assert(valid_count > validators.len() * 2/3, "Not enough valid blocks");
+} 

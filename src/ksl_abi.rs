@@ -4,6 +4,11 @@ use serde::{Serialize, Deserialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use crate::ksl_ir::KSLIR;
+use serde_json::{Value, Map};
+use std::fs::File;
+use std::io::Write;
+use std::path::Path;
 
 /// Contract ABI representation
 #[derive(Debug, Serialize, Deserialize)]
@@ -142,6 +147,288 @@ impl ABIGenerator {
                 SourcePosition::new(1, 1),
             )
         })
+    }
+}
+
+/// ABI export format for KSL contracts
+#[derive(Debug, Clone)]
+pub struct KSLABI {
+    pub contract_name: String,
+    pub version: u32,
+    pub bytecode_hash: String,
+    pub functions: Vec<FunctionABI>,
+    pub events: Vec<EventABI>,
+    pub errors: Vec<ErrorABI>,
+    pub structs: Vec<StructABI>,
+    pub enums: Vec<EnumABI>,
+}
+
+/// Function ABI representation
+#[derive(Debug, Clone)]
+pub struct FunctionABI {
+    pub name: String,
+    pub inputs: Vec<ParamABI>,
+    pub outputs: Vec<ParamABI>,
+    pub state_mutability: StateMutability,
+    pub gas_estimate: u64,
+    pub doc: Option<String>,
+}
+
+/// Event ABI representation
+#[derive(Debug, Clone)]
+pub struct EventABI {
+    pub name: String,
+    pub inputs: Vec<ParamABI>,
+    pub anonymous: bool,
+    pub doc: Option<String>,
+}
+
+/// Error ABI representation
+#[derive(Debug, Clone)]
+pub struct ErrorABI {
+    pub name: String,
+    pub inputs: Vec<ParamABI>,
+    pub doc: Option<String>,
+}
+
+/// Struct ABI representation
+#[derive(Debug, Clone)]
+pub struct StructABI {
+    pub name: String,
+    pub fields: Vec<ParamABI>,
+    pub doc: Option<String>,
+}
+
+/// Enum ABI representation
+#[derive(Debug, Clone)]
+pub struct EnumABI {
+    pub name: String,
+    pub variants: Vec<String>,
+    pub doc: Option<String>,
+}
+
+/// Parameter ABI representation
+#[derive(Debug, Clone)]
+pub struct ParamABI {
+    pub name: String,
+    pub type_: String,
+    pub indexed: bool,
+    pub doc: Option<String>,
+}
+
+/// State mutability for functions
+#[derive(Debug, Clone, PartialEq)]
+pub enum StateMutability {
+    Pure,
+    View,
+    NonPayable,
+    Payable,
+}
+
+impl KSLABI {
+    /// Creates a new ABI from an IR
+    pub fn from_ir(ir: &KSLIR) -> Self {
+        let mut abi = Self {
+            contract_name: ir.contract_name.clone(),
+            version: ir.version,
+            bytecode_hash: hex::encode(ir.bytecode_hash.0),
+            functions: Vec::new(),
+            events: Vec::new(),
+            errors: Vec::new(),
+            structs: Vec::new(),
+            enums: Vec::new(),
+        };
+
+        // Convert functions
+        for func in &ir.entrypoints {
+            let mut inputs = Vec::new();
+            for arg in &func.args {
+                inputs.push(ParamABI {
+                    name: arg.name.clone(),
+                    type_: arg.name.clone(),
+                    indexed: false,
+                    doc: None,
+                });
+            }
+
+            let mut outputs = Vec::new();
+            if let Some(ret) = &func.return_type {
+                outputs.push(ParamABI {
+                    name: "return".to_string(),
+                    type_: ret.name.clone(),
+                    indexed: false,
+                    doc: None,
+                });
+            }
+
+            let state_mutability = if func.modifiers.contains(&crate::ksl_ir::FunctionModifier::Pure) {
+                StateMutability::Pure
+            } else if func.modifiers.contains(&crate::ksl_ir::FunctionModifier::View) {
+                StateMutability::View
+            } else if func.modifiers.contains(&crate::ksl_ir::FunctionModifier::Payable) {
+                StateMutability::Payable
+            } else {
+                StateMutability::NonPayable
+            };
+
+            abi.functions.push(FunctionABI {
+                name: func.name.clone(),
+                inputs,
+                outputs,
+                state_mutability,
+                gas_estimate: func.gas_estimate,
+                doc: func.doc.clone(),
+            });
+        }
+
+        abi
+    }
+
+    /// Converts the ABI to a JSON value
+    pub fn to_json(&self) -> Value {
+        let mut map = Map::new();
+        
+        map.insert("name".to_string(), Value::String(self.contract_name.clone()));
+        map.insert("version".to_string(), Value::Number(serde_json::Number::from(self.version)));
+        map.insert("bytecodeHash".to_string(), Value::String(self.bytecode_hash.clone()));
+
+        // Convert functions
+        let functions: Vec<Value> = self.functions.iter().map(|f| {
+            let mut func = Map::new();
+            func.insert("name".to_string(), Value::String(f.name.clone()));
+            func.insert("inputs".to_string(), Value::Array(
+                f.inputs.iter().map(|input| {
+                    let mut param = Map::new();
+                    param.insert("name".to_string(), Value::String(input.name.clone()));
+                    param.insert("type".to_string(), Value::String(input.type_.clone()));
+                    param.insert("indexed".to_string(), Value::Bool(input.indexed));
+                    if let Some(doc) = &input.doc {
+                        param.insert("doc".to_string(), Value::String(doc.clone()));
+                    }
+                    Value::Object(param)
+                }).collect()
+            ));
+            func.insert("outputs".to_string(), Value::Array(
+                f.outputs.iter().map(|output| {
+                    let mut param = Map::new();
+                    param.insert("name".to_string(), Value::String(output.name.clone()));
+                    param.insert("type".to_string(), Value::String(output.type_.clone()));
+                    param.insert("indexed".to_string(), Value::Bool(output.indexed));
+                    if let Some(doc) = &output.doc {
+                        param.insert("doc".to_string(), Value::String(doc.clone()));
+                    }
+                    Value::Object(param)
+                }).collect()
+            ));
+            func.insert("stateMutability".to_string(), Value::String(
+                match f.state_mutability {
+                    StateMutability::Pure => "pure",
+                    StateMutability::View => "view",
+                    StateMutability::NonPayable => "nonpayable",
+                    StateMutability::Payable => "payable",
+                }.to_string()
+            ));
+            func.insert("gasEstimate".to_string(), Value::Number(serde_json::Number::from(f.gas_estimate)));
+            if let Some(doc) = &f.doc {
+                func.insert("doc".to_string(), Value::String(doc.clone()));
+            }
+            Value::Object(func)
+        }).collect();
+        map.insert("functions".to_string(), Value::Array(functions));
+
+        // Convert events
+        let events: Vec<Value> = self.events.iter().map(|e| {
+            let mut event = Map::new();
+            event.insert("name".to_string(), Value::String(e.name.clone()));
+            event.insert("inputs".to_string(), Value::Array(
+                e.inputs.iter().map(|input| {
+                    let mut param = Map::new();
+                    param.insert("name".to_string(), Value::String(input.name.clone()));
+                    param.insert("type".to_string(), Value::String(input.type_.clone()));
+                    param.insert("indexed".to_string(), Value::Bool(input.indexed));
+                    if let Some(doc) = &input.doc {
+                        param.insert("doc".to_string(), Value::String(doc.clone()));
+                    }
+                    Value::Object(param)
+                }).collect()
+            ));
+            event.insert("anonymous".to_string(), Value::Bool(e.anonymous));
+            if let Some(doc) = &e.doc {
+                event.insert("doc".to_string(), Value::String(doc.clone()));
+            }
+            Value::Object(event)
+        }).collect();
+        map.insert("events".to_string(), Value::Array(events));
+
+        // Convert errors
+        let errors: Vec<Value> = self.errors.iter().map(|e| {
+            let mut error = Map::new();
+            error.insert("name".to_string(), Value::String(e.name.clone()));
+            error.insert("inputs".to_string(), Value::Array(
+                e.inputs.iter().map(|input| {
+                    let mut param = Map::new();
+                    param.insert("name".to_string(), Value::String(input.name.clone()));
+                    param.insert("type".to_string(), Value::String(input.type_.clone()));
+                    param.insert("indexed".to_string(), Value::Bool(input.indexed));
+                    if let Some(doc) = &input.doc {
+                        param.insert("doc".to_string(), Value::String(doc.clone()));
+                    }
+                    Value::Object(param)
+                }).collect()
+            ));
+            if let Some(doc) = &e.doc {
+                error.insert("doc".to_string(), Value::String(doc.clone()));
+            }
+            Value::Object(error)
+        }).collect();
+        map.insert("errors".to_string(), Value::Array(errors));
+
+        // Convert structs
+        let structs: Vec<Value> = self.structs.iter().map(|s| {
+            let mut struct_ = Map::new();
+            struct_.insert("name".to_string(), Value::String(s.name.clone()));
+            struct_.insert("fields".to_string(), Value::Array(
+                s.fields.iter().map(|field| {
+                    let mut param = Map::new();
+                    param.insert("name".to_string(), Value::String(field.name.clone()));
+                    param.insert("type".to_string(), Value::String(field.type_.clone()));
+                    param.insert("indexed".to_string(), Value::Bool(field.indexed));
+                    if let Some(doc) = &field.doc {
+                        param.insert("doc".to_string(), Value::String(doc.clone()));
+                    }
+                    Value::Object(param)
+                }).collect()
+            ));
+            if let Some(doc) = &s.doc {
+                struct_.insert("doc".to_string(), Value::String(doc.clone()));
+            }
+            Value::Object(struct_)
+        }).collect();
+        map.insert("structs".to_string(), Value::Array(structs));
+
+        // Convert enums
+        let enums: Vec<Value> = self.enums.iter().map(|e| {
+            let mut enum_ = Map::new();
+            enum_.insert("name".to_string(), Value::String(e.name.clone()));
+            enum_.insert("variants".to_string(), Value::Array(
+                e.variants.iter().map(|v| Value::String(v.clone())).collect()
+            ));
+            if let Some(doc) = &e.doc {
+                enum_.insert("doc".to_string(), Value::String(doc.clone()));
+            }
+            Value::Object(enum_)
+        }).collect();
+        map.insert("enums".to_string(), Value::Array(enums));
+
+        Value::Object(map)
+    }
+
+    /// Exports the ABI to a JSON file
+    pub fn export_to_file(&self, path: &Path) -> std::io::Result<()> {
+        let json = serde_json::to_string_pretty(&self.to_json())?;
+        let mut file = File::create(path)?;
+        file.write_all(json.as_bytes())?;
+        Ok(())
     }
 }
 

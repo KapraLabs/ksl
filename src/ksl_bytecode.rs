@@ -82,8 +82,8 @@ impl Operand {
     }
 }
 
-/// Opcodes for KapraBytecode instructions.
-#[derive(Debug, PartialEq, Clone)]
+/// Kapra bytecode operation codes
+#[derive(Debug, Clone)]
 pub enum KapraOpCode {
     // Core operations
     Mov,         // Mov dst_reg, src_reg_or_imm
@@ -123,6 +123,17 @@ pub enum KapraOpCode {
     Sqrt,        // Sqrt dst_reg, src_reg (f64)
     MatrixMul,   // MatrixMul dst_reg, a_reg, b_reg (array<array<f64, N>, N>)
     TensorReduce, // TensorReduce dst_reg, src_reg (array<array<u64, N>, M>)
+    Verify,      // Mark beginning of postcondition block
+    /// Call a plugin operation
+    PluginCall {
+        plugin: String,
+        op: String,
+    },
+    
+    /// Call a plugin syscall
+    CallSyscall {
+        name: String,
+    },
 }
 
 impl KapraOpCode {
@@ -166,6 +177,9 @@ impl KapraOpCode {
             KapraOpCode::Sqrt => 0x1C,
             KapraOpCode::MatrixMul => 0x1D,
             KapraOpCode::TensorReduce => 0x1E,
+            KapraOpCode::Verify => 0x1F,
+            KapraOpCode::PluginCall { .. } => 0x20,
+            KapraOpCode::CallSyscall { .. } => 0x21,
         }
     }
 
@@ -210,6 +224,9 @@ impl KapraOpCode {
             0x1C => Some(KapraOpCode::Sqrt),
             0x1D => Some(KapraOpCode::MatrixMul),
             0x1E => Some(KapraOpCode::TensorReduce),
+            0x1F => Some(KapraOpCode::Verify),
+            0x20 => Some(KapraOpCode::PluginCall { plugin: String::new(), op: String::new() }),
+            0x21 => Some(KapraOpCode::CallSyscall { name: String::new() }),
             _ => None,
         }
     }
@@ -255,6 +272,9 @@ impl KapraOpCode {
             KapraOpCode::Sqrt => ("Computes square root", 2),
             KapraOpCode::MatrixMul => ("Multiplies two matrices", 3),
             KapraOpCode::TensorReduce => ("Reduces tensor dimensions", 2),
+            KapraOpCode::Verify => ("Mark beginning of postcondition block", 0),
+            KapraOpCode::PluginCall { .. } => ("Calls a plugin operation", 2),
+            KapraOpCode::CallSyscall { .. } => ("Calls a plugin syscall", 1),
         };
         let type_str = match type_info {
             Some(ty) => format!("{:?}", ty),
@@ -359,6 +379,9 @@ impl KapraInstruction {
             KapraOpCode::TensorReduce => 2, // dst, src
             KapraOpCode::Auth => 1, // delegatee_reg
             KapraOpCode::AuthCall => 1, // target_reg
+            KapraOpCode::Verify => 0,
+            KapraOpCode::PluginCall { .. } => 2, // plugin, op
+            KapraOpCode::CallSyscall { .. } => 1, // name
         };
 
         for _ in 0..operand_count {
@@ -623,6 +646,15 @@ impl KapraInstruction {
                 } else {
                     "unreachable".to_string()
                 }
+            }
+            KapraOpCode::Verify => {
+                "unreachable".to_string()
+            }
+            KapraOpCode::PluginCall { plugin, op } => {
+                format!("call void @plugin_call(i32 %r{}, i32 %r{}, i32 %r{})", plugin, op, self.operands[0].encode()[0])
+            }
+            KapraOpCode::CallSyscall { name } => {
+                format!("call void @syscall({})", name)
             }
         }
     }

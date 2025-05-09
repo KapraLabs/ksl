@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::fmt;
 use crate::ksl_errors::KslError;
 use crate::ksl_kapra_zkp::{ZkScheme, ZkProof as RuntimeZkProof};
+use serde::{Serialize, Deserialize};
 
 // Assume ksl_generics.rs provides GenericResolver
 mod ksl_generics {
@@ -33,7 +34,7 @@ mod ksl_typegen {
 }
 
 /// Type representation for KSL.
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum Type {
     // Primitive types
     U8,
@@ -83,6 +84,12 @@ pub enum Type {
     Bool,
     ZkProof(ZkProofType),
     Signature(SignatureType),
+    // Data blob type
+    DataBlob {
+        element_type: Box<Type>,
+        size: usize,
+        alignment: usize,
+    },
 }
 
 /// Context for type inference (e.g., variable bindings).
@@ -559,6 +566,9 @@ impl Type {
                 SignatureType::Bls => 96,
                 SignatureType::Dilithium => 2420,
             }),
+            Type::DataBlob { element_type, size, .. } => {
+                element_type.size_in_bytes().map(|s| s * size)
+            }
             _ => None, // Dynamic size for strings, tuples, etc.
         }
     }
@@ -609,6 +619,31 @@ impl Type {
             _ => self == target,
         }
     }
+
+    pub fn is_data_blob(&self) -> bool {
+        matches!(self, Type::DataBlob { .. })
+    }
+
+    pub fn data_blob_size(&self) -> Option<usize> {
+        match self {
+            Type::DataBlob { size, .. } => Some(*size),
+            _ => None
+        }
+    }
+
+    pub fn data_blob_alignment(&self) -> Option<usize> {
+        match self {
+            Type::DataBlob { alignment, .. } => Some(*alignment),
+            _ => None
+        }
+    }
+
+    pub fn data_blob_element_type(&self) -> Option<&Type> {
+        match self {
+            Type::DataBlob { element_type, .. } => Some(element_type),
+            _ => None
+        }
+    }
 }
 
 impl fmt::Display for Type {
@@ -624,6 +659,9 @@ impl fmt::Display for Type {
                 SignatureType::Bls => write!(f, "signature<bls>"),
                 SignatureType::Dilithium => write!(f, "signature<dilithium>"),
             },
+            Type::DataBlob { element_type, size, .. } => {
+                write!(f, "data_blob<{}, {}>", element_type, size)
+            }
             // ... existing display implementations ...
             _ => write!(f, "{:?}", self),
         }
@@ -689,6 +727,78 @@ impl Value {
                 self.get_type(),
                 target_type
             ))),
+        }
+    }
+}
+
+/// Data blob metadata
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KSLDataBlob {
+    /// Blob name/identifier
+    pub name: String,
+    /// Element type
+    pub element_type: Type,
+    /// Number of elements
+    pub length: usize,
+    /// Raw data bytes
+    pub contents: Vec<u8>,
+    /// Source file or label
+    pub source: Option<String>,
+    /// Memory alignment requirement
+    pub alignment: usize,
+    /// Content hash for verification
+    pub hash: [u8; 32],
+}
+
+impl KSLDataBlob {
+    /// Create a new data blob
+    pub fn new(name: String, element_type: Type, length: usize) -> Self {
+        Self {
+            name,
+            element_type,
+            length,
+            contents: Vec::new(),
+            source: None,
+            alignment: 8, // Default alignment
+            hash: [0; 32],
+        }
+    }
+
+    /// Load blob data from file
+    pub fn load_from_file(&mut self, path: &str) -> std::io::Result<()> {
+        self.contents = std::fs::read(path)?;
+        self.source = Some(path.to_string());
+        self.update_hash();
+        Ok(())
+    }
+
+    /// Set blob data directly
+    pub fn set_data(&mut self, data: Vec<u8>) {
+        self.contents = data;
+        self.update_hash();
+    }
+
+    /// Update content hash
+    fn update_hash(&mut self) {
+        use sha3::{Digest, Sha3_256};
+        let mut hasher = Sha3_256::new();
+        hasher.update(&self.contents);
+        self.hash.copy_from_slice(&hasher.finalize());
+    }
+
+    /// Get size in bytes
+    pub fn byte_size(&self) -> usize {
+        self.length * self.element_type_size()
+    }
+
+    /// Get size of element type in bytes
+    fn element_type_size(&self) -> usize {
+        match &self.element_type {
+            Type::U8 | Type::I8 => 1,
+            Type::U16 | Type::I16 => 2,
+            Type::U32 | Type::I32 | Type::F32 => 4,
+            Type::U64 | Type::I64 | Type::F64 => 8,
+            _ => panic!("Unsupported element type for data blob"),
         }
     }
 }
@@ -972,5 +1082,48 @@ mod tests {
             Type::Signature(SignatureType::Ed25519).to_string(),
             "signature<ed25519>"
         );
+    }
+
+    #[test]
+    fn test_data_blob_creation() {
+        let blob = KSLDataBlob::new(
+            "weights".to_string(),
+            Type::F64,
+            1024
+        );
+        assert_eq!(blob.name, "weights");
+        assert_eq!(blob.length, 1024);
+        assert_eq!(blob.alignment, 8);
+    }
+
+    #[test]
+    fn test_data_blob_size() {
+        let blob = KSLDataBlob::new(
+            "data".to_string(),
+            Type::F64,
+            1024
+        );
+        assert_eq!(blob.byte_size(), 8 * 1024); // F64 is 8 bytes
+    }
+
+    #[test]
+    fn test_data_blob_hash() {
+        let mut blob = KSLDataBlob::new(
+            "data".to_string(),
+            Type::U8,
+            4
+        );
+        blob.set_data(vec![1, 2, 3, 4]);
+        assert_ne!(blob.hash, [0; 32]); // Hash should be updated
+    }
+
+    #[test]
+    fn test_data_blob_type_display() {
+        let t = Type::DataBlob {
+            element_type: Box::new(Type::F64),
+            size: 1024,
+            alignment: 8,
+        };
+        assert_eq!(t.to_string(), "data_blob<f64, 1024>");
     }
 }

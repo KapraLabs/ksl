@@ -1,0 +1,131 @@
+{
+    "name": "KSL",
+    "scopeName": "source.ksl",
+    "patterns": [
+        {
+            "include": "#comments"
+        },
+        {
+            "include": "#keywords"
+        },
+        {
+            "include": "#strings"
+        },
+        {
+            "include": "#numbers"
+        },
+        {
+            "include": "#functions"
+        },
+        {
+            "include": "#types"
+        }
+    ],
+    "repository": {
+        "comments": {
+            "patterns": [
+                {
+                    "name": "comment.line.double-slash.ksl",
+                    "match": "//.*$"
+                },
+                {
+                    "name": "comment.block.ksl",
+                    "begin": "/\\*",
+                    "end": "\\*/",
+                    "patterns": [
+                        {
+                            "name": "comment.doc.ksl",
+                            "match": "@[a-zA-Z]+ .*$"
+                        }
+                    ]
+                }
+            ]
+        },
+        "keywords": {
+            "patterns": [
+                {
+                    "name": "keyword.control.ksl",
+                    "match": "\\b(if|else|while|for|return|break|continue|match|async|await)\\b"
+                },
+                {
+                    "name": "keyword.other.ksl",
+                    "match": "\\b(contract|function|event|struct|enum|import|export|public|private|pure|view|payable)\\b"
+                },
+                {
+                    "name": "keyword.operator.ksl",
+                    "match": "\\b(new|delete|typeof|instanceof)\\b"
+                },
+                {
+                    "name": "constant.language.ksl",
+                    "match": "\\b(true|false|null|undefined)\\b"
+                }
+            ]
+        },
+        "strings": {
+            "patterns": [
+                {
+                    "name": "string.quoted.double.ksl",
+                    "begin": "\"",
+                    "end": "\"",
+                    "patterns": [
+                        {
+                            "name": "constant.character.escape.ksl",
+                            "match": "\\\\."
+                        }
+                    ]
+                },
+                {
+                    "name": "string.quoted.single.ksl",
+                    "begin": "'",
+                    "end": "'",
+                    "patterns": [
+                        {
+                            "name": "constant.character.escape.ksl",
+                            "match": "\\\\."
+                        }
+                    ]
+                }
+            ]
+        },
+        "numbers": {
+            "patterns": [
+                {
+                    "name": "constant.numeric.decimal.ksl",
+                    "match": "\\b\\d+(\\.\\d+)?\\b"
+                },
+                {
+                    "name": "constant.numeric.hex.ksl",
+                    "match": "\\b0x[0-9a-fA-F]+\\b"
+                },
+                {
+                    "name": "constant.numeric.binary.ksl",
+                    "match": "\\b0b[01]+\\b"
+                }
+            ]
+        },
+        "functions": {
+            "patterns": [
+                {
+                    "name": "entity.name.function.ksl",
+                    "match": "\\b[a-zA-Z_][a-zA-Z0-9_]*\\s*\\("
+                },
+                {
+                    "name": "support.function.ksl",
+                    "match": "\\b(print|require|assert|revert|emit|sha3|bls_verify|dilithium_verify|merkle_verify)\\b"
+                }
+            ]
+        },
+        "types": {
+            "patterns": [
+                {
+                    "name": "storage.type.ksl",
+                    "match": "\\b(u8|u16|u32|u64|i8|i16|i32|i64|bool|string|address|bytes|result|option)\\b"
+                },
+                {
+                    "name": "storage.type.generic.ksl",
+                    "match": "\\b[A-Z][a-zA-Z0-9_]*\\b"
+                }
+            ]
+        }
+    }
+} 

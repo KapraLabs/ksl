@@ -8,6 +8,7 @@ use crate::ksl_hot_reload::HotReloadState;
 use crate::ksl_coverage::CoverageData;
 use crate::ksl_metrics::MetricsData;
 use crate::ksl_simulator::SimulationData;
+use crate::ksl_data_blob::{KSLDataBlob, DataBlobMemoryManager, DataBlobOpCode};
 use std::collections::{HashMap, HashSet, VecDeque};
 use sha3::{Digest, Sha3_256, Sha3_512};
 use crate::ksl_stdlib_net::NetStdLib;
@@ -64,6 +65,45 @@ pub struct DelegatedContext {
     pub expires_at: u64,           // Block height or tx-scope
 }
 
+/// Represents a single action in a transaction batch
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TxAction {
+    pub to: FixedArray<32>,
+    pub data: Vec<u8>,        // Serialized bytecode or function call
+    pub gas: u64,
+}
+
+/// Transaction execution context
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TransactionContext {
+    pub sender: FixedArray<32>,
+    pub actions: Vec<TxAction>, // Batch of actions
+    pub sponsor: Option<FixedArray<32>>,
+    pub gas_limit: u64,
+    pub tx_id: u64,
+}
+
+/// Represents the execution result of a single action
+#[derive(Debug, Clone)]
+pub struct ActionResult {
+    pub to: FixedArray<32>,
+    pub gas_used: u64,
+    pub success: bool,
+    pub error: Option<String>,
+}
+
+/// Contract metadata for version tracking and upgrades
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContractMetadata {
+    pub contract_id: FixedArray<32>,
+    pub version: u32,
+    pub version_hash: FixedArray<32>,
+    pub changelog: String,
+    pub upgrade_key: FixedArray<32>,
+    pub deprecated: bool,
+    pub upgrade_guardians: Vec<FixedArray<32>>,
+}
+
 /// Virtual machine state for executing KapraBytecode.
 pub struct KapraVM {
     registers: Vec<u64>,
@@ -86,6 +126,14 @@ pub struct KapraVM {
     gas_limit: u64, // Gas limit for execution
     auth_stack: Vec<DelegatedContext>, // Stack of delegated auth contexts
     current_sender: Option<FixedArray<32>>, // Current transaction sender
+    gas_charged_to: FixedArray<32>, // Defaults to tx.sender unless overridden
+    smart_accounts: HashMap<FixedArray<32>, SmartAccount>, // Smart account storage
+    tx_context: TransactionContext,
+    postconditions: Option<KapraBytecode>, // Postcondition block bytecode
+    state_snapshot: Option<HashMap<FixedArray<32>, SmartAccount>>, // For rollback
+    contract_registry: HashMap<FixedArray<32>, ContractMetadata>,
+    contract_bytecode: HashMap<FixedArray<32>, KapraBytecode>,
+    data_blob_manager: DataBlobMemoryManager,
 }
 
 /// Contract state that can be serialized
@@ -105,6 +153,24 @@ pub struct ContractState {
     pub heap: HashMap<usize, u8>,
     /// Contract version
     pub version: u64,
+}
+
+/// Generates unique transaction IDs
+#[derive(Default)]
+pub struct TransactionIdGenerator {
+    next_id: u64,
+}
+
+impl TransactionIdGenerator {
+    pub fn new() -> Self {
+        Self { next_id: 1 }
+    }
+
+    pub fn next(&mut self) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
+    }
 }
 
 impl KapraVM {
@@ -141,7 +207,28 @@ impl KapraVM {
             gas_limit: gas_limit.unwrap_or(u64::MAX),
             auth_stack: Vec::new(),
             current_sender: None,
+            gas_charged_to: FixedArray([0; 32]),
+            smart_accounts: HashMap::new(),
+            tx_context: TransactionContext {
+                sender: FixedArray([0; 32]),
+                actions: Vec::new(),
+                sponsor: None,
+                gas_limit: 0,
+                tx_id: 0,
+            },
+            postconditions: None,
+            state_snapshot: None,
+            contract_registry: HashMap::new(),
+            contract_bytecode: HashMap::new(),
+            data_blob_manager: DataBlobMemoryManager::new(),
         }
+    }
+
+    /// Creates a new KapraVM instance with a transaction ID generator
+    pub fn new_with_tx_generator(bytecode: KapraBytecode, runtime: Option<Arc<AsyncRuntime>>, gas_limit: Option<u64>) -> (Self, TransactionIdGenerator) {
+        let vm = KapraVM::new(bytecode, runtime, gas_limit);
+        let generator = TransactionIdGenerator::new();
+        (vm, generator)
     }
 
     pub fn enable_debug(&mut self) {
@@ -534,6 +621,78 @@ impl KapraVM {
                     ksl_metrics::MetricsCollector::increment_counter("auth_calls");
                 }
             }
+            op if (op as u8) >= 0x70 && (op as u8) <= 0x72 => {
+                self.execute_data_blob_op(instr)
+            }
+        }
+        Ok(())
+    }
+
+    /// Executes a data blob operation
+    fn execute_data_blob_op(&mut self, instr: &KapraInstruction) -> Result<(), RuntimeError> {
+        let opcode = DataBlobOpCode::from(instr.opcode);
+        match opcode {
+            DataBlobOpCode::Load => {
+                let dst = self.get_register(&instr.operands[0], self.pc)?;
+                let src = self.get_operand_value(&instr.operands[1], instr.type_info.as_ref(), self.pc)?;
+                
+                // Load blob from memory
+                let blob_ptr = u64::from_le_bytes(src.try_into().map_err(|_| RuntimeError {
+                    message: "Invalid blob pointer".to_string(),
+                    pc: self.pc,
+                })?);
+                
+                // Find the blob in manager
+                let blob = self.data_blob_manager.blobs.iter()
+                    .find(|b| Arc::as_ptr(b) as u64 == blob_ptr)
+                    .ok_or_else(|| RuntimeError {
+                        message: "Invalid data blob reference".to_string(),
+                        pc: self.pc,
+                    })?;
+                
+                // Store blob data in register
+                self.registers[dst as usize] = blob.data.clone();
+            }
+            DataBlobOpCode::Store => {
+                let dst = self.get_register(&instr.operands[0], self.pc)?;
+                let data = self.get_operand_value(&instr.operands[1], instr.type_info.as_ref(), self.pc)?;
+                let element_type = instr.type_info.as_ref().ok_or_else(|| RuntimeError {
+                    message: "Missing element type for data blob".to_string(),
+                    pc: self.pc,
+                })?;
+                
+                // Create and allocate new blob
+                let blob = KSLDataBlob::new(data, element_type.clone(), 8);
+                let arc_blob = self.data_blob_manager.allocate(blob).map_err(|e| RuntimeError {
+                    message: e.to_string(),
+                    pc: self.pc,
+                })?;
+                
+                // Store blob pointer in register
+                let ptr = Arc::as_ptr(&arc_blob) as u64;
+                self.registers[dst as usize] = ptr.to_le_bytes().to_vec();
+            }
+            DataBlobOpCode::Verify => {
+                let dst = self.get_register(&instr.operands[0], self.pc)?;
+                let src = self.get_operand_value(&instr.operands[1], instr.type_info.as_ref(), self.pc)?;
+                
+                // Get blob pointer
+                let blob_ptr = u64::from_le_bytes(src.try_into().map_err(|_| RuntimeError {
+                    message: "Invalid blob pointer".to_string(),
+                    pc: self.pc,
+                })?);
+                
+                // Find and verify blob
+                let blob = self.data_blob_manager.blobs.iter()
+                    .find(|b| Arc::as_ptr(b) as u64 == blob_ptr)
+                    .ok_or_else(|| RuntimeError {
+                        message: "Invalid data blob reference".to_string(),
+                        pc: self.pc,
+                    })?;
+                
+                let is_valid = blob.verify();
+                self.registers[dst as usize] = (is_valid as u32).to_le_bytes().to_vec();
+            }
         }
         Ok(())
     }
@@ -793,6 +952,402 @@ impl KapraVM {
     /// Resets gas usage to 0.
     pub fn reset_gas(&mut self) {
         self.gas_used = 0;
+    }
+
+    /// Charges gas for an operation
+    fn charge_gas(&mut self, amount: u64) -> Result<(), RuntimeError> {
+        let payer = self.gas_charged_to;
+        
+        // Get the smart account for the payer
+        let account = self.smart_accounts.get_mut(&payer)
+            .ok_or_else(|| RuntimeError {
+                message: format!("No smart account found for address {:?}", payer),
+                pc: self.pc,
+            })?;
+
+        if account.balance < amount {
+            return Err(RuntimeError {
+                message: format!("Insufficient balance for gas payment: required {}, available {}", amount, account.balance),
+                pc: self.pc,
+            });
+        }
+
+        account.balance -= amount;
+        self.gas_used += amount;
+        Ok(())
+    }
+
+    /// Sets up gas sponsorship for a transaction
+    fn setup_gas_sponsorship(&mut self) -> Result<(), RuntimeError> {
+        let sender = self.current_sender.ok_or_else(|| RuntimeError {
+            message: "No current sender set".to_string(),
+            pc: self.pc,
+        })?;
+
+        // Get the sender's smart account
+        let account = self.smart_accounts.get(&sender)
+            .ok_or_else(|| RuntimeError {
+                message: format!("No smart account found for sender {:?}", sender),
+                pc: self.pc,
+            })?;
+
+        // Check if there's a sponsor and if the gas limit is within bounds
+        if let Some(sponsor) = account.sponsor {
+            if account.limit >= self.gas_limit {
+                self.gas_charged_to = sponsor;
+            }
+        } else {
+            self.gas_charged_to = sender;
+        }
+
+        Ok(())
+    }
+
+    /// Creates a new smart account
+    pub fn create_smart_account(&mut self, address: FixedArray<32>, initial_balance: u64) -> Result<(), RuntimeError> {
+        if self.smart_accounts.contains_key(&address) {
+            return Err(RuntimeError {
+                message: format!("Smart account already exists for address {:?}", address),
+                pc: self.pc,
+            });
+        }
+
+        let account = SmartAccount::new(initial_balance);
+        self.smart_accounts.insert(address, account);
+        Ok(())
+    }
+
+    /// Gets a smart account
+    pub fn get_smart_account(&self, address: &FixedArray<32>) -> Option<&SmartAccount> {
+        self.smart_accounts.get(address)
+    }
+
+    /// Gets a mutable smart account
+    pub fn get_smart_account_mut(&mut self, address: &FixedArray<32>) -> Option<&mut SmartAccount> {
+        self.smart_accounts.get_mut(address)
+    }
+
+    /// Runs a transaction with multiple actions and returns detailed results
+    pub fn run_transaction_with_logging(&mut self, tx_context: TransactionContext) -> Result<Vec<ActionResult>, RuntimeError> {
+        let mut results = Vec::new();
+        self.tx_context = tx_context;
+        
+        for action in &self.tx_context.actions {
+            // Reset VM state for new action
+            self.pc = 0;
+            self.gas_used = 0;
+            self.bytecode = KapraBytecode::from_bytes(&action.data)?;
+            self.tx_context.gas_limit = action.gas;
+            
+            // Set up gas sponsorship
+            self.gas_charged_to = self.resolve_gas_payer()?;
+            
+            // Execute the action
+            let result = self.run(false, false);
+            
+            // Log the result
+            results.push(ActionResult {
+                to: action.to,
+                gas_used: self.gas_used,
+                success: result.is_ok(),
+                error: result.err().map(|e| e.message),
+            });
+            
+            if result.is_err() {
+                return Err(RuntimeError {
+                    message: format!("Atomic batch failed at action to {:?}", action.to),
+                    pc: self.pc,
+                });
+            }
+        }
+        
+        Ok(results)
+    }
+
+    /// Resolves who should pay for gas based on sponsorship rules
+    fn resolve_gas_payer(&self) -> Result<FixedArray<32>, RuntimeError> {
+        let sender = self.tx_context.sender;
+        let account = self.smart_accounts.get(&sender)
+            .ok_or_else(|| RuntimeError {
+                message: format!("No smart account found for sender {:?}", sender),
+                pc: self.pc,
+            })?;
+
+        if let Some(sponsor) = account.sponsor {
+            if account.limit >= self.tx_context.gas_limit {
+                return Ok(sponsor);
+            }
+        }
+
+        Ok(sender)
+    }
+
+    /// Creates a new VM instance for executing a single action
+    pub fn clone_for_action(&self, action: &TxAction) -> Result<Self, RuntimeError> {
+        let mut new_vm = self.clone();
+        new_vm.bytecode = KapraBytecode::from_bytes(&action.data)?;
+        new_vm.gas_limit = action.gas;
+        new_vm.gas_used = 0;
+        new_vm.pc = 0;
+        Ok(new_vm)
+    }
+
+    /// Runs a transaction with an auto-generated ID
+    pub fn run_transaction_with_id(&mut self, tx_context: TransactionContext, tx_id: u64) -> Result<(), RuntimeError> {
+        let mut context = tx_context;
+        context.tx_id = tx_id;
+        self.run_transaction(context)
+    }
+
+    /// Takes a snapshot of the current state for potential rollback
+    fn take_state_snapshot(&mut self) {
+        self.state_snapshot = Some(self.smart_accounts.clone());
+    }
+
+    /// Rolls back to the last state snapshot
+    fn rollback_state(&mut self) {
+        if let Some(snapshot) = self.state_snapshot.take() {
+            self.smart_accounts = snapshot;
+        }
+    }
+
+    /// Executes the postcondition block
+    fn execute_postconditions(&mut self) -> Result<(), RuntimeError> {
+        if let Some(postcode) = &self.postconditions {
+            let saved_bytecode = self.bytecode.clone();
+            let saved_pc = self.pc;
+            
+            self.bytecode = postcode.clone();
+            self.pc = 0;
+
+            let result = self.run(false, false);
+            
+            // Restore original bytecode and PC
+            self.bytecode = saved_bytecode;
+            self.pc = saved_pc;
+            
+            result
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Runs a transaction with multiple actions and postcondition verification
+    pub fn run_transaction(&mut self, tx_context: TransactionContext) -> Result<(), RuntimeError> {
+        self.tx_context = tx_context;
+        
+        for action in &self.tx_context.actions {
+            // Reset VM state for new action
+            self.pc = 0;
+            self.gas_used = 0;
+            self.bytecode = KapraBytecode::from_bytes(&action.data)?;
+            self.tx_context.gas_limit = action.gas;
+            
+            // Set up gas sponsorship
+            self.gas_charged_to = self.resolve_gas_payer()?;
+            
+            // Take state snapshot before execution
+            self.take_state_snapshot();
+            
+            // Execute the action
+            let result = self.run(false, false);
+            if result.is_err() {
+                self.rollback_state();
+                return Err(RuntimeError {
+                    message: format!("Atomic batch failed at action to {:?}", action.to),
+                    pc: self.pc,
+                });
+            }
+
+            // Execute postconditions
+            let verify_result = self.execute_postconditions();
+            if verify_result.is_err() {
+                self.rollback_state();
+                return Err(RuntimeError {
+                    message: format!("Postcondition failed for action to {:?}", action.to),
+                    pc: self.pc,
+                });
+            }
+        }
+        
+        Ok(())
+    }
+
+    /// Sets the postcondition block for the current transaction
+    pub fn set_postconditions(&mut self, postcode: KapraBytecode) {
+        self.postconditions = Some(postcode);
+    }
+
+    /// Deploys a new contract
+    pub fn deploy_contract(
+        &mut self,
+        bytecode: KapraBytecode,
+        sender: FixedArray<32>,
+        changelog: String,
+    ) -> Result<FixedArray<32>, RuntimeError> {
+        // Generate contract address from sender and bytecode
+        let mut hasher = Sha3_256::new();
+        hasher.update(&sender.0);
+        hasher.update(&bytecode.to_bytes());
+        let contract_id = FixedArray(hasher.finalize().into());
+
+        // Create metadata
+        let metadata = ContractMetadata {
+            contract_id,
+            version: 1,
+            version_hash: self.hash_bytecode(&bytecode),
+            changelog,
+            upgrade_key: sender,
+            deprecated: false,
+            upgrade_guardians: Vec::new(),
+        };
+
+        // Store contract data
+        self.contract_registry.insert(contract_id, metadata);
+        self.contract_bytecode.insert(contract_id, bytecode);
+
+        Ok(contract_id)
+    }
+
+    /// Upgrades an existing contract
+    pub fn upgrade_contract(
+        &mut self,
+        contract_id: FixedArray<32>,
+        new_bytecode: KapraBytecode,
+        new_version: u32,
+        changelog: String,
+    ) -> Result<(), RuntimeError> {
+        let sender = self.current_sender.ok_or_else(|| RuntimeError {
+            message: "No current sender set".to_string(),
+            pc: self.pc,
+        })?;
+
+        let metadata = self.contract_registry.get_mut(&contract_id)
+            .ok_or_else(|| RuntimeError {
+                message: format!("Contract not found: {:?}", contract_id),
+                pc: self.pc,
+            })?;
+
+        // Check authorization
+        if sender != metadata.upgrade_key {
+            // Check if sender is a guardian
+            if !metadata.upgrade_guardians.contains(&sender) {
+                return Err(RuntimeError {
+                    message: "Unauthorized upgrade".to_string(),
+                    pc: self.pc,
+                });
+            }
+        }
+
+        // Validate version
+        if new_version <= metadata.version {
+            return Err(RuntimeError {
+                message: "Version must increase".to_string(),
+                pc: self.pc,
+            });
+        }
+
+        // Update metadata
+        metadata.version = new_version;
+        metadata.version_hash = self.hash_bytecode(&new_bytecode);
+        metadata.changelog = changelog;
+
+        // Update bytecode
+        self.contract_bytecode.insert(contract_id, new_bytecode);
+
+        Ok(())
+    }
+
+    /// Gets contract metadata
+    pub fn get_contract_metadata(&self, contract_id: FixedArray<32>) -> Result<ContractMetadata, RuntimeError> {
+        self.contract_registry.get(&contract_id)
+            .cloned()
+            .ok_or_else(|| RuntimeError {
+                message: format!("Contract not found: {:?}", contract_id),
+                pc: self.pc,
+            })
+    }
+
+    /// Marks a contract as deprecated
+    pub fn deprecate_contract(&mut self, contract_id: FixedArray<32>) -> Result<(), RuntimeError> {
+        let sender = self.current_sender.ok_or_else(|| RuntimeError {
+            message: "No current sender set".to_string(),
+            pc: self.pc,
+        })?;
+
+        let metadata = self.contract_registry.get_mut(&contract_id)
+            .ok_or_else(|| RuntimeError {
+                message: format!("Contract not found: {:?}", contract_id),
+                pc: self.pc,
+            })?;
+
+        if sender != metadata.upgrade_key {
+            return Err(RuntimeError {
+                message: "Unauthorized deprecation".to_string(),
+                pc: self.pc,
+            });
+        }
+
+        metadata.deprecated = true;
+        Ok(())
+    }
+
+    /// Adds an upgrade guardian
+    pub fn add_upgrade_guardian(&mut self, contract_id: FixedArray<32>, guardian: FixedArray<32>) -> Result<(), RuntimeError> {
+        let sender = self.current_sender.ok_or_else(|| RuntimeError {
+            message: "No current sender set".to_string(),
+            pc: self.pc,
+        })?;
+
+        let metadata = self.contract_registry.get_mut(&contract_id)
+            .ok_or_else(|| RuntimeError {
+                message: format!("Contract not found: {:?}", contract_id),
+                pc: self.pc,
+            })?;
+
+        if sender != metadata.upgrade_key {
+            return Err(RuntimeError {
+                message: "Unauthorized guardian addition".to_string(),
+                pc: self.pc,
+            });
+        }
+
+        if !metadata.upgrade_guardians.contains(&guardian) {
+            metadata.upgrade_guardians.push(guardian);
+        }
+
+        Ok(())
+    }
+
+    /// Removes an upgrade guardian
+    pub fn remove_upgrade_guardian(&mut self, contract_id: FixedArray<32>, guardian: FixedArray<32>) -> Result<(), RuntimeError> {
+        let sender = self.current_sender.ok_or_else(|| RuntimeError {
+            message: "No current sender set".to_string(),
+            pc: self.pc,
+        })?;
+
+        let metadata = self.contract_registry.get_mut(&contract_id)
+            .ok_or_else(|| RuntimeError {
+                message: format!("Contract not found: {:?}", contract_id),
+                pc: self.pc,
+            })?;
+
+        if sender != metadata.upgrade_key {
+            return Err(RuntimeError {
+                message: "Unauthorized guardian removal".to_string(),
+                pc: self.pc,
+            });
+        }
+
+        metadata.upgrade_guardians.retain(|&g| g != guardian);
+        Ok(())
+    }
+
+    /// Hashes bytecode for version tracking
+    fn hash_bytecode(&self, bytecode: &KapraBytecode) -> FixedArray<32> {
+        let mut hasher = Sha3_256::new();
+        hasher.update(&bytecode.to_bytes());
+        FixedArray(hasher.finalize().into())
     }
 }
 
@@ -1961,5 +2516,856 @@ mod tests {
         
         // Verify auth stack is cleared after transaction
         assert!(vm.auth_stack.is_empty());
+    }
+
+    #[test]
+    fn test_gas_sponsorship() {
+        let mut vm = KapraVM::new(KapraBytecode::new(), None, Some(1000));
+        
+        // Create accounts
+        let sender = FixedArray([1; 32]);
+        let sponsor = FixedArray([2; 32]);
+        
+        vm.create_smart_account(sender, 100).unwrap();
+        vm.create_smart_account(sponsor, 1000).unwrap();
+        
+        // Set up sponsorship
+        let mut sender_account = vm.get_smart_account_mut(&sender).unwrap();
+        sender_account.set_sponsor(sponsor, 500);
+        
+        // Set current sender and setup sponsorship
+        vm.current_sender = Some(sender);
+        vm.setup_gas_sponsorship().unwrap();
+        
+        // Verify gas is charged to sponsor
+        assert_eq!(vm.gas_charged_to, sponsor);
+        
+        // Charge some gas
+        vm.charge_gas(100).unwrap();
+        
+        // Verify balances
+        let sponsor_account = vm.get_smart_account(&sponsor).unwrap();
+        assert_eq!(sponsor_account.balance, 900); // 1000 - 100
+        
+        let sender_account = vm.get_smart_account(&sender).unwrap();
+        assert_eq!(sender_account.balance, 100); // Unchanged
+    }
+
+    #[test]
+    fn test_gas_sponsorship_limit() {
+        let mut vm = KapraVM::new(KapraBytecode::new(), None, Some(1000));
+        
+        // Create accounts
+        let sender = FixedArray([1; 32]);
+        let sponsor = FixedArray([2; 32]);
+        
+        vm.create_smart_account(sender, 100).unwrap();
+        vm.create_smart_account(sponsor, 1000).unwrap();
+        
+        // Set up sponsorship with limit less than gas limit
+        let mut sender_account = vm.get_smart_account_mut(&sender).unwrap();
+        sender_account.set_sponsor(sponsor, 500);
+        
+        // Set current sender and setup sponsorship
+        vm.current_sender = Some(sender);
+        vm.setup_gas_sponsorship().unwrap();
+        
+        // Verify gas is charged to sender (since limit < gas_limit)
+        assert_eq!(vm.gas_charged_to, sender);
+    }
+
+    #[test]
+    fn test_remove_sponsor() {
+        let mut vm = KapraVM::new(KapraBytecode::new(), None, Some(1000));
+        
+        // Create accounts
+        let sender = FixedArray([1; 32]);
+        let sponsor = FixedArray([2; 32]);
+        
+        vm.create_smart_account(sender, 100).unwrap();
+        vm.create_smart_account(sponsor, 1000).unwrap();
+        
+        // Set up sponsorship
+        let mut sender_account = vm.get_smart_account_mut(&sender).unwrap();
+        sender_account.set_sponsor(sponsor, 500);
+        
+        // Remove sponsor
+        sender_account.remove_sponsor();
+        
+        // Set current sender and setup sponsorship
+        vm.current_sender = Some(sender);
+        vm.setup_gas_sponsorship().unwrap();
+        
+        // Verify gas is charged to sender (since no sponsor)
+        assert_eq!(vm.gas_charged_to, sender);
+    }
+
+    #[test]
+    fn test_atomic_batch_success() {
+        let mut vm = KapraVM::new(KapraBytecode::new(), None, Some(10000));
+        
+        // Create test accounts
+        let sender = FixedArray([1; 32]);
+        let target1 = FixedArray([2; 32]);
+        let target2 = FixedArray([3; 32]);
+        
+        vm.create_smart_account(sender, 1000).unwrap();
+        
+        // Create bytecode for two actions
+        let mut action1_bytecode = KapraBytecode::new();
+        action1_bytecode.add_instruction(KapraInstruction::new(
+            KapraOpCode::Mov,
+            vec![Operand::Register(0), Operand::Immediate(vec![42])],
+            Some(Type::U32),
+        ));
+        
+        let mut action2_bytecode = KapraBytecode::new();
+        action2_bytecode.add_instruction(KapraInstruction::new(
+            KapraOpCode::Mov,
+            vec![Operand::Register(1), Operand::Immediate(vec![24])],
+            Some(Type::U32),
+        ));
+        
+        // Create transaction context
+        let tx_context = TransactionContext {
+            sender,
+            actions: vec![
+                TxAction {
+                    to: target1,
+                    data: action1_bytecode.to_bytes(),
+                    gas: 5000,
+                },
+                TxAction {
+                    to: target2,
+                    data: action2_bytecode.to_bytes(),
+                    gas: 3000,
+                },
+            ],
+            sponsor: None,
+            gas_limit: 10000,
+            tx_id: 1,
+        };
+        
+        // Execute batch
+        let result = vm.run_transaction(tx_context);
+        assert!(result.is_ok());
+        
+        // Verify both actions were executed
+        assert_eq!(vm.registers[0], vec![42]);
+        assert_eq!(vm.registers[1], vec![24]);
+    }
+
+    #[test]
+    fn test_batch_failure_reverts_all() {
+        let mut vm = KapraVM::new(KapraBytecode::new(), None, Some(10000));
+        
+        // Create test accounts
+        let sender = FixedArray([1; 32]);
+        let target1 = FixedArray([2; 32]);
+        let target2 = FixedArray([3; 32]);
+        
+        vm.create_smart_account(sender, 1000).unwrap();
+        
+        // Create bytecode for two actions
+        let mut action1_bytecode = KapraBytecode::new();
+        action1_bytecode.add_instruction(KapraInstruction::new(
+            KapraOpCode::Mov,
+            vec![Operand::Register(0), Operand::Immediate(vec![42])],
+            Some(Type::U32),
+        ));
+        
+        let mut action2_bytecode = KapraBytecode::new();
+        action2_bytecode.add_instruction(KapraInstruction::new(
+            KapraOpCode::Fail, // This will cause the second action to fail
+            vec![],
+            None,
+        ));
+        
+        // Create transaction context
+        let tx_context = TransactionContext {
+            sender,
+            actions: vec![
+                TxAction {
+                    to: target1,
+                    data: action1_bytecode.to_bytes(),
+                    gas: 5000,
+                },
+                TxAction {
+                    to: target2,
+                    data: action2_bytecode.to_bytes(),
+                    gas: 3000,
+                },
+            ],
+            sponsor: None,
+            gas_limit: 10000,
+            tx_id: 1,
+        };
+        
+        // Execute batch
+        let result = vm.run_transaction(tx_context);
+        assert!(result.is_err());
+        
+        // Verify first action's state was reverted
+        assert_eq!(vm.registers[0], vec![0]); // Should be back to initial state
+    }
+
+    #[test]
+    fn test_batch_with_sponsor() {
+        let mut vm = KapraVM::new(KapraBytecode::new(), None, Some(10000));
+        
+        // Create test accounts
+        let sender = FixedArray([1; 32]);
+        let sponsor = FixedArray([2; 32]);
+        let target = FixedArray([3; 32]);
+        
+        vm.create_smart_account(sender, 100).unwrap();
+        vm.create_smart_account(sponsor, 1000).unwrap();
+        
+        // Set up sponsorship
+        let mut sender_account = vm.get_smart_account_mut(&sender).unwrap();
+        sender_account.set_sponsor(sponsor, 5000);
+        
+        // Create bytecode for action
+        let mut action_bytecode = KapraBytecode::new();
+        action_bytecode.add_instruction(KapraInstruction::new(
+            KapraOpCode::Mov,
+            vec![Operand::Register(0), Operand::Immediate(vec![42])],
+            Some(Type::U32),
+        ));
+        
+        // Create transaction context
+        let tx_context = TransactionContext {
+            sender,
+            actions: vec![
+                TxAction {
+                    to: target,
+                    data: action_bytecode.to_bytes(),
+                    gas: 3000,
+                },
+            ],
+            sponsor: Some(sponsor),
+            gas_limit: 5000,
+            tx_id: 1,
+        };
+        
+        // Execute batch
+        let result = vm.run_transaction(tx_context);
+        assert!(result.is_ok());
+        
+        // Verify gas was charged to sponsor
+        let sponsor_account = vm.get_smart_account(&sponsor).unwrap();
+        assert_eq!(sponsor_account.balance, 700); // 1000 - 300 gas
+        
+        let sender_account = vm.get_smart_account(&sender).unwrap();
+        assert_eq!(sender_account.balance, 100); // Unchanged
+    }
+
+    #[test]
+    fn test_transaction_id_generator() {
+        let mut generator = TransactionIdGenerator::new();
+        assert_eq!(generator.next(), 1);
+        assert_eq!(generator.next(), 2);
+        assert_eq!(generator.next(), 3);
+    }
+
+    #[test]
+    fn test_transaction_with_logging() {
+        let mut vm = KapraVM::new(KapraBytecode::new(), None, Some(10000));
+        
+        // Create test accounts
+        let sender = FixedArray([1; 32]);
+        let target1 = FixedArray([2; 32]);
+        let target2 = FixedArray([3; 32]);
+        
+        vm.create_smart_account(sender, 1000).unwrap();
+        
+        // Create bytecode for two actions
+        let mut action1_bytecode = KapraBytecode::new();
+        action1_bytecode.add_instruction(KapraInstruction::new(
+            KapraOpCode::Mov,
+            vec![Operand::Register(0), Operand::Immediate(vec![42])],
+            Some(Type::U32),
+        ));
+        
+        let mut action2_bytecode = KapraBytecode::new();
+        action2_bytecode.add_instruction(KapraInstruction::new(
+            KapraOpCode::Mov,
+            vec![Operand::Register(1), Operand::Immediate(vec![24])],
+            Some(Type::U32),
+        ));
+        
+        // Create transaction context
+        let tx_context = TransactionContext {
+            sender,
+            actions: vec![
+                TxAction {
+                    to: target1,
+                    data: action1_bytecode.to_bytes(),
+                    gas: 5000,
+                },
+                TxAction {
+                    to: target2,
+                    data: action2_bytecode.to_bytes(),
+                    gas: 3000,
+                },
+            ],
+            sponsor: None,
+            gas_limit: 10000,
+            tx_id: 1,
+        };
+        
+        // Execute batch with logging
+        let results = vm.run_transaction_with_logging(tx_context).unwrap();
+        
+        // Verify results
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].to, target1);
+        assert!(results[0].success);
+        assert!(results[0].error.is_none());
+        assert_eq!(results[1].to, target2);
+        assert!(results[1].success);
+        assert!(results[1].error.is_none());
+    }
+
+    #[test]
+    fn test_dynamic_sponsorship() {
+        let mut vm = KapraVM::new(KapraBytecode::new(), None, Some(10000));
+        
+        // Create test accounts
+        let sender = FixedArray([1; 32]);
+        let default_sponsor = FixedArray([2; 32]);
+        let dynamic_sponsor = FixedArray([3; 32]);
+        let target = FixedArray([4; 32]);
+        
+        vm.create_smart_account(sender, 100).unwrap();
+        vm.create_smart_account(default_sponsor, 1000).unwrap();
+        vm.create_smart_account(dynamic_sponsor, 2000).unwrap();
+        
+        // Set up default sponsorship
+        let mut sender_account = vm.get_smart_account_mut(&sender).unwrap();
+        sender_account.set_sponsor(default_sponsor, 5000);
+        
+        // Create bytecode for action
+        let mut action_bytecode = KapraBytecode::new();
+        action_bytecode.add_instruction(KapraInstruction::new(
+            KapraOpCode::Mov,
+            vec![Operand::Register(0), Operand::Immediate(vec![42])],
+            Some(Type::U32),
+        ));
+        
+        // Create transaction context with dynamic sponsor
+        let tx_context = TransactionContext {
+            sender,
+            actions: vec![
+                TxAction {
+                    to: target,
+                    data: action_bytecode.to_bytes(),
+                    gas: 3000,
+                },
+            ],
+            sponsor: Some(dynamic_sponsor), // Override default sponsor
+            gas_limit: 5000,
+            tx_id: 1,
+        };
+        
+        // Execute batch
+        let result = vm.run_transaction(tx_context);
+        assert!(result.is_ok());
+        
+        // Verify gas was charged to dynamic sponsor
+        let dynamic_sponsor_account = vm.get_smart_account(&dynamic_sponsor).unwrap();
+        assert_eq!(dynamic_sponsor_account.balance, 1700); // 2000 - 300 gas
+        
+        let default_sponsor_account = vm.get_smart_account(&default_sponsor).unwrap();
+        assert_eq!(default_sponsor_account.balance, 1000); // Unchanged
+        
+        let sender_account = vm.get_smart_account(&sender).unwrap();
+        assert_eq!(sender_account.balance, 100); // Unchanged
+    }
+
+    #[test]
+    fn test_postcondition_success() {
+        let runtime = Arc::new(Runtime::new().unwrap());
+        let mut vm = KapraVM::new(KapraBytecode::new(), Some(runtime.clone()), Some(1000));
+
+        // Create test accounts
+        let sender = FixedArray::from([1u8; 32]);
+        let recipient = FixedArray::from([2u8; 32]);
+        vm.create_smart_account(sender, 1000);
+        vm.create_smart_account(recipient, 0);
+
+        // Create bytecode that transfers 100 and sets a value
+        let mut bytecode = KapraBytecode::new();
+        bytecode.push(KapraOpCode::Push(100));
+        bytecode.push(KapraOpCode::Store(0));
+        bytecode.push(KapraOpCode::Push(100));
+        bytecode.push(KapraOpCode::Transfer(recipient));
+
+        // Create postcondition bytecode that verifies the transfer
+        let mut postcode = KapraBytecode::new();
+        postcode.push(KapraOpCode::Load(0));
+        postcode.push(KapraOpCode::Push(100));
+        postcode.push(KapraOpCode::Assert);
+
+        vm.set_postconditions(postcode);
+
+        let tx_context = TransactionContext {
+            sender,
+            actions: vec![TxAction {
+                to: recipient,
+                data: bytecode.to_bytes(),
+                gas: 1000,
+            }],
+            sponsor: None,
+            gas_limit: 1000,
+            tx_id: 1,
+        };
+
+        let result = vm.run_transaction(tx_context);
+        assert!(result.is_ok());
+
+        // Verify the transfer happened
+        let recipient_account = vm.get_smart_account(recipient).unwrap();
+        assert_eq!(recipient_account.balance, 100);
+    }
+
+    #[test]
+    fn test_postcondition_failure() {
+        let runtime = Arc::new(Runtime::new().unwrap());
+        let mut vm = KapraVM::new(KapraBytecode::new(), Some(runtime.clone()), Some(1000));
+
+        // Create test accounts
+        let sender = FixedArray::from([1u8; 32]);
+        let recipient = FixedArray::from([2u8; 32]);
+        vm.create_smart_account(sender, 1000);
+        vm.create_smart_account(recipient, 0);
+
+        // Create bytecode that transfers 100
+        let mut bytecode = KapraBytecode::new();
+        bytecode.push(KapraOpCode::Push(100));
+        bytecode.push(KapraOpCode::Transfer(recipient));
+
+        // Create postcondition bytecode that expects 200
+        let mut postcode = KapraBytecode::new();
+        postcode.push(KapraOpCode::Push(200));
+        postcode.push(KapraOpCode::Assert);
+
+        vm.set_postconditions(postcode);
+
+        let tx_context = TransactionContext {
+            sender,
+            actions: vec![TxAction {
+                to: recipient,
+                data: bytecode.to_bytes(),
+                gas: 1000,
+            }],
+            sponsor: None,
+            gas_limit: 1000,
+            tx_id: 1,
+        };
+
+        let result = vm.run_transaction(tx_context);
+        assert!(result.is_err());
+
+        // Verify the transfer was rolled back
+        let recipient_account = vm.get_smart_account(recipient).unwrap();
+        assert_eq!(recipient_account.balance, 0);
+    }
+
+    #[test]
+    fn test_postcondition_in_batch() {
+        let runtime = Arc::new(Runtime::new().unwrap());
+        let mut vm = KapraVM::new(KapraBytecode::new(), Some(runtime.clone()), Some(1000));
+
+        // Create test accounts
+        let sender = FixedArray::from([1u8; 32]);
+        let recipient1 = FixedArray::from([2u8; 32]);
+        let recipient2 = FixedArray::from([3u8; 32]);
+        vm.create_smart_account(sender, 1000);
+        vm.create_smart_account(recipient1, 0);
+        vm.create_smart_account(recipient2, 0);
+
+        // Create bytecode for first action
+        let mut bytecode1 = KapraBytecode::new();
+        bytecode1.push(KapraOpCode::Push(100));
+        bytecode1.push(KapraOpCode::Transfer(recipient1));
+
+        // Create bytecode for second action
+        let mut bytecode2 = KapraBytecode::new();
+        bytecode2.push(KapraOpCode::Push(200));
+        bytecode2.push(KapraOpCode::Transfer(recipient2));
+
+        // Create postcondition bytecode that verifies both transfers
+        let mut postcode = KapraBytecode::new();
+        postcode.push(KapraOpCode::Push(100));
+        postcode.push(KapraOpCode::Assert);
+        postcode.push(KapraOpCode::Push(200));
+        postcode.push(KapraOpCode::Assert);
+
+        vm.set_postconditions(postcode);
+
+        let tx_context = TransactionContext {
+            sender,
+            actions: vec![
+                TxAction {
+                    to: recipient1,
+                    data: bytecode1.to_bytes(),
+                    gas: 500,
+                },
+                TxAction {
+                    to: recipient2,
+                    data: bytecode2.to_bytes(),
+                    gas: 500,
+                },
+            ],
+            sponsor: None,
+            gas_limit: 1000,
+            tx_id: 1,
+        };
+
+        let result = vm.run_transaction(tx_context);
+        assert!(result.is_ok());
+
+        // Verify both transfers happened
+        let recipient1_account = vm.get_smart_account(recipient1).unwrap();
+        let recipient2_account = vm.get_smart_account(recipient2).unwrap();
+        assert_eq!(recipient1_account.balance, 100);
+        assert_eq!(recipient2_account.balance, 200);
+    }
+
+    #[test]
+    fn test_sponsor_gas_on_failure() {
+        let runtime = Arc::new(Runtime::new().unwrap());
+        let mut vm = KapraVM::new(KapraBytecode::new(), Some(runtime.clone()), Some(1000));
+
+        // Create test accounts
+        let sender = FixedArray::from([1u8; 32]);
+        let sponsor = FixedArray::from([2u8; 32]);
+        let recipient = FixedArray::from([3u8; 32]);
+        vm.create_smart_account(sender, 1000);
+        vm.create_smart_account(sponsor, 2000);
+        vm.create_smart_account(recipient, 0);
+
+        // Set up sponsorship
+        let sponsor_account = vm.get_smart_account_mut(&sender).unwrap();
+        sponsor_account.set_sponsor(sponsor, 1000);
+
+        // Create bytecode that transfers 100
+        let mut bytecode = KapraBytecode::new();
+        bytecode.push(KapraOpCode::Push(100));
+        bytecode.push(KapraOpCode::Transfer(recipient));
+
+        // Create postcondition bytecode that will fail
+        let mut postcode = KapraBytecode::new();
+        postcode.push(KapraOpCode::Push(200)); // Expect 200 but we only transferred 100
+        postcode.push(KapraOpCode::Assert);
+
+        vm.set_postconditions(postcode);
+
+        let tx_context = TransactionContext {
+            sender,
+            actions: vec![TxAction {
+                to: recipient,
+                data: bytecode.to_bytes(),
+                gas: 1000,
+            }],
+            sponsor: Some(sponsor),
+            gas_limit: 1000,
+            tx_id: 1,
+        };
+
+        let result = vm.run_transaction(tx_context);
+        assert!(result.is_err());
+
+        // Verify the transfer was rolled back
+        let recipient_account = vm.get_smart_account(&recipient).unwrap();
+        assert_eq!(recipient_account.balance, 0);
+
+        // Verify gas was charged to sponsor even though transaction failed
+        let sponsor_account = vm.get_smart_account(&sponsor).unwrap();
+        assert_eq!(sponsor_account.balance, 1700); // 2000 - 300 gas
+    }
+
+    #[test]
+    fn test_manual_verify_assert() {
+        let runtime = Arc::new(Runtime::new().unwrap());
+        let mut vm = KapraVM::new(KapraBytecode::new(), Some(runtime.clone()), Some(1000));
+
+        // Create test accounts
+        let sender = FixedArray::from([1u8; 32]);
+        let recipient = FixedArray::from([2u8; 32]);
+        vm.create_smart_account(sender, 1000);
+        vm.create_smart_account(recipient, 0);
+
+        // Create bytecode that uses Verify and Assert manually
+        let mut bytecode = KapraBytecode::new();
+        bytecode.push(KapraOpCode::Push(100));
+        bytecode.push(KapraOpCode::Store(0)); // Store 100 in register 0
+        bytecode.push(KapraOpCode::Verify); // Start verify block
+        bytecode.push(KapraOpCode::Load(0)); // Load value from register 0
+        bytecode.push(KapraOpCode::Push(100)); // Push expected value
+        bytecode.push(KapraOpCode::Assert); // Assert they are equal
+        bytecode.push(KapraOpCode::Push(100));
+        bytecode.push(KapraOpCode::Transfer(recipient));
+
+        let tx_context = TransactionContext {
+            sender,
+            actions: vec![TxAction {
+                to: recipient,
+                data: bytecode.to_bytes(),
+                gas: 1000,
+            }],
+            sponsor: None,
+            gas_limit: 1000,
+            tx_id: 1,
+        };
+
+        let result = vm.run_transaction(tx_context);
+        assert!(result.is_ok());
+
+        // Verify the transfer happened
+        let recipient_account = vm.get_smart_account(&recipient).unwrap();
+        assert_eq!(recipient_account.balance, 100);
+    }
+
+    #[test]
+    fn test_contract_deployment() {
+        let mut vm = KapraVM::new(KapraBytecode::new(), None, Some(1000));
+        
+        // Create test account
+        let sender = FixedArray([1; 32]);
+        vm.create_smart_account(sender, 1000).unwrap();
+        vm.current_sender = Some(sender);
+
+        // Create test bytecode
+        let mut bytecode = KapraBytecode::new();
+        bytecode.push(KapraOpCode::Push(42));
+        bytecode.push(KapraOpCode::Halt);
+
+        // Deploy contract
+        let contract_id = vm.deploy_contract(
+            bytecode.clone(),
+            sender,
+            "Initial deployment".to_string(),
+        ).unwrap();
+
+        // Verify metadata
+        let metadata = vm.get_contract_metadata(contract_id).unwrap();
+        assert_eq!(metadata.version, 1);
+        assert_eq!(metadata.upgrade_key, sender);
+        assert!(!metadata.deprecated);
+        assert!(metadata.upgrade_guardians.is_empty());
+
+        // Verify bytecode is stored
+        assert!(vm.contract_bytecode.contains_key(&contract_id));
+    }
+
+    #[test]
+    fn test_contract_upgrade() {
+        let mut vm = KapraVM::new(KapraBytecode::new(), None, Some(1000));
+        
+        // Create test accounts
+        let sender = FixedArray([1; 32]);
+        let guardian = FixedArray([2; 32]);
+        vm.create_smart_account(sender, 1000).unwrap();
+        vm.create_smart_account(guardian, 1000).unwrap();
+        vm.current_sender = Some(sender);
+
+        // Deploy initial contract
+        let mut bytecode = KapraBytecode::new();
+        bytecode.push(KapraOpCode::Push(42));
+        bytecode.push(KapraOpCode::Halt);
+
+        let contract_id = vm.deploy_contract(
+            bytecode.clone(),
+            sender,
+            "Initial deployment".to_string(),
+        ).unwrap();
+
+        // Add guardian
+        vm.add_upgrade_guardian(contract_id, guardian).unwrap();
+
+        // Upgrade as guardian
+        vm.current_sender = Some(guardian);
+        let mut new_bytecode = KapraBytecode::new();
+        new_bytecode.push(KapraOpCode::Push(43));
+        new_bytecode.push(KapraOpCode::Halt);
+
+        vm.upgrade_contract(
+            contract_id,
+            new_bytecode.clone(),
+            2,
+            "Upgrade to v2".to_string(),
+        ).unwrap();
+
+        // Verify metadata
+        let metadata = vm.get_contract_metadata(contract_id).unwrap();
+        assert_eq!(metadata.version, 2);
+        assert_eq!(metadata.upgrade_key, sender);
+        assert!(!metadata.deprecated);
+        assert!(metadata.upgrade_guardians.contains(&guardian));
+
+        // Verify new bytecode is stored
+        assert_eq!(vm.contract_bytecode.get(&contract_id).unwrap(), &new_bytecode);
+    }
+
+    #[test]
+    fn test_unauthorized_upgrade() {
+        let mut vm = KapraVM::new(KapraBytecode::new(), None, Some(1000));
+        
+        // Create test accounts
+        let sender = FixedArray([1; 32]);
+        let unauthorized = FixedArray([2; 32]);
+        vm.create_smart_account(sender, 1000).unwrap();
+        vm.create_smart_account(unauthorized, 1000).unwrap();
+        vm.current_sender = Some(sender);
+
+        // Deploy contract
+        let mut bytecode = KapraBytecode::new();
+        bytecode.push(KapraOpCode::Push(42));
+        bytecode.push(KapraOpCode::Halt);
+
+        let contract_id = vm.deploy_contract(
+            bytecode.clone(),
+            sender,
+            "Initial deployment".to_string(),
+        ).unwrap();
+
+        // Try to upgrade as unauthorized user
+        vm.current_sender = Some(unauthorized);
+        let mut new_bytecode = KapraBytecode::new();
+        new_bytecode.push(KapraOpCode::Push(43));
+        new_bytecode.push(KapraOpCode::Halt);
+
+        let result = vm.upgrade_contract(
+            contract_id,
+            new_bytecode,
+            2,
+            "Unauthorized upgrade".to_string(),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_downgrade_prevention() {
+        let mut vm = KapraVM::new(KapraBytecode::new(), None, Some(1000));
+        
+        // Create test account
+        let sender = FixedArray([1; 32]);
+        vm.create_smart_account(sender, 1000).unwrap();
+        vm.current_sender = Some(sender);
+
+        // Deploy contract
+        let mut bytecode = KapraBytecode::new();
+        bytecode.push(KapraOpCode::Push(42));
+        bytecode.push(KapraOpCode::Halt);
+
+        let contract_id = vm.deploy_contract(
+            bytecode.clone(),
+            sender,
+            "Initial deployment".to_string(),
+        ).unwrap();
+
+        // Try to upgrade to same version
+        let result = vm.upgrade_contract(
+            contract_id,
+            bytecode,
+            1,
+            "Same version upgrade".to_string(),
+        );
+        assert!(result.is_err());
+
+        // Try to upgrade to lower version
+        let mut new_bytecode = KapraBytecode::new();
+        new_bytecode.push(KapraOpCode::Push(43));
+        new_bytecode.push(KapraOpCode::Halt);
+
+        let result = vm.upgrade_contract(
+            contract_id,
+            new_bytecode,
+            0,
+            "Downgrade attempt".to_string(),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_contract_deprecation() {
+        let mut vm = KapraVM::new(KapraBytecode::new(), None, Some(1000));
+        
+        // Create test accounts
+        let sender = FixedArray([1; 32]);
+        let unauthorized = FixedArray([2; 32]);
+        vm.create_smart_account(sender, 1000).unwrap();
+        vm.create_smart_account(unauthorized, 1000).unwrap();
+        vm.current_sender = Some(sender);
+
+        // Deploy contract
+        let mut bytecode = KapraBytecode::new();
+        bytecode.push(KapraOpCode::Push(42));
+        bytecode.push(KapraOpCode::Halt);
+
+        let contract_id = vm.deploy_contract(
+            bytecode.clone(),
+            sender,
+            "Initial deployment".to_string(),
+        ).unwrap();
+
+        // Deprecate contract
+        vm.deprecate_contract(contract_id).unwrap();
+
+        // Verify metadata
+        let metadata = vm.get_contract_metadata(contract_id).unwrap();
+        assert!(metadata.deprecated);
+
+        // Try to deprecate as unauthorized user
+        vm.current_sender = Some(unauthorized);
+        let result = vm.deprecate_contract(contract_id);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_guardian_management() {
+        let mut vm = KapraVM::new(KapraBytecode::new(), None, Some(1000));
+        
+        // Create test accounts
+        let sender = FixedArray([1; 32]);
+        let guardian = FixedArray([2; 32]);
+        let unauthorized = FixedArray([3; 32]);
+        vm.create_smart_account(sender, 1000).unwrap();
+        vm.create_smart_account(guardian, 1000).unwrap();
+        vm.create_smart_account(unauthorized, 1000).unwrap();
+        vm.current_sender = Some(sender);
+
+        // Deploy contract
+        let mut bytecode = KapraBytecode::new();
+        bytecode.push(KapraOpCode::Push(42));
+        bytecode.push(KapraOpCode::Halt);
+
+        let contract_id = vm.deploy_contract(
+            bytecode.clone(),
+            sender,
+            "Initial deployment".to_string(),
+        ).unwrap();
+
+        // Add guardian
+        vm.add_upgrade_guardian(contract_id, guardian).unwrap();
+
+        // Verify guardian was added
+        let metadata = vm.get_contract_metadata(contract_id).unwrap();
+        assert!(metadata.upgrade_guardians.contains(&guardian));
+
+        // Try to add guardian as unauthorized user
+        vm.current_sender = Some(unauthorized);
+        let result = vm.add_upgrade_guardian(contract_id, unauthorized);
+        assert!(result.is_err());
+
+        // Remove guardian as authorized user
+        vm.current_sender = Some(sender);
+        vm.remove_upgrade_guardian(contract_id, guardian).unwrap();
+
+        // Verify guardian was removed
+        let metadata = vm.get_contract_metadata(contract_id).unwrap();
+        assert!(!metadata.upgrade_guardians.contains(&guardian));
     }
 }

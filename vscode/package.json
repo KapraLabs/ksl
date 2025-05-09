@@ -1,0 +1,123 @@
+{
+    "name": "ksl-language",
+    "displayName": "KSL Language Support",
+    "description": "Language support for KSL (Kapra Smart Language)",
+    "version": "0.1.0",
+    "publisher": "kapra",
+    "engines": {
+        "vscode": "^1.60.0"
+    },
+    "categories": [
+        "Programming Languages",
+        "Snippets",
+        "Other"
+    ],
+    "activationEvents": [
+        "onLanguage:ksl",
+        "onCommand:ksl.exportIR",
+        "onCommand:ksl.exportABI",
+        "onCommand:ksl.deployToTestnet",
+        "onCommand:ksl.simulateFunction"
+    ],
+    "main": "./out/extension.js",
+    "contributes": {
+        "languages": [
+            {
+                "id": "ksl",
+                "aliases": [
+                    "Kapra Smart Language",
+                    "ksl"
+                ],
+                "extensions": [
+                    ".ksl"
+                ],
+                "configuration": "./language-configuration.json"
+            }
+        ],
+        "grammars": [
+            {
+                "language": "ksl",
+                "scopeName": "source.ksl",
+                "path": "./syntaxes/ksl.tmLanguage.json"
+            }
+        ],
+        "commands": [
+            {
+                "command": "ksl.exportIR",
+                "title": "KSL: Export IR",
+                "category": "KSL"
+            },
+            {
+                "command": "ksl.exportABI",
+                "title": "KSL: Export ABI",
+                "category": "KSL"
+            },
+            {
+                "command": "ksl.deployToTestnet",
+                "title": "KSL: Deploy to Testnet",
+                "category": "KSL"
+            },
+            {
+                "command": "ksl.simulateFunction",
+                "title": "KSL: Simulate Function Call",
+                "category": "KSL"
+            }
+        ],
+        "viewsContainers": {
+            "activitybar": [
+                {
+                    "id": "ksl-explorer",
+                    "title": "KSL Explorer",
+                    "icon": "resources/kapra.svg"
+                }
+            ]
+        },
+        "views": {
+            "ksl-explorer": [
+                {
+                    "id": "kslIRView",
+                    "name": "IR Viewer"
+                }
+            ]
+        },
+        "configuration": {
+            "title": "KSL",
+            "properties": {
+                "ksl.trace.server": {
+                    "type": "string",
+                    "enum": [
+                        "off",
+                        "messages",
+                        "verbose"
+                    ],
+                    "default": "off",
+                    "description": "Traces the communication between VS Code and the KSL language server."
+                },
+                "ksl.testnetUrl": {
+                    "type": "string",
+                    "default": "http://localhost:8545",
+                    "description": "URL of the Kapra testnet to deploy contracts to."
+                }
+            }
+        }
+    },
+    "scripts": {
+        "vscode:prepublish": "npm run compile",
+        "compile": "tsc -p ./",
+        "watch": "tsc -watch -p ./",
+        "lint": "eslint src --ext ts"
+    },
+    "dependencies": {
+        "vscode-languageclient": "^7.0.0",
+        "vscode-languageserver": "^7.0.0",
+        "vscode-languageserver-textdocument": "^1.0.1"
+    },
+    "devDependencies": {
+        "@types/node": "^14.18.63",
+        "@types/vscode": "^1.99.1",
+        "@typescript-eslint/eslint-plugin": "^4.19.0",
+        "@typescript-eslint/parser": "^4.19.0",
+        "eslint": "^7.22.0",
+        "typescript": "^4.2.3"
+    }
+}

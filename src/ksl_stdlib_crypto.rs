@@ -25,7 +25,10 @@ use blst::{
     },
     BLST_ERROR,
 };
+#[cfg(not(target_arch = "wasm32"))]
 use pqcrypto_dilithium::dilithium5;
+
+#[cfg(not(target_arch = "wasm32"))]
 use pqcrypto_traits::sign::{
     DetachedSignature as DilithiumSignature,
     PublicKey as DilithiumPublicKey,
@@ -298,6 +301,7 @@ impl Crypto {
     }
 
     /// Sign message with Dilithium
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn dilithium_sign(&self, sk: &DilithiumSecretKey, message: &[u8]) -> Result<DilithiumSignature, KslError> {
         Ok(dilithium5::sign_detached(message, sk))
     }

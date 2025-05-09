@@ -1,0 +1,33 @@
+[plugin]
+name = "ksl_iot"
+namespace = "iot"
+version = "0.1.0"
+description = "IoT device operations for KSL contracts"
+
+[[plugin.op]]
+name = "read_sensor"
+args = ["String", "String"]  # device_id, sensor_type
+returns = "F64"
+handler = "native"
+description = "Read value from a sensor"
+
+[[plugin.op]]
+name = "ping"
+args = ["String"]  # device_id
+returns = "Bool"
+handler = "native"
+description = "Check if a device is online"
+
+[[plugin.op]]
+name = "set_actuator"
+args = ["String", "String", "F64"]  # device_id, actuator_type, value
+returns = "Bool"
+handler = "native"
+description = "Set an actuator value"
+
+[[plugin.op]]
+name = "get_device_status"
+args = ["String"]  # device_id
+returns = "Map<String, String>"
+handler = "native"
+description = "Get device status information" 

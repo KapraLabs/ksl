@@ -1,0 +1,43 @@
+// Example KSL program using the IoT plugin
+use plugin "ksl_iot" iot
+
+fn monitor_temperature() requires { iot } {
+    let device_id = "temp_sensor_01";
+    
+    // Check if device is online
+    let online = iot::ping(device_id);
+    assert(online, "Device offline");
+
+    // Get device status
+    let status = iot::get_device_status(device_id);
+    assert(status["status"] == "online");
+    assert(status["battery"] > "20%");
+
+    // Read temperature
+    let temp = iot::read_sensor(device_id, "temperature");
+    
+    // Control cooling if needed
+    if temp > 25.0 {
+        let success = iot::set_actuator(
+            "cooler_01",
+            "power",
+            100.0  // Full power
+        );
+        assert(success, "Failed to activate cooling");
+    }
+}
+
+fn monitor_multiple_sensors() requires { iot } {
+    let devices = ["sensor_01", "sensor_02", "sensor_03"];
+    let readings = [];
+
+    for device_id in devices {
+        if iot::ping(device_id) {
+            let temp = iot::read_sensor(device_id, "temperature");
+            let humidity = iot::read_sensor(device_id, "humidity");
+            readings.push((device_id, temp, humidity));
+        }
+    }
+
+    return readings;
+} 

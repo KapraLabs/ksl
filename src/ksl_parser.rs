@@ -47,7 +47,7 @@ enum Token {
 
 /// AST node types representing KSL program structure.
 #[derive(Debug, PartialEq)]
-enum AstNode {
+pub enum AstNode {
     VarDecl {
         is_mutable: bool,               // true for let/var, false for const
         name: String,
@@ -59,6 +59,7 @@ enum AstNode {
         name: String,
         params: Vec<(String, TypeAnnotation)>, // (name, type)
         return_type: TypeAnnotation,
+        required_capabilities: Vec<String>,
         body: Vec<AstNode>,
         attributes: Vec<Attribute>,
     },
@@ -105,6 +106,34 @@ enum AstNode {
     },
     VerifyBlock {
         conditions: Vec<AstNode>,
+    },
+    /// Plugin declaration
+    PluginDecl {
+        name: String,
+        namespace: String,
+        version: String,
+        ops: Vec<PluginOp>,
+    },
+    /// Plugin operation declaration
+    PluginOp {
+        name: String,
+        signature: Vec<TypeAnnotation>,
+        return_type: TypeAnnotation,
+        handler: PluginHandler,
+    },
+    /// Plugin operation handler
+    PluginHandler {
+        kind: String, // "native", "wasm", or "syscall"
+        name: String,
+    },
+    /// Plugin usage declaration
+    UsePlugin {
+        name: String,
+        namespace: String,
+    },
+    /// Dynamic capability request
+    RequestCapability {
+        capability: String,
     },
 }
 
@@ -374,6 +403,9 @@ impl<'a> Parser<'a> {
             Token::Keyword(k) if k == "match" => self.parse_match(),
             Token::Keyword(k) if k == "macro" => self.parse_macro_def(),
             Token::Keyword(k) if k == "verify" => self.parse_verify_block(),
+            Token::Keyword(k) if k == "plugin" => self.parse_plugin_decl(),
+            Token::Keyword(k) if k == "use" => self.parse_use_plugin(),
+            Token::Keyword(k) if k == "request_capability" => self.parse_capability_request(),
             _ => self.parse_expr(),
         }
     }
@@ -435,6 +467,32 @@ impl<'a> Parser<'a> {
         let params = self.parse_params()?;
         self.expect(Token::Symbol(")".to_string()))?;
 
+        // Parse requires clause if present
+        let required_capabilities = if self.current == Token::Keyword("requires".to_string()) {
+            self.advance()?;
+            self.expect(Token::Symbol("{".to_string()))?;
+            let mut capabilities = Vec::new();
+            while self.current != Token::Symbol("}".to_string()) {
+                match &self.current {
+                    Token::Ident(cap) => {
+                        capabilities.push(cap.clone());
+                        self.advance()?;
+                        if self.current == Token::Symbol(",".to_string()) {
+                            self.advance()?;
+                        }
+                    }
+                    _ => return Err(ParseError {
+                        message: "Expected capability name".to_string(),
+                        position: self.lexer.position,
+                    }),
+                }
+            }
+            self.expect(Token::Symbol("}".to_string()))?;
+            capabilities
+        } else {
+            Vec::new()
+        };
+
         self.expect(Token::Symbol(":".to_string()))?;
         let return_type = self.parse_type_annotation()?;
 
@@ -450,6 +508,7 @@ impl<'a> Parser<'a> {
             name,
             params,
             return_type,
+            required_capabilities,
             body,
             attributes,
         })
@@ -1004,6 +1063,210 @@ impl<'a> Parser<'a> {
         
         Ok(AstNode::VerifyBlock { conditions })
     }
+
+    /// Parse a plugin declaration
+    fn parse_plugin_decl(&mut self) -> Result<AstNode, ParseError> {
+        self.expect(Token::Keyword("plugin".to_string()))?;
+        
+        // Parse plugin name
+        let name = match &self.current {
+            Token::Ident(name) => {
+                let name = name.clone();
+                self.advance()?;
+                name
+            }
+            _ => return Err(ParseError {
+                message: "Expected plugin name".to_string(),
+                position: self.lexer.position,
+            }),
+        };
+        
+        // Parse namespace
+        self.expect(Token::Symbol(":".to_string()))?;
+        let namespace = match &self.current {
+            Token::Ident(ns) => {
+                let ns = ns.clone();
+                self.advance()?;
+                ns
+            }
+            _ => return Err(ParseError {
+                message: "Expected plugin namespace".to_string(),
+                position: self.lexer.position,
+            }),
+        };
+        
+        // Parse version
+        self.expect(Token::Symbol("=".to_string()))?;
+        let version = match &self.current {
+            Token::String(ver) => {
+                let ver = ver.clone();
+                self.advance()?;
+                ver
+            }
+            _ => return Err(ParseError {
+                message: "Expected plugin version".to_string(),
+                position: self.lexer.position,
+            }),
+        };
+        
+        // Parse operations
+        self.expect(Token::Symbol("{".to_string()))?;
+        let mut ops = Vec::new();
+        while self.current != Token::Symbol("}".to_string()) {
+            ops.push(self.parse_plugin_op()?);
+            if self.current == Token::Symbol(",".to_string()) {
+                self.advance()?;
+            }
+        }
+        self.expect(Token::Symbol("}".to_string()))?;
+        
+        Ok(AstNode::PluginDecl {
+            name,
+            namespace,
+            version,
+            ops,
+        })
+    }
+    
+    /// Parse a plugin operation
+    fn parse_plugin_op(&mut self) -> Result<PluginOp, ParseError> {
+        // Parse operation name
+        let name = match &self.current {
+            Token::Ident(name) => {
+                let name = name.clone();
+                self.advance()?;
+                name
+            }
+            _ => return Err(ParseError {
+                message: "Expected operation name".to_string(),
+                position: self.lexer.position,
+            }),
+        };
+        
+        // Parse signature
+        self.expect(Token::Symbol("(".to_string()))?;
+        let mut signature = Vec::new();
+        if self.current != Token::Symbol(")".to_string()) {
+            loop {
+                signature.push(self.parse_type_annotation()?);
+                if self.current == Token::Symbol(",".to_string()) {
+                    self.advance()?;
+                } else {
+                    break;
+                }
+            }
+        }
+        self.expect(Token::Symbol(")".to_string()))?;
+        
+        // Parse return type
+        self.expect(Token::Symbol(":".to_string()))?;
+        let return_type = self.parse_type_annotation()?;
+        
+        // Parse handler
+        self.expect(Token::Symbol("=>".to_string()))?;
+        let handler = self.parse_plugin_handler()?;
+        
+        Ok(PluginOp {
+            name,
+            signature,
+            return_type,
+            handler,
+        })
+    }
+    
+    /// Parse a plugin handler
+    fn parse_plugin_handler(&mut self) -> Result<PluginHandler, ParseError> {
+        let kind = match &self.current {
+            Token::Ident(k) => {
+                let k = k.clone();
+                self.advance()?;
+                k
+            }
+            _ => return Err(ParseError {
+                message: "Expected handler kind".to_string(),
+                position: self.lexer.position,
+            }),
+        };
+        
+        self.expect(Token::Symbol("(".to_string()))?;
+        let name = match &self.current {
+            Token::String(n) => {
+                let n = n.clone();
+                self.advance()?;
+                n
+            }
+            _ => return Err(ParseError {
+                message: "Expected handler name".to_string(),
+                position: self.lexer.position,
+            }),
+        };
+        self.expect(Token::Symbol(")".to_string()))?;
+        
+        Ok(PluginHandler {
+            kind,
+            name,
+        })
+    }
+    
+    /// Parse a plugin usage declaration
+    fn parse_use_plugin(&mut self) -> Result<AstNode, ParseError> {
+        self.expect(Token::Keyword("use".to_string()))?;
+        self.expect(Token::Keyword("plugin".to_string()))?;
+        
+        // Parse plugin name
+        let name = match &self.current {
+            Token::String(name) => {
+                let name = name.clone();
+                self.advance()?;
+                name
+            }
+            _ => return Err(ParseError {
+                message: "Expected plugin name".to_string(),
+                position: self.lexer.position,
+            }),
+        };
+        
+        // Parse namespace
+        let namespace = match &self.current {
+            Token::Ident(ns) => {
+                let ns = ns.clone();
+                self.advance()?;
+                ns
+            }
+            _ => return Err(ParseError {
+                message: "Expected plugin namespace".to_string(),
+                position: self.lexer.position,
+            }),
+        };
+        
+        Ok(AstNode::UsePlugin {
+            name,
+            namespace,
+        })
+    }
+
+    /// Parse a dynamic capability request
+    fn parse_capability_request(&mut self) -> Result<AstNode, ParseError> {
+        self.advance()?; // Skip 'request_capability'
+        self.expect(Token::Symbol("(".to_string()))?;
+
+        let capability = match &self.current {
+            Token::String(cap) => {
+                let cap = cap.clone();
+                self.advance()?;
+                cap
+            }
+            _ => return Err(ParseError {
+                message: "Expected capability name as string".to_string(),
+                position: self.lexer.position,
+            }),
+        };
+
+        self.expect(Token::Symbol(")".to_string()))?;
+        self.expect(Token::Symbol(";".to_string()))?;
+
+        Ok(AstNode::RequestCapability { capability })
+    }
 }
 
 /// Public API to parse KSL source code into an AST.
@@ -1073,6 +1336,7 @@ mod tests {
                     ("y".to_string(), TypeAnnotation::Simple("u32".to_string()))
                 ],
                 return_type: TypeAnnotation::Simple("u32".to_string()),
+                required_capabilities: Vec::new(),
                 body: vec![AstNode::Expr {
                     kind: ExprKind::BinaryOp {
                         op: "+".to_string(),
@@ -1385,6 +1649,159 @@ mod tests {
             }
         } else {
             panic!("Expected VerifyBlock");
+        }
+    }
+
+    #[test]
+    fn test_parse_plugin_decl() {
+        let input = r#"
+            plugin ksl_ai: ai = "1.0.0" {
+                infer(model: String, input: Array<u8>): Float => native("infer_handler"),
+                train(model: String, data: Array<u8>): Bool => wasm("train.wasm")
+            }
+        "#;
+        let ast = parse(input).unwrap();
+        assert!(matches!(ast[0], AstNode::PluginDecl { .. }));
+    }
+    
+    #[test]
+    fn test_parse_use_plugin() {
+        let input = r#"use plugin "ksl_ai" ai"#;
+        let ast = parse(input).unwrap();
+        assert!(matches!(ast[0], AstNode::UsePlugin { .. }));
+    }
+
+    #[test]
+    fn test_parse_fn_with_capabilities() {
+        let input = r#"
+            fn send_data() requires { network, crypto } : void {
+                let result = ai::infer("model", input);
+                send_packet("192.168.0.1", result);
+            }
+        "#;
+        let ast = parse(input).unwrap();
+        if let AstNode::FnDecl { required_capabilities, .. } = &ast[0] {
+            assert_eq!(required_capabilities, &vec!["network".to_string(), "crypto".to_string()]);
+        } else {
+            panic!("Expected FnDecl");
+        }
+    }
+
+    #[test]
+    fn test_parse_capability_request_basic() {
+        let input = r#"
+            fn test_dynamic() : void {
+                request_capability("network");
+            }
+        "#;
+        let ast = parse(input).unwrap();
+        if let AstNode::FnDecl { body, .. } = &ast[0] {
+            if let AstNode::RequestCapability { capability } = &body[0] {
+                assert_eq!(capability, "network");
+            } else {
+                panic!("Expected RequestCapability");
+            }
+        } else {
+            panic!("Expected FnDecl");
+        }
+    }
+
+    #[test]
+    fn test_parse_capability_request_multiple() {
+        let input = r#"
+            fn test_multiple() : void {
+                request_capability("network");
+                request_capability("crypto");
+            }
+        "#;
+        let ast = parse(input).unwrap();
+        if let AstNode::FnDecl { body, .. } = &ast[0] {
+            if let AstNode::RequestCapability { capability } = &body[0] {
+                assert_eq!(capability, "network");
+            } else {
+                panic!("Expected RequestCapability");
+            }
+            if let AstNode::RequestCapability { capability } = &body[1] {
+                assert_eq!(capability, "crypto");
+            } else {
+                panic!("Expected RequestCapability");
+            }
+        } else {
+            panic!("Expected FnDecl");
+        }
+    }
+
+    #[test]
+    fn test_parse_capability_request_with_requires() {
+        let input = r#"
+            fn test_mixed() requires { fs } : void {
+                request_capability("network");
+            }
+        "#;
+        let ast = parse(input).unwrap();
+        if let AstNode::FnDecl { required_capabilities, body, .. } = &ast[0] {
+            assert_eq!(required_capabilities, &vec!["fs".to_string()]);
+            if let AstNode::RequestCapability { capability } = &body[0] {
+                assert_eq!(capability, "network");
+            } else {
+                panic!("Expected RequestCapability");
+            }
+        } else {
+            panic!("Expected FnDecl");
+        }
+    }
+
+    #[test]
+    fn test_parse_capability_request_invalid() {
+        // Missing string literal
+        let input = r#"
+            fn test_invalid() : void {
+                request_capability(network);
+            }
+        "#;
+        assert!(parse(input).is_err());
+
+        // Missing semicolon
+        let input = r#"
+            fn test_invalid() : void {
+                request_capability("network")
+            }
+        "#;
+        assert!(parse(input).is_err());
+
+        // Missing parentheses
+        let input = r#"
+            fn test_invalid() : void {
+                request_capability "network";
+            }
+        "#;
+        assert!(parse(input).is_err());
+    }
+
+    #[test]
+    fn test_parse_capability_request_in_group() {
+        let input = r#"
+            fn test_group() requires { sensitive } : void {
+                request_capability("network");
+                let x = 42;
+                request_capability("ai");
+            }
+        "#;
+        let ast = parse(input).unwrap();
+        if let AstNode::FnDecl { required_capabilities, body, .. } = &ast[0] {
+            assert_eq!(required_capabilities, &vec!["sensitive".to_string()]);
+            if let AstNode::RequestCapability { capability } = &body[0] {
+                assert_eq!(capability, "network");
+            } else {
+                panic!("Expected RequestCapability");
+            }
+            if let AstNode::RequestCapability { capability } = &body[2] {
+                assert_eq!(capability, "ai");
+            } else {
+                panic!("Expected RequestCapability");
+            }
+        } else {
+            panic!("Expected FnDecl");
         }
     }
 }

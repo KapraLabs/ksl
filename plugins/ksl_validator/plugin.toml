@@ -1,0 +1,33 @@
+[plugin]
+name = "ksl_validator"
+namespace = "validator"
+version = "0.1.0"
+description = "Validator operations for KSL contracts"
+
+[[plugin.op]]
+name = "verify_block"
+args = ["String", "String", "String"]  # block_hash, pubkey, signature
+returns = "Bool"
+handler = "native"
+description = "Verify block signature and metadata"
+
+[[plugin.op]]
+name = "verify_kaprekar"
+args = ["Array<u8>"]  # hash_prefix
+returns = "Bool"
+handler = "native"
+description = "Verify Kaprekar property of hash prefix"
+
+[[plugin.op]]
+name = "get_validator_set"
+args = ["u64"]  # epoch
+returns = "Array<String>"  # validator_ids
+handler = "native"
+description = "Get active validator set for epoch"
+
+[[plugin.op]]
+name = "get_validator_info"
+args = ["String"]  # validator_id
+returns = "Map<String, String>"
+handler = "native"
+description = "Get validator metadata" 

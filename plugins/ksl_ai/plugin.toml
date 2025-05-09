@@ -1,0 +1,33 @@
+[plugin]
+name = "ksl_ai"
+namespace = "ai"
+version = "0.1.0"
+description = "AI/ML operations for KSL contracts"
+
+[[plugin.op]]
+name = "infer"
+args = ["String", "Array<u8>"]
+returns = "F64"
+handler = "native"
+description = "Run inference on a pre-trained model"
+
+[[plugin.op]]
+name = "train"
+args = ["String", "Array<(u64, f64)>"]
+returns = "Bool"
+handler = "native"
+description = "Train a model with new data"
+
+[[plugin.op]]
+name = "quantize"
+args = ["String", "u8"]
+returns = "Bool"
+handler = "native"
+description = "Quantize a model to reduce size"
+
+[[plugin.op]]
+name = "get_model_info"
+args = ["String"]
+returns = "Map<String, String>"
+handler = "native"
+description = "Get metadata about a model" 

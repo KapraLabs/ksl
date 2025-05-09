@@ -1,0 +1,32 @@
+// Example KSL program using the AI plugin
+use plugin "ksl_ai" ai
+
+fn train_and_infer() requires { ai } {
+    // Get model info
+    let model_info = ai::get_model_info("resnet18");
+    assert(model_info["type"] == "resnet");
+
+    // Train model with new data
+    let training_data = load_training_data();
+    let success = ai::train("resnet18", training_data);
+    assert(success);
+
+    // Quantize model for efficiency
+    let quantized = ai::quantize("resnet18", 8); // 8-bit quantization
+    assert(quantized);
+
+    // Run inference
+    let input = load_input_data();
+    let score = ai::infer("resnet18", input);
+    assert(score > 0.5);
+}
+
+fn load_training_data() : Array<(u64, f64)> {
+    // TODO: Load actual training data
+    return [(1, 0.8), (2, 0.9), (3, 0.7)];
+}
+
+fn load_input_data() : Array<u8> {
+    // TODO: Load actual input data
+    return [1, 2, 3, 4, 5];
+} 

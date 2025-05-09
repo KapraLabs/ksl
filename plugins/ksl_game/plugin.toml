@@ -1,0 +1,33 @@
+[plugin]
+name = "ksl_game"
+namespace = "game"
+version = "0.1.0"
+description = "Game engine operations for KSL contracts"
+
+[[plugin.op]]
+name = "spawn_entity"
+args = ["String", "Map<String, String>"]  # entity_type, properties
+returns = "String"  # entity_id
+handler = "native"
+description = "Spawn a new game entity"
+
+[[plugin.op]]
+name = "move_entity"
+args = ["String", "Array<F64>"]  # entity_id, position[x,y,z]
+returns = "Bool"
+handler = "native"
+description = "Move an entity to a new position"
+
+[[plugin.op]]
+name = "apply_force"
+args = ["String", "Array<F64>"]  # entity_id, force[x,y,z]
+returns = "Bool"
+handler = "native"
+description = "Apply physics force to an entity"
+
+[[plugin.op]]
+name = "get_entity_state"
+args = ["String"]  # entity_id
+returns = "Map<String, String>"
+handler = "native"
+description = "Get entity state information" 

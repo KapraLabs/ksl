@@ -17,6 +17,8 @@ use std::path::PathBuf;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
+use crate::ksl_ir::{KSLIR, KSLFunctionIR, KSLGlobalIR};
+use serde::{Serialize, Deserialize};
 
 /// LSP server configuration with async support
 #[derive(Debug)]
@@ -40,6 +42,43 @@ pub struct AnalyzerConfig {
     analyze_network_ops: bool,
 }
 
+/// Source location information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceLocation {
+    pub file: String,
+    pub start_line: usize,
+    pub start_column: usize,
+    pub end_line: usize,
+    pub end_column: usize,
+}
+
+/// Documentation information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Documentation {
+    pub description: String,
+    pub params: Vec<ParamDoc>,
+    pub returns: Option<String>,
+    pub examples: Vec<String>,
+    pub see_also: Vec<String>,
+}
+
+/// Parameter documentation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParamDoc {
+    pub name: String,
+    pub description: String,
+}
+
+/// Symbol kinds for LSP integration
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum SymbolKind {
+    Function,
+    Variable,
+    Type,
+    Event,
+    Error,
+}
+
 /// Enhanced LSP server with async support
 pub struct LspServer {
     config: LspServerConfig,
@@ -47,11 +86,13 @@ pub struct LspServer {
     analyzer: Option<Analyzer>,
     async_runtime: Arc<RwLock<AsyncRuntime>>,
     analysis_cache: Arc<Mutex<HashMap<String, AnalysisResult>>>, // URI -> Analysis result
+    workspace_root: String,
+    symbol_cache: HashMap<String, Vec<(String, SourceLocation, SymbolKind)>>,
 }
 
 impl LspServer {
     /// Create a new LSP server with the given configuration
-    pub fn new(config: LspServerConfig) -> Self {
+    pub fn new(config: LspServerConfig, workspace_root: String) -> Self {
         LspServer {
             config,
             documents: HashMap::new(),
@@ -62,6 +103,8 @@ impl LspServer {
             },
             async_runtime: Arc::new(RwLock::new(AsyncRuntime::new())),
             analysis_cache: Arc::new(Mutex::new(HashMap::new())),
+            workspace_root,
+            symbol_cache: HashMap::new(),
         }
     }
 
@@ -616,7 +659,7 @@ pub fn start_lsp(port: u16, enable_async: bool, analyzer_config: Option<Analyzer
         enable_async,
         analyzer_config,
     };
-    let mut server = LspServer::new(config);
+    let mut server = LspServer::new(config, "".to_string());
     server.start()
 }
 
