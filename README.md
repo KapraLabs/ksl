@@ -160,6 +160,34 @@ Build for WASM:
 wasm-pack build --target web
 ```
 
+## VS Code Extension
+
+KSL comes with a Visual Studio Code extension for syntax highlighting, code completion, and more.
+
+### Install from Marketplace (if published)
+1. Open VS Code.
+2. Go to the Extensions view (`Ctrl+Shift+X`).
+3. Search for `KSL` or `Kapra Smart Language`.
+4. Click **Install**.
+
+### Install from Source (if not yet published)
+1. Build the extension:
+   ```sh
+   cd vscode_extension
+   npm install
+   npm run package
+   ```
+2. In VS Code, press `Ctrl+Shift+P` and select **Extensions: Install from VSIX...**
+3. Select the generated `.vsix` file in the `vscode_extension` directory.
+
+### Features
+- Syntax highlighting for `.ksl` files
+- Code completion and snippets
+- Linting and error highlighting
+- Documentation on hover
+
+*See the [`vscode_extension/README.md`](vscode_extension/README.md) for more details and troubleshooting.*
+
 ## Testing
 Run all tests:
 ```sh
