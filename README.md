@@ -173,7 +173,7 @@ KSL comes with a Visual Studio Code extension for syntax highlighting, code comp
 ### Install from Source (if not yet published)
 1. Build the extension:
    ```sh
-   cd vscode_extension
+   cd vscode-extension
    npm install
    npm run package
    ```
