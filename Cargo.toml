@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 sha3 = "0.10"
-inkwell = { git = "https://github.com/TheDan64/inkwell", branch = "master", features = ["llvm14-0"] }
+inkwell = { version = "0.2.0", features = ["llvm12-0"] }
 log = "0.4"
 pretty_assertions = "1.3"
 bincode = "1.3"
@@ -13,7 +13,6 @@ serde = { version = "1.0", features = ["derive"] }
 wasmtime = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 ed25519-dalek = "1.0"
-seccompiler = "0.3"
 serde_json = "1.0"
 syn = { version = "2.0", features = ["full", "extra-traits"] }
 quote = "1.0"
@@ -25,7 +24,7 @@ tempfile = "3.8"
 blst = "0.3.11"
 
 # Post-quantum Dilithium support (via PQClean)
-pqcrypto-dilithium = { version = "0.7", features = ["dilithium5"] }
+pqcrypto-dilithium = "0.5.0"
 
 # ABI and versioning support
 sha2 = "0.10"
@@ -43,6 +42,9 @@ env_logger = "0.10"
 clap = "3.0"
 
 zeroize = { version = "1.6", features = ["derive"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+seccompiler = "0.3"
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.21.1"
