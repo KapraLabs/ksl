@@ -591,12 +591,13 @@ impl Type {
         match (self, target) {
             // Allow conversion between proof types if sizes match
             (Type::ZkProof(a), Type::ZkProof(b)) => {
+                // Check specific conversions first
+                (a == b) || // Same types always convert
                 matches!((a, b),
                     (ZkProofType::Bls, ZkProofType::Generic) |
                     (ZkProofType::Dilithium, ZkProofType::Generic) |
                     (ZkProofType::Generic, ZkProofType::Bls) |
-                    (ZkProofType::Generic, ZkProofType::Dilithium) |
-                    (a, b) if a == b
+                    (ZkProofType::Generic, ZkProofType::Dilithium)
                 )
             },
             // Allow conversion between signature types if sizes match

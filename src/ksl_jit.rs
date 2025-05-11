@@ -1,7 +1,7 @@
 // ksl_jit.rs
 // JIT compiler with speculative optimizations and profile-guided recompilation
 
-use crate::ksl_ast::{AstNode, Expr, Function};
+use crate::ksl_ast::{AstNode, Expr, Function, Type, Stmt};
 use crate::ksl_errors::{KslError, SourcePosition};
 use crate::ksl_llvm::LLVMCodegen;
 use crate::ksl_analyzer::PerformanceMetrics;
@@ -90,6 +90,53 @@ enum SpeculativeOpt {
         unroll_factor: usize,
         success_rate: f64,
     },
+}
+
+/// Simple debugger for JIT code
+struct Debugger {
+    /// Debug source file path
+    source_file: PathBuf,
+    /// Current breakpoints
+    breakpoints: HashMap<String, Vec<usize>>,
+    /// Current state of execution
+    current_function: Option<String>,
+}
+
+impl Debugger {
+    /// Create a new debugger
+    fn new(source_file: &PathBuf) -> Result<Self, KslError> {
+        Ok(Debugger {
+            source_file: source_file.clone(),
+            breakpoints: HashMap::new(),
+            current_function: None,
+        })
+    }
+
+    /// Check if a function has breakpoints
+    fn has_breakpoint(&self, function_name: &str) -> bool {
+        self.breakpoints.contains_key(function_name)
+    }
+
+    /// Handle a breakpoint when hit
+    fn handle_breakpoint(&self) -> Result<(), KslError> {
+        // Simplified implementation - would actually wait for user input in a real debugger
+        debug!("Breakpoint hit, continuing execution");
+        Ok(())
+    }
+
+    /// Notify the debugger that a function is being entered
+    fn notify_function_entry(&mut self, function_name: &str) -> Result<(), KslError> {
+        self.current_function = Some(function_name.to_string());
+        debug!("Entering function: {}", function_name);
+        Ok(())
+    }
+
+    /// Notify the debugger that a function is being exited
+    fn notify_function_exit(&mut self, function_name: &str) -> Result<(), KslError> {
+        self.current_function = None;
+        debug!("Exiting function: {}", function_name);
+        Ok(())
+    }
 }
 
 /// JIT compiler with profiling and speculative optimizations
@@ -214,7 +261,7 @@ impl JITCompiler {
         }
 
         // Generate code
-        codegen.generate(&[AstNode::Function(function.clone())], &self.metrics)?;
+        codegen.generate(&[AstNode::Function(function.clone())], Some(&self.metrics))?;
 
         // Add to execution engine
         let jit_fn = unsafe {
@@ -247,7 +294,7 @@ impl JITCompiler {
         self.apply_profile_optimizations(&mut codegen, &function.name)?;
 
         // Generate optimized code
-        codegen.generate(&[AstNode::Function(function.clone())], &self.metrics)?;
+        codegen.generate(&[AstNode::Function(function.clone())], Some(&self.metrics))?;
 
         // Update function cache
         let jit_fn = unsafe {
@@ -364,7 +411,7 @@ impl JITCompiler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ksl_ast::{Type, Expr};
+    use crate::ksl_ast::{Expr, Literal};
 
     #[test]
     fn test_jit_simple_function() {
@@ -373,9 +420,10 @@ mod tests {
         let function = Function {
             name: "test".to_string(),
             params: vec![],
-            ret_type: Type::Int,
+            return_type: Some(Type::Int),
+            is_public: true,
             body: vec![
-                Expr::Literal(42.into()),
+                Stmt::ExprStmt(Expr::Literal(Literal::Int(42))),
             ],
             attributes: vec![],
         };
@@ -391,9 +439,10 @@ mod tests {
         let function = Function {
             name: "hot_fn".to_string(),
             params: vec![],
-            ret_type: Type::Int,
+            return_type: Some(Type::Int),
+            is_public: true,
             body: vec![
-                Expr::Literal(1.into()),
+                Stmt::ExprStmt(Expr::Literal(Literal::Int(1))),
             ],
             attributes: vec![],
         };
@@ -416,16 +465,17 @@ mod tests {
         let function = Function {
             name: "loop_fn".to_string(),
             params: vec![],
-            ret_type: Type::Int,
+            return_type: Some(Type::Int),
+            is_public: true,
             body: vec![
                 // Simulated loop
-                Expr::Loop {
+                Stmt::ExprStmt(Expr::Loop {
                     id: 1,
                     count: 10,
                     body: vec![
-                        Expr::Literal(1.into()),
+                        Expr::Literal(Literal::Int(1)),
                     ],
-                },
+                }),
             ],
             attributes: vec![],
         };

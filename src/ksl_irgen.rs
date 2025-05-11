@@ -186,11 +186,150 @@ impl IRGenerator {
                 Ok("void".to_string())
             }
 
+            AstNode::Expression(expr) => self.generate_expr(expr),
+            AstNode::Statement(stmt) => self.generate_stmt(stmt),
+            AstNode::Function(func) => self.generate_function(func),
+
             _ => Err(KslError::type_error(
                 format!("Unsupported AST node: {:?}", node),
                 None,
             )),
         }
+    }
+
+    /// Generate IR for an expression
+    fn generate_expr(&mut self, expr: &Expr) -> Result<String, KslError> {
+        match expr {
+            Expr::Literal(lit) => {
+                let temp = self.new_temp();
+                match lit {
+                    Literal::Int(n) => {
+                        self.program.push(IRNode::Assign(
+                            temp.clone(),
+                            n.to_string(),
+                        ));
+                    }
+                    Literal::Float(f) => {
+                        self.program.push(IRNode::Assign(
+                            temp.clone(),
+                            f.to_string(),
+                        ));
+                    }
+                    Literal::Bool(b) => {
+                        self.program.push(IRNode::Assign(
+                            temp.clone(),
+                            b.to_string(),
+                        ));
+                    }
+                    Literal::Str(s) => {
+                        self.program.push(IRNode::Assign(
+                            temp.clone(),
+                            format!("\"{}\"", s),
+                        ));
+                    }
+                    _ => {
+                        return Err(KslError::type_error(
+                            format!("Unsupported literal: {:?}", lit),
+                            None,
+                        ));
+                    }
+                }
+                Ok(temp)
+            },
+            Expr::Identifier(name) => {
+                let temp = self.new_temp();
+                let var = self.variables.get(name).cloned().unwrap_or_else(|| name.clone());
+                self.program.push(IRNode::Assign(temp.clone(), var));
+                Ok(temp)
+            },
+            Expr::BinaryOp { left, op, right } => {
+                let left_temp = self.generate_expr(left)?;
+                let right_temp = self.generate_expr(right)?;
+                let result_temp = self.new_temp();
+
+                match op {
+                    BinaryOperator::Add => {
+                        self.program.push(IRNode::Add(
+                            result_temp.clone(),
+                            left_temp,
+                            right_temp,
+                        ));
+                    }
+                    BinaryOperator::Sub => {
+                        self.program.push(IRNode::Sub(
+                            result_temp.clone(),
+                            left_temp,
+                            right_temp,
+                        ));
+                    }
+                    BinaryOperator::Mul => {
+                        self.program.push(IRNode::Mul(
+                            result_temp.clone(),
+                            left_temp,
+                            right_temp,
+                        ));
+                    }
+                    _ => {
+                        return Err(KslError::type_error(
+                            format!("Unsupported binary operator: {:?}", op),
+                            None,
+                        ));
+                    }
+                }
+                Ok(result_temp)
+            },
+            _ => Err(KslError::type_error(
+                format!("Unsupported expression: {:?}", expr),
+                None,
+            )),
+        }
+    }
+
+    /// Generate IR for a statement
+    fn generate_stmt(&mut self, stmt: &Stmt) -> Result<String, KslError> {
+        match stmt {
+            Stmt::Let { name, typ, value } => {
+                let value_temp = self.generate_expr(value)?;
+                self.variables.insert(name.clone(), value_temp.clone());
+                Ok("void".to_string())
+            },
+            Stmt::Return(expr) => {
+                let temp = self.generate_expr(expr)?;
+                self.program.push(IRNode::Return(Some(temp)));
+                Ok("void".to_string())
+            },
+            _ => Err(KslError::type_error(
+                format!("Unsupported statement: {:?}", stmt),
+                None,
+            )),
+        }
+    }
+
+    /// Generate IR for a function
+    fn generate_function(&mut self, func: &Function) -> Result<String, KslError> {
+        // Create function entry
+        self.program.push(IRNode::FunctionStart(func.name.clone()));
+        
+        // Add parameters
+        for (idx, (name, _)) in func.params.iter().enumerate() {
+            let param_temp = format!("param{}", idx);
+            self.variables.insert(name.clone(), param_temp);
+        }
+        
+        // Generate body
+        for stmt in &func.body {
+            self.generate_stmt(stmt)?;
+        }
+        
+        // If no explicit return, add void return
+        if func.body.iter().all(|stmt| !matches!(stmt, Stmt::Return(_))) {
+            self.program.push(IRNode::Return(None));
+        }
+        
+        // End function
+        self.program.push(IRNode::FunctionEnd);
+        
+        Ok("void".to_string())
     }
 
     /// Generates IR for a list of AST nodes

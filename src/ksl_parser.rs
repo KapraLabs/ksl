@@ -5,7 +5,6 @@ use std::str::Chars;
 use std::iter::Peekable;
 use std::collections::VecDeque;
 use std::collections::HashMap;
-use crate::ksl_errors::SourcePosition;
 
 // Re-export AstNode and related types from ksl_macros.rs
 pub use crate::ksl_macros::AstNode;
@@ -13,6 +12,8 @@ pub use crate::ksl_macros::NetworkOpType;
 pub use crate::ksl_macros::Attribute;
 pub use crate::ksl_macros::AttributeArg;
 pub use crate::ksl_errors::SourcePosition;
+// Import plugin types from ksl_ast.rs
+use crate::ksl_ast::{PluginOp, PluginHandler, Type as AstType};
 
 // Define stubs for internal use only
 mod internal {
@@ -26,9 +27,9 @@ mod internal {
             _body: &[AstNode],
         ) -> Result<(), ParseError> {
             Ok(()) // Placeholder
-        }
     }
-    
+}
+
     pub struct AsyncValidator;
     impl AsyncValidator {
         pub fn validate_async_call(
@@ -278,7 +279,7 @@ impl<'a> Parser<'a> {
 
     fn parse_statement(&mut self) -> Result<AstNode, ParseError> {
         match &self.current {
-            Token::Symbol("#".to_string()) => {
+            Token::Symbol(s) if s == "#" => {
                 // Look ahead for block type
                 let attrs = self.parse_attributes()?;
                 match &self.current {
@@ -329,15 +330,15 @@ impl<'a> Parser<'a> {
                 })
             }
         };
-        let type_annot = if self.current == Token::Symbol(":".to_string()) {
+        let type_annot = if self.match_symbol(":") {
             self.advance()?;
             Some(self.parse_type_annotation()?)
         } else {
             None
         };
-        self.expect(Token::Symbol("=".to_string()))?;
+        self.expect_symbol("=")?;
         let expr = self.parse_expr()?;
-        self.expect(Token::Symbol(";".to_string()))?;
+        self.expect_symbol(";")?;
         Ok(AstNode::VarDecl {
             is_mutable,
             name,
@@ -431,52 +432,80 @@ impl<'a> Parser<'a> {
         let mut attributes = Vec::new();
         let start_pos = self.lexer.position;
 
-        while self.current == Token::Symbol("#".to_string()) {
-            self.advance()?;
-            self.expect(Token::Symbol("[".to_string()))?;
-
-            // Parse attribute name
-            let name = match &self.current {
-                Token::Ident(name) => {
-                    let name = name.clone();
-                    self.advance()?;
-                    name
-                }
-                _ => {
-                    // Error recovery: Skip to next attribute or end
-                    self.recover_to(&[Token::Symbol("]".to_string()), Token::Symbol("#".to_string())])?;
-                    continue;
-                }
-            };
-
-            // Parse attribute arguments
-            let mut args = Vec::new();
-            if self.current == Token::Symbol("(".to_string()) {
+        while let Token::Symbol(s) = &self.current {
+            if s == "#" {
                 self.advance()?;
-                while self.current != Token::Symbol(")".to_string()) {
-                    if let Ok(arg) = self.parse_attribute_arg() {
-                        args.push(arg);
-                    } else {
-                        // Error recovery: Skip to end of argument
-                        self.recover_to(&[Token::Symbol(",".to_string()), Token::Symbol(")".to_string())])?;
-                    }
-                    
-                    if self.current == Token::Symbol(",".to_string()) {
+                
+                // Look for opening bracket
+                if let Token::Symbol(s) = &self.current {
+                    if s == "[" {
                         self.advance()?;
-                    } else {
-                        break;
+                        
+                        // Parse attribute name
+                        let name = match &self.current {
+                            Token::Ident(name) => {
+                                let name = name.clone();
+                                self.advance()?;
+                                name
+                            }
+                            _ => {
+                                // Error recovery: Skip to next attribute or end
+                                self.recover_to(&[
+                                    Token::Symbol("]".to_string()),
+                                    Token::Symbol("#".to_string())
+                                ])?;
+                                continue;
+                            }
+                        };
+
+                        // Parse attribute arguments
+                        let mut args = Vec::new();
+                        if let Token::Symbol(s) = &self.current {
+                            if s == "(" {
+                                self.advance()?;
+                                
+                                while let Token::Symbol(s) = &self.current {
+                                    if s == ")" {
+                                        break;
+                                    }
+                                    
+                                    if let Ok(arg) = self.parse_attribute_arg() {
+                                        args.push(arg);
+                                    } else {
+                                        // Error recovery: Skip to end of argument
+                                        self.recover_to(&[
+                                            Token::Symbol(",".to_string()),
+                                            Token::Symbol(")".to_string())
+                                        ])?;
+                                    }
+                                    
+                                    if let Token::Symbol(s) = &self.current {
+                                        if s == "," {
+                                            self.advance()?;
+                                        } else {
+                                            break;
+                                        }
+                                    } else {
+                                        break;
+                                    }
+                                }
+                                
+                                self.expect(Token::Symbol(")".to_string()))?;
+                            }
+                        }
+
+                        self.expect(Token::Symbol("]".to_string()))?;
+
+                        attributes.push(Attribute {
+                            name,
+                            args,
+                            position: SourcePosition::new(start_pos, self.lexer.position),
+                        });
                     }
                 }
-                self.expect(Token::Symbol(")".to_string()))?;
+            } else {
+                break;
             }
-
-            self.expect(Token::Symbol("]".to_string()))?;
-
-            attributes.push(Attribute {
-                name,
-                args,
-                position: SourcePosition::new(start_pos, self.lexer.position),
-            });
         }
 
         Ok(attributes)
@@ -840,7 +869,34 @@ impl<'a> Parser<'a> {
         self.expect(Token::Keyword("shard".to_string()))?;
         
         self.expect(Token::Symbol("(".to_string()))?;
-        let params = self.parse_params()?;
+        let mut params = Vec::new();
+        if self.current != Token::Symbol(")".to_string()) {
+            loop {
+                let name = match &self.current {
+                    Token::Ident(name) => {
+                        let name = name.clone();
+                        self.advance()?;
+                        name
+                    }
+                    _ => return Err(ParseError {
+                        message: "Expected parameter name".to_string(),
+                        position: self.lexer.position,
+                    }),
+                };
+                
+                self.expect(Token::Symbol(":".to_string()))?;
+                let type_annotation = self.parse_type_annotation()?;
+                let ast_type = self.convert_type_annotation_to_ast_type(&type_annotation)?;
+                
+                params.push((name, ast_type));
+                
+                if self.current == Token::Symbol(",".to_string()) {
+                    self.advance()?;
+                } else {
+                    break;
+                }
+            }
+        }
         self.expect(Token::Symbol(")".to_string()))?;
 
         self.expect(Token::Symbol("{".to_string()))?;
@@ -863,7 +919,34 @@ impl<'a> Parser<'a> {
         self.expect(Token::Keyword("validator".to_string()))?;
         
         self.expect(Token::Symbol("(".to_string()))?;
-        let params = self.parse_params()?;
+        let mut params = Vec::new();
+        if self.current != Token::Symbol(")".to_string()) {
+            loop {
+                let name = match &self.current {
+                    Token::Ident(name) => {
+                        let name = name.clone();
+                        self.advance()?;
+                        name
+                    }
+                    _ => return Err(ParseError {
+                        message: "Expected parameter name".to_string(),
+                        position: self.lexer.position,
+                    }),
+                };
+                
+                self.expect(Token::Symbol(":".to_string()))?;
+                let type_annotation = self.parse_type_annotation()?;
+                let ast_type = self.convert_type_annotation_to_ast_type(&type_annotation)?;
+                
+                params.push((name, ast_type));
+                
+                if self.current == Token::Symbol(",".to_string()) {
+                    self.advance()?;
+                } else {
+                    break;
+                }
+            }
+        }
         self.expect(Token::Symbol(")".to_string()))?;
 
         self.expect(Token::Symbol("{".to_string()))?;
@@ -915,9 +998,10 @@ impl<'a> Parser<'a> {
                 }),
             };
             self.expect(Token::Symbol(":".to_string()))?;
-            let var_type = self.parse_type_annotation()?;
+            let type_annotation = self.parse_type_annotation()?;
+            let ast_type = self.convert_type_annotation_to_ast_type(&type_annotation)?;
             self.expect(Token::Symbol(";".to_string()))?;
-            state.push((var_name, var_type));
+            state.push((var_name, ast_type));
         }
 
         // Parse methods
@@ -1045,7 +1129,10 @@ impl<'a> Parser<'a> {
         let mut signature = Vec::new();
         if self.current != Token::Symbol(")".to_string()) {
             loop {
-                signature.push(self.parse_type_annotation()?);
+                let type_annotation = self.parse_type_annotation()?;
+                // Convert TypeAnnotation to AstType
+                let ast_type = self.convert_type_annotation_to_ast_type(&type_annotation)?;
+                signature.push(ast_type);
                 if self.current == Token::Symbol(",".to_string()) {
                     self.advance()?;
                 } else {
@@ -1057,7 +1144,8 @@ impl<'a> Parser<'a> {
         
         // Parse return type
         self.expect(Token::Symbol(":".to_string()))?;
-        let return_type = self.parse_type_annotation()?;
+        let return_type_annotation = self.parse_type_annotation()?;
+        let return_type = self.convert_type_annotation_to_ast_type(&return_type_annotation)?;
         
         // Parse handler
         self.expect(Token::Symbol("=>".to_string()))?;
@@ -1069,6 +1157,44 @@ impl<'a> Parser<'a> {
             return_type,
             handler,
         })
+    }
+    
+    /// Convert TypeAnnotation to AstType
+    fn convert_type_annotation_to_ast_type(&self, type_annotation: &TypeAnnotation) -> Result<AstType, ParseError> {
+        match type_annotation {
+            TypeAnnotation::Simple(name) => {
+                match name.as_str() {
+                    // Integer types
+                    "u8" | "u16" | "u32" | "u64" | "usize" |
+                    "i8" | "i16" | "i32" | "i64" | "isize" | 
+                    "int" => Ok(AstType::Int),
+                    
+                    // Float types
+                    "f32" | "f64" | "float" => Ok(AstType::Float),
+                    
+                    // Boolean type
+                    "bool" => Ok(AstType::Bool),
+                    
+                    // String types
+                    "string" | "str" => Ok(AstType::Str),
+                    
+                    // Special types
+                    "void" => Ok(AstType::Void),
+                    
+                    // Everything else is a custom type
+                    _ => Ok(AstType::Custom(name.clone())),
+                }
+            },
+            TypeAnnotation::Array { element, size } => {
+                let elem_type = self.convert_type_annotation_to_ast_type(&*element)?;
+                Ok(AstType::Array(Box::new(elem_type), *size as usize))
+            },
+            TypeAnnotation::Result { success, error } => {
+                let success_type = self.convert_type_annotation_to_ast_type(&*success)?;
+                let error_type = self.convert_type_annotation_to_ast_type(&*error)?;
+                Ok(AstType::Result(Box::new(success_type), Box::new(error_type)))
+            },
+        }
     }
     
     /// Parse a plugin handler
@@ -1163,6 +1289,26 @@ impl<'a> Parser<'a> {
         self.expect(Token::Symbol(";".to_string()))?;
 
         Ok(AstNode::RequestCapability { capability })
+    }
+
+    fn match_symbol(&self, symbol: &str) -> bool {
+        if let Token::Symbol(s) = &self.current {
+            s == symbol
+        } else {
+            false
+        }
+    }
+
+    fn expect_symbol(&mut self, symbol: &str) -> Result<(), ParseError> {
+        if self.match_symbol(symbol) {
+            self.advance()?;
+            Ok(())
+        } else {
+            Err(ParseError {
+                message: format!("Expected symbol '{}', got {:?}", symbol, self.current),
+                position: self.lexer.position,
+            })
+        }
     }
 }
 

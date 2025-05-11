@@ -120,6 +120,36 @@ struct PgoData {
     branch_stats: HashMap<u32, f64>,
 }
 
+/// Performance metrics for optimization
+#[derive(Debug, Default)]
+pub struct PerformanceMetrics {
+    /// Functions considered "hot" for optimization
+    pub hot_functions: HashSet<String>,
+    /// Functions that are good candidates for inlining
+    pub inline_candidates: HashSet<String>,
+    /// Loops that are good candidates for unrolling
+    pub unroll_candidates: HashSet<usize>,
+    /// Functions with array operations that can be vectorized
+    pub array_operations: HashSet<String>,
+}
+
+impl PerformanceMetrics {
+    /// Create new performance metrics
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Check if a function has array operations that can be vectorized
+    pub fn has_array_operations(&self, function_name: &str) -> bool {
+        self.array_operations.contains(function_name)
+    }
+
+    /// Record that a function has array operations
+    pub fn record_array_operations(&mut self, function_name: String) {
+        self.array_operations.insert(function_name);
+    }
+}
+
 /// Analyzer state with async support
 pub struct Analyzer {
     module_system: ModuleSystem,

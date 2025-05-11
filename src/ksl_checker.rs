@@ -36,66 +36,6 @@ mod ksl_generics {
     }
 }
 
-// Synchronized AstNode and ExprKind with ksl_parser.rs and ksl_types.rs
-/// AST node types representing KSL program structure.
-#[derive(Debug, PartialEq)]
-pub enum AstNode {
-    VarDecl {
-        is_mutable: bool,
-        name: String,
-        type_annot: Option<String>,
-        expr: Box<AstNode>,
-    },
-    FnDecl {
-        name: String,
-        params: Vec<(String, String)>,
-        return_type: String,
-        body: Vec<AstNode>,
-    },
-    If {
-        condition: Box<AstNode>,
-        then_branch: Vec<AstNode>,
-        else_branch: Option<Vec<AstNode>>,
-    },
-    Match {
-        expr: Box<AstNode>,
-        arms: Vec<(AstNode, Vec<AstNode>)>,
-    },
-    MacroDef {
-        name: String,
-        params: Vec<(String, String)>,
-        body: Vec<AstNode>,
-    },
-    Expr {
-        kind: ExprKind,
-    },
-}
-
-/// Expression kinds within AST nodes.
-#[derive(Debug, PartialEq)]
-pub enum ExprKind {
-    Ident(String),
-    Number(String),
-    String(String),
-    BinaryOp {
-        op: String,
-        left: Box<AstNode>,
-        right: Box<AstNode>,
-    },
-    Call {
-        name: String,
-        args: Vec<AstNode>,
-    },
-    MacroCall {
-        name: String,
-        args: Vec<AstNode>,
-    },
-    AsyncCall {
-        name: String,
-        args: Vec<AstNode>,
-    },
-}
-
 /// Type checker for KSL AST.
 pub struct TypeChecker {
     ctx: TypeContext,       // Tracks variable bindings

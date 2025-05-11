@@ -1,7 +1,7 @@
 // ksl_llvm.rs
 // LLVM IR generation for KSL
 
-use crate::ksl_ast::{AstNode, Expr, Literal, BinaryOperator, Type, Function};
+use crate::ksl_ast::{self, AstNode, Expr, Literal, BinaryOperator, Type, Function};
 use crate::ksl_errors::{KslError, SourcePosition};
 use inkwell::context::Context;
 use inkwell::module::Module;
@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use log::{debug, info, warn};
 use crate::ksl_abi::{ABIGenerator, ContractABI};
 use crate::ksl_version::{ContractVersion, VersionManager};
+use crate::ksl_analyzer::PerformanceMetrics;
 
 /// LLVM code generator for KSL
 pub struct LLVMCodegen<'ctx> {
@@ -42,7 +43,7 @@ impl<'ctx> LLVMCodegen<'ctx> {
     }
 
     /// Generates LLVM IR for the entire AST
-    pub fn generate(&mut self, ast: &[AstNode]) -> Result<(), KslError> {
+    pub fn generate(&mut self, ast: &[AstNode], metrics: Option<&PerformanceMetrics>) -> Result<(), KslError> {
         debug!("Starting LLVM IR generation");
         
         // Add runtime support functions
@@ -51,6 +52,11 @@ impl<'ctx> LLVMCodegen<'ctx> {
         // Generate IR for each top-level node
         for node in ast {
             self.generate_node(node)?;
+        }
+
+        // Apply optimizations if metrics are provided
+        if let Some(metrics) = metrics {
+            self.apply_optimizations(metrics)?;
         }
 
         // Verify the generated module
@@ -113,7 +119,7 @@ impl<'ctx> LLVMCodegen<'ctx> {
 
                 // Generate code for each condition
                 for condition in conditions {
-                    let cond_value = self.generate_node(condition)?;
+                    let cond_value = self.generate_expr(condition)?;
                     
                     // Convert condition to boolean if needed
                     let bool_value = if cond_value.get_type().is_int_type() {
@@ -149,9 +155,111 @@ impl<'ctx> LLVMCodegen<'ctx> {
                 self.builder.position_at_end(continue_block);
 
                 Ok(self.context.void_type().const_void().as_basic_value_enum())
-            }
+            },
+            AstNode::Expression(expr) => self.generate_expr(expr),
+            AstNode::Statement(stmt) => self.generate_stmt(stmt),
+            AstNode::Function(func) => {
+                self.generate_function_def(func)?;
+                Ok(self.context.void_type().const_void().as_basic_value_enum())
+            },
             _ => Err(KslError::type_error(
                 format!("Unsupported AST node: {:?}", node),
+                SourcePosition::new(1, 1),
+            )),
+        }
+    }
+
+    /// Generate LLVM IR for an expression
+    fn generate_expr(&mut self, expr: &Expr) -> Result<BasicValueEnum<'ctx>, KslError> {
+        match expr {
+            Expr::Literal(lit) => self.generate_literal(lit),
+            Expr::Identifier(name) => self.generate_identifier(name),
+            Expr::BinaryOp { left, op, right } => {
+                let lhs = self.generate_expr(left)?;
+                let rhs = self.generate_expr(right)?;
+
+                match op {
+                    BinaryOperator::Add => Ok(self.builder.build_int_add(
+                        lhs.into_int_value(),
+                        rhs.into_int_value(),
+                        "add",
+                    ).as_basic_value_enum()),
+                    BinaryOperator::Sub => Ok(self.builder.build_int_sub(
+                        lhs.into_int_value(),
+                        rhs.into_int_value(),
+                        "sub",
+                    ).as_basic_value_enum()),
+                    BinaryOperator::Mul => Ok(self.builder.build_int_mul(
+                        lhs.into_int_value(),
+                        rhs.into_int_value(),
+                        "mul",
+                    ).as_basic_value_enum()),
+                    BinaryOperator::Div => Ok(self.builder.build_int_signed_div(
+                        lhs.into_int_value(),
+                        rhs.into_int_value(),
+                        "div",
+                    ).as_basic_value_enum()),
+                    BinaryOperator::Eq => Ok(self.builder.build_int_compare(
+                        inkwell::IntPredicate::EQ,
+                        lhs.into_int_value(),
+                        rhs.into_int_value(),
+                        "eq",
+                    ).as_basic_value_enum()),
+                    _ => Err(KslError::type_error(
+                        format!("Unsupported binary operator: {:?}", op),
+                        SourcePosition::new(1, 1),
+                    )),
+                }
+            },
+            Expr::Call { function, args } => {
+                let fn_val = match function.as_ref() {
+                    Expr::Identifier(name) => self.module.get_function(name).ok_or_else(|| {
+                        KslError::type_error(
+                            format!("Undefined function: {}", name),
+                            SourcePosition::new(1, 1),
+                        )
+                    })?,
+                    _ => return Err(KslError::type_error(
+                        "Function call target must be an identifier".to_string(),
+                        SourcePosition::new(1, 1),
+                    )),
+                };
+
+                let mut arg_values = Vec::new();
+                for arg in args {
+                    arg_values.push(self.generate_expr(arg)?);
+                }
+
+                Ok(self.builder.build_call(
+                    fn_val,
+                    &arg_values,
+                    "call",
+                ).try_as_basic_value().left().unwrap())
+            },
+            _ => Err(KslError::type_error(
+                format!("Unsupported expression: {:?}", expr),
+                SourcePosition::new(1, 1),
+            )),
+        }
+    }
+
+    /// Generate LLVM IR for a statement
+    fn generate_stmt(&mut self, stmt: &Stmt) -> Result<BasicValueEnum<'ctx>, KslError> {
+        match stmt {
+            Stmt::Let { name, typ, value } => {
+                let val = self.generate_expr(value)?;
+                let alloca = self.builder.build_alloca(val.get_type(), name);
+                self.builder.build_store(alloca, val);
+                self.variables.insert(name.clone(), alloca);
+                Ok(self.context.void_type().const_void().as_basic_value_enum())
+            },
+            Stmt::Return(expr) => {
+                let val = self.generate_expr(expr)?;
+                self.builder.build_return(Some(&val));
+                Ok(self.context.void_type().const_void().as_basic_value_enum())
+            },
+            _ => Err(KslError::type_error(
+                format!("Unsupported statement: {:?}", stmt),
                 SourcePosition::new(1, 1),
             )),
         }
@@ -203,9 +311,9 @@ impl<'ctx> LLVMCodegen<'ctx> {
     /// Generates LLVM IR for a binary operation
     fn generate_binary_op(
         &mut self,
-        left: &Box<Expr>,
+        left: &Box<AstNode>,
         op: &BinaryOperator,
-        right: &Box<Expr>,
+        right: &Box<AstNode>,
     ) -> Result<BasicValueEnum<'ctx>, KslError> {
         let lhs = self.generate_node(left)?;
         let rhs = self.generate_node(right)?;
@@ -247,11 +355,11 @@ impl<'ctx> LLVMCodegen<'ctx> {
     /// Generates LLVM IR for a function call
     fn generate_call(
         &mut self,
-        function: &Box<Expr>,
-        args: &[Expr],
+        function: &Box<AstNode>,
+        args: &[AstNode],
     ) -> Result<BasicValueEnum<'ctx>, KslError> {
-        let fn_val = match &**function {
-            Expr::Identifier(name) => self.module.get_function(name).ok_or_else(|| {
+        let fn_val = match function.as_ref() {
+            AstNode::Identifier(name) => self.module.get_function(name).ok_or_else(|| {
                 KslError::type_error(
                     format!("Undefined function: {}", name),
                     SourcePosition::new(1, 1),
@@ -278,8 +386,8 @@ impl<'ctx> LLVMCodegen<'ctx> {
     /// Generates LLVM IR for array indexing
     fn generate_index(
         &mut self,
-        base: &Box<Expr>,
-        index: &Box<Expr>,
+        base: &Box<AstNode>,
+        index: &Box<AstNode>,
     ) -> Result<BasicValueEnum<'ctx>, KslError> {
         let base_val = self.generate_node(base)?;
         let index_val = self.generate_node(index)?;
@@ -301,7 +409,7 @@ impl<'ctx> LLVMCodegen<'ctx> {
     /// Generates LLVM IR for array literals
     fn generate_array_literal(
         &mut self,
-        elements: &[Expr],
+        elements: &[AstNode],
         element_type: &Type,
     ) -> Result<BasicValueEnum<'ctx>, KslError> {
         let elem_type = self.type_to_llvm_type(element_type)?;
@@ -462,6 +570,53 @@ impl<'ctx> LLVMCodegen<'ctx> {
 
         Ok(())
     }
+
+    /// Apply optimizations based on performance metrics
+    fn apply_optimizations(&mut self, metrics: &PerformanceMetrics) -> Result<(), KslError> {
+        // This is a stub function that will be implemented when needed
+        // It's here to make the code compatible with ksl_jit.rs
+        Ok(())
+    }
+
+    /// Add aggressive inlining optimization
+    pub fn add_aggressive_inlining(&mut self) -> Result<(), KslError> {
+        // This is a stub that would be implemented with actual LLVM optimization passes
+        debug!("Adding aggressive inlining optimization");
+        // Actual implementation would use LLVM pass manager to add inlining passes
+        Ok(())
+    }
+
+    /// Add loop unrolling optimization
+    pub fn add_loop_unrolling(&mut self) -> Result<(), KslError> {
+        // This is a stub that would be implemented with actual LLVM optimization passes
+        debug!("Adding loop unrolling optimization");
+        // Actual implementation would use LLVM pass manager to add loop unrolling passes
+        Ok(())
+    }
+
+    /// Add loop unrolling with specific factor
+    pub fn add_loop_unrolling_with_factor(&mut self, loop_id: usize, factor: usize) -> Result<(), KslError> {
+        // This is a stub that would be implemented with actual LLVM optimization passes
+        debug!("Adding loop unrolling for loop {} with factor {}", loop_id, factor);
+        // Actual implementation would set metadata on the loop and use LLVM pass manager
+        Ok(())
+    }
+
+    /// Add vectorization optimization
+    pub fn add_vectorization(&mut self) -> Result<(), KslError> {
+        // This is a stub that would be implemented with actual LLVM optimization passes
+        debug!("Adding vectorization optimization");
+        // Actual implementation would use LLVM pass manager to add vectorization passes
+        Ok(())
+    }
+
+    /// Add function inlining for a specific function
+    pub fn add_function_inlining(&mut self, function_name: &str) -> Result<(), KslError> {
+        // This is a stub that would be implemented with actual LLVM optimization passes
+        debug!("Adding function inlining for {}", function_name);
+        // Actual implementation would set inlining attributes on the function
+        Ok(())
+    }
 }
 
 /// Public API to convert AST to LLVM IR with ABI generation
@@ -470,7 +625,7 @@ pub fn ast_to_llvm(ast: &[AstNode], module_name: &str) -> Result<(String, Contra
     let mut codegen = LLVMCodegen::new(&context, module_name);
     
     // Generate IR
-    codegen.generate(ast)?;
+    codegen.generate(ast, None)?;
 
     // Generate ABI
     let abi = codegen.generate_contract_abi(module_name)?;

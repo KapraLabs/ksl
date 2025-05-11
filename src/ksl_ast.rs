@@ -1,5 +1,8 @@
 // ksl_ast.rs - Abstract Syntax Tree for KSL Language
 
+// Import Attribute from ksl_macros
+pub use crate::ksl_macros::Attribute;
+
 pub enum Literal {
     Int(i64),
     Float(f64),
@@ -53,6 +56,12 @@ pub enum Expr {
         arms: Vec<MatchArm>,
     },
     Attribute(String, Box<Expr>),
+    // Add Loop for simulated loop iterations in tests
+    Loop {
+        id: usize,
+        count: usize,
+        body: Vec<Expr>,
+    },
 }
 
 pub struct MatchArm {
@@ -109,8 +118,9 @@ pub enum AssignTarget {
 
 pub struct Function {
     pub name: String,
-    pub params: Vec<(String, Type)>,
-    pub ret_type: Type,
+    pub params: Vec<Parameter>,
+    pub return_type: Option<Type>,
+    pub is_public: bool,
     pub body: Vec<Stmt>,
     pub attributes: Vec<String>,
 }
@@ -176,5 +186,132 @@ impl Type {
             Type::Array(_, size) => Some(*size),
             _ => None
         }
+    }
+}
+
+// Add a top-level AstNode type to wrap the existing types
+// This allows for compatibility with other modules that expect an AstNode type
+#[derive(Debug, Clone)]
+pub enum AstNode {
+    Expression(Expr),
+    Statement(Stmt),
+    Function(Function),
+    Module(Module),
+    Struct(Struct),
+    VerifyBlock { conditions: Vec<Expr> },
+    BinaryOp { left: Box<AstNode>, op: BinaryOperator, right: Box<AstNode> },
+    Literal(Literal),
+    Identifier(String),
+    Call { function: Box<AstNode>, args: Vec<AstNode> },
+    Index { base: Box<AstNode>, index: Box<AstNode> },
+    ArrayLiteral { elements: Vec<AstNode>, element_type: Type },
+    Return { value: Option<Box<AstNode>> },
+    If { condition: Box<AstNode>, then_branch: Box<AstNode>, else_branch: Option<Box<AstNode>> },
+    // Add plugin-related nodes
+    PluginDecl {
+        name: String,
+        namespace: String,
+        version: String,
+        ops: Vec<PluginOp>,
+    },
+    UsePlugin {
+        name: String,
+        namespace: String,
+    },
+    RequestCapability {
+        capability: String,
+    },
+    ShardBlock {
+        attributes: Vec<Attribute>,
+        params: Vec<(String, Type)>,
+        body: Vec<AstNode>,
+    },
+    ValidatorBlock {
+        attributes: Vec<Attribute>,
+        params: Vec<(String, Type)>,
+        body: Vec<AstNode>,
+    },
+    ContractBlock {
+        attributes: Vec<Attribute>,
+        name: String,
+        state: Vec<(String, Type)>,
+        methods: Vec<AstNode>,
+    },
+}
+
+// Add ContractAst type used in ksl_contract.rs
+pub struct ContractAst {
+    pub name: String,
+    pub functions: Vec<Function>,
+    pub storage_vars: Vec<(String, Type)>,
+    pub events: Vec<Event>,
+    pub capabilities: Vec<String>,
+}
+
+// Add Event type used in ContractAst
+pub struct Event {
+    pub name: String,
+    pub fields: Vec<(String, Type)>,
+    pub indexed: bool,
+}
+
+// Add these plugin-related types to ksl_ast.rs
+
+/// Represents a plugin operation
+#[derive(Debug, Clone)]
+pub struct PluginOp {
+    /// Name of the operation
+    pub name: String,
+    /// Parameter types
+    pub signature: Vec<Type>,
+    /// Return type
+    pub return_type: Type,
+    /// Handler for the operation
+    pub handler: PluginHandler,
+}
+
+/// Represents a plugin handler
+#[derive(Debug, Clone)]
+pub struct PluginHandler {
+    /// Type of handler (native, wasm, etc.)
+    pub kind: String,
+    /// Handler name/path
+    pub name: String,
+}
+
+// Add Parameter struct 
+#[derive(Debug, Clone)]
+pub struct Parameter {
+    pub name: String,
+    pub ty: Type,
+}
+
+impl From<i64> for Literal {
+    fn from(n: i64) -> Self {
+        Literal::Int(n)
+    }
+}
+
+impl From<f64> for Literal {
+    fn from(f: f64) -> Self {
+        Literal::Float(f)
+    }
+}
+
+impl From<bool> for Literal {
+    fn from(b: bool) -> Self {
+        Literal::Bool(b)
+    }
+}
+
+impl From<String> for Literal {
+    fn from(s: String) -> Self {
+        Literal::Str(s)
+    }
+}
+
+impl From<&str> for Literal {
+    fn from(s: &str) -> Self {
+        Literal::Str(s.to_string())
     }
 }

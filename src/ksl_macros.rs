@@ -2,7 +2,6 @@
 // Macro system for KSL to enable metaprogramming and code generation,
 // supporting networking operations, async/await patterns, and procedural macros.
 
-use crate::ksl_parser::{parse, ParseError};
 use crate::ksl_ast_transform::{AstTransformer, TransformConfig};
 use crate::ksl_errors::{KslError, SourcePosition};
 use crate::ksl_generics::{TypeParam, TraitBound};
@@ -10,8 +9,22 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use proc_macro::TokenStream;
 use quote::{quote, ToTokens};
-use syn::{parse_macro_input, ItemFn, Attribute, Ident, FnArg, ReturnType, Type};
+use syn::{parse_macro_input, ItemFn, Ident, FnArg, ReturnType, Type};
 use proc_macro2::Span;
+
+// Stub for ParseError that was imported from ksl_parser
+#[derive(Debug)]
+pub struct ParseError {
+    pub message: String,
+    pub position: SourcePosition,
+}
+
+// Stub for parse function that was imported from ksl_parser
+pub fn parse(_source: &str) -> Result<Vec<AstNode>, ParseError> {
+    // This is just a stub to fix the circular dependency
+    // The real implementation is in ksl_parser.rs
+    unimplemented!("This is a stub for the parser function. The real implementation is in ksl_parser.rs")
+}
 
 /// Represents a macro parameter (e.g., $msg: string).
 #[derive(Debug, Clone)]
@@ -22,6 +35,60 @@ pub struct MacroParam {
     param_type: ParamType,
     /// Whether the parameter is optional
     is_optional: bool,
+}
+
+/// Represents an attribute argument.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AttributeArg {
+    /// String literal argument (e.g., name = "value")
+    String(String),
+    /// Numeric argument (e.g., limit = 100)
+    Number(u64),
+    /// Identifier argument (e.g., flag = true)
+    Ident(String),
+    /// Key-value pair (e.g., config = { key: "value" })
+    KeyValue(String, Box<AttributeArg>),
+    /// Array of arguments (e.g., values = [1, 2, 3])
+    Array(Vec<AttributeArg>),
+    /// Tuple of arguments (e.g., point = (1, 2))
+    Tuple(Vec<AttributeArg>),
+}
+
+/// Represents a code attribute (e.g., #[contract], #[test], #[shard])
+#[derive(Debug, Clone, PartialEq)]
+pub struct Attribute {
+    /// Name of the attribute
+    pub name: String,
+    /// Arguments for the attribute
+    pub args: Vec<AttributeArg>,
+    /// Source position for error reporting
+    pub position: SourcePosition,
+}
+
+impl Attribute {
+    /// Creates a new attribute
+    pub fn new(name: String, args: Vec<AttributeArg>, position: SourcePosition) -> Self {
+        Attribute {
+            name,
+            args,
+            position,
+        }
+    }
+    
+    /// Checks if an attribute is of a specific name
+    pub fn is(&self, name: &str) -> bool {
+        self.name == name
+    }
+    
+    /// Gets an argument value by name
+    pub fn get_arg(&self, name: &str) -> Option<&AttributeArg> {
+        self.args.iter().find(|arg| {
+            match arg {
+                AttributeArg::KeyValue(key, _) => key == name,
+                _ => false,
+            }
+        })
+    }
 }
 
 impl MacroParam {

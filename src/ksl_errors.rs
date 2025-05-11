@@ -28,6 +28,7 @@ mod ksl_lsp {
 }
 
 // Source position for error reporting
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SourcePosition {
     pub line: usize,
     pub column: usize,
@@ -54,7 +55,7 @@ impl fmt::Display for SourcePosition {
 }
 
 // Main error type for KSL
-pub struct KslError {
+pub enum KslError {
     Parse {
         message: String,
         position: SourcePosition,

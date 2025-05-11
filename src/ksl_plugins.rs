@@ -6,6 +6,7 @@ use crate::ksl_parser::{parse, AstNode, ParseError};
 use crate::ksl_errors::{KslError, SourcePosition};
 use crate::ksl_bytecode::{KapraBytecode, CompileTarget};
 use crate::ksl_module::ModuleSystem;
+use crate::ksl_ast::{PluginOp, PluginHandler, Type as KSLType};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -24,46 +25,6 @@ pub struct PluginSpec {
     pub version: String,
     /// Available plugin operations
     pub ops: Vec<PluginOp>,
-}
-
-/// Plugin operation definition
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PluginOp {
-    /// Operation name (e.g., "infer")
-    pub name: String,
-    /// Input parameter types
-    pub signature: Vec<KSLType>,
-    /// Return type
-    pub return_type: KSLType,
-    /// Operation handler type
-    pub handler: PluginHandler,
-}
-
-/// Plugin operation handler type
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum PluginHandler {
-    /// Native Rust implementation
-    Native(String),
-    /// WASM module implementation
-    Wasm(PathBuf),
-    /// Built-in host function
-    Syscall(String),
-}
-
-/// KSL type system
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum KSLType {
-    /// Basic types
-    Bool,
-    Int,
-    Float,
-    String,
-    /// Array type
-    Array(Box<KSLType>),
-    /// Map type
-    Map(Box<KSLType>, Box<KSLType>),
-    /// Custom type
-    Custom(String),
 }
 
 /// Plugin registry for managing loaded plugins
@@ -117,17 +78,16 @@ impl PluginRegistry {
         self.validate_plugin_spec(&spec)?;
 
         // Load plugin implementation
-        match spec.ops.iter().find(|op| matches!(op.handler, PluginHandler::Wasm(_))) {
-            Some(op) => {
-                if let PluginHandler::Wasm(wasm_path) = &op.handler {
-                    let full_path = path.join(wasm_path);
-                    self.load_wasm_plugin(&spec, &full_path)?;
-                }
-            }
-            None => {
-                // Native plugin
-                self.load_native_plugin(&spec, path)?;
-            }
+        let wasm_ops = self.find_ops_with_handler(&spec, "wasm");
+        if !wasm_ops.is_empty() {
+            // Find the first WASM handler
+            let wasm_op = wasm_ops[0];
+            let wasm_path = Path::new(&wasm_op.handler.name);
+            let full_path = path.join(wasm_path);
+            self.load_wasm_plugin(&spec, &full_path)?;
+        } else {
+            // Native plugin
+            self.load_native_plugin(&spec, path)?;
         }
 
         // Register plugin
@@ -166,23 +126,34 @@ impl PluginRegistry {
 
             // Validate handler
             match &op.handler {
-                PluginHandler::Native(_) => {
-                    // Native handlers are validated at runtime
-                }
-                PluginHandler::Wasm(path) => {
-                    if !path.exists() {
-                        return Err(KslError::type_error(
-                            format!("WASM module not found: {}", path.display()),
-                            pos,
-                        ));
-                    }
-                }
-                PluginHandler::Syscall(name) => {
-                    if name.is_empty() {
-                        return Err(KslError::type_error(
-                            "Syscall name cannot be empty".to_string(),
-                            pos,
-                        ));
+                PluginHandler { kind, name } => {
+                    match kind.as_str() {
+                        "native" => {
+                            // Native handlers are validated at runtime
+                        },
+                        "wasm" => {
+                            let path = Path::new(name);
+                            if !path.exists() {
+                                return Err(KslError::type_error(
+                                    format!("WASM module not found: {}", path.display()),
+                                    pos,
+                                ));
+                            }
+                        },
+                        "syscall" => {
+                            if name.is_empty() {
+                                return Err(KslError::type_error(
+                                    "Syscall name cannot be empty".to_string(),
+                                    pos,
+                                ));
+                            }
+                        },
+                        _ => {
+                            return Err(KslError::type_error(
+                                format!("Unknown handler kind: {}", kind),
+                                pos,
+                            ));
+                        }
                     }
                 }
             }
@@ -247,6 +218,13 @@ impl PluginRegistry {
     pub fn list_plugins(&self) -> Vec<&PluginSpec> {
         self.plugins.values().collect()
     }
+
+    /// Find operations with specific handler types
+    fn find_ops_with_handler(&self, spec: &PluginSpec, handler_kind: &str) -> Vec<&PluginOp> {
+        spec.ops.iter()
+            .filter(|op| op.handler.kind == handler_kind)
+            .collect()
+    }
 }
 
 /// Public API for plugin management
@@ -280,9 +258,12 @@ mod tests {
             ops: vec![
                 PluginOp {
                     name: "test_op".to_string(),
-                    signature: vec![KSLType::String],
+                    signature: vec![KSLType::Str],
                     return_type: KSLType::Bool,
-                    handler: PluginHandler::Native("test_handler".to_string()),
+                    handler: PluginHandler {
+                        kind: "native".to_string(),
+                        name: "test_handler".to_string(),
+                    },
                 }
             ],
         };
