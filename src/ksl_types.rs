@@ -28,6 +28,7 @@ mod ksl_typegen {
     pub struct TypeGenerator;
     impl TypeGenerator {
         pub fn validate_schema(_schema: &str) -> Result<(), TypeError> {
+            let schema_string = _schema.to_string();
             Ok(()) // Placeholder
         }
     }
@@ -94,7 +95,7 @@ pub enum Type {
 }
 
 /// Context for type inference (e.g., variable bindings).
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct TypeContext {
     bindings: HashMap<String, Type>, // Maps variable names to their types
 }
@@ -139,7 +140,7 @@ impl TypeContext {
 }
 
 /// Type inference and validation errors.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub struct TypeError {
     pub message: String,
     pub position: usize,
@@ -725,7 +726,7 @@ impl Value {
                 let scheme = match proof_type {
                     ZkProofType::Bls => ZkScheme::BLS,
                     ZkProofType::Dilithium => ZkScheme::Dilithium,
-                    ZkProofType::Generic => return Err(KslError::TypeError("Cannot convert to generic proof type".into())),
+                    ZkProofType::Generic => return Err(KslError::type_error("Cannot convert to generic proof type".into(), SourcePosition::new(1, 1), "E015")),
                 };
                 let bytes_vec: Vec<u8> = bytes.iter().map(|v| match v {
                     Value::U8(b) => *b,
@@ -734,11 +735,7 @@ impl Value {
                 Ok(Value::ZkProof(RuntimeZkProof::from_bytes(scheme, bytes_vec)?))
             },
             // ... existing conversion implementations ...
-            _ => Err(KslError::TypeError(format!(
-                "Cannot convert {:?} to {:?}",
-                self.get_type(),
-                target_type
-            ))),
+            _ => Err(KslError::type_error(format!("Type error occurred"), SourcePosition::new(1, 1), "E016")),
         }
     }
 }
@@ -818,11 +815,12 @@ impl KSLDataBlob {
 /// Block header structure for KSL blockchain
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct BlockHeader {
-    pub parent: Vec<u8>, // Hash
+    pub parent: Vec<u8>,
     pub nonce: u64,
     pub timestamp: u64,
-    pub miner: Vec<u8>, // Address
+    pub miner: Vec<u8>,
     pub shard: u16,
+    pub signature: Vec<u8>,
 }
 
 /// Transaction structure for KSL blockchain

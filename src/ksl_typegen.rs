@@ -115,7 +115,8 @@ impl TypeGen {
     /// Generates KSL types from a JSON schema
     fn generate_from_json(&self, schema_content: &str) -> Result<String, KslError> {
         let pos = SourcePosition::new(1, 1);
-        let schema: JsonValue = serde_json::from_str(schema_content)
+        let schema_string = schema_content.to_string();
+        let schema: JsonValue = serde_json::from_str(&schema_string)
             .map_err(|e| KslError::type_error(
                 format!("Failed to parse JSON schema: {}", e),
                 pos,

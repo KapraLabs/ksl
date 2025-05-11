@@ -16,6 +16,7 @@ use ed25519_dalek::{
     SecretKey as EdSecretKey,
     Signature as EdSignature,
     Verifier,
+    Signer,
 };
 use blst::{
     min_pk::{
@@ -34,6 +35,8 @@ use pqcrypto_traits::sign::{
     PublicKey as DilithiumPublicKey,
     SecretKey as DilithiumSecretKey,
 };
+
+use itertools::Itertools;
 
 /// Cryptographic function signature with async support
 #[derive(Debug, PartialEq, Clone)]

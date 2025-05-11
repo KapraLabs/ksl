@@ -81,7 +81,7 @@ impl<'a> Verifier<'a> {
         for node in self.ast {
             match node {
                 AstNode::FnDecl { name, params, return_type, body, attributes } |
-                AstNode::AsyncFnDecl { name, params, return_type, body, attributes } => {
+                AstNode::AsyncFnDecl { name, params, return_type, body, attributes, doc } => {
                     // Check for #[verify] attribute
                     if let Some(attr) = attributes.iter().find(|a| a.name == "verify") {
                         let verify_attr = self.parse_verify_attribute(attr)?;
@@ -92,6 +92,7 @@ impl<'a> Verifier<'a> {
                                 self.errors.push(KslError::type_error(
                                     "Async verification requested but no async runtime provided".to_string(),
                                     SourcePosition::new(1, 1),
+                                    "E001".to_string(),
                                 ));
                                 return Err(self.errors.clone());
                             }
@@ -130,6 +131,7 @@ impl<'a> Verifier<'a> {
                     return Err(KslError::type_error(
                         format!("Unknown verification attribute parameter: {}", key),
                         SourcePosition::new(1, 1),
+                        "E002".to_string(),
                     ));
                 }
             }
@@ -139,6 +141,7 @@ impl<'a> Verifier<'a> {
             return Err(KslError::type_error(
                 "Missing postcondition in verify attribute".to_string(),
                 SourcePosition::new(1, 1),
+                "E003".to_string(),
             ));
         }
 
@@ -202,12 +205,14 @@ impl<'a> Verifier<'a> {
                             Err(KslError::type_error(
                                 format!("Async verification failed for {}: postcondition violated, model: {}", name, model),
                                 SourcePosition::new(1, 1),
+                                "E004".to_string(),
                             ))
                         }
                         z3::SatResult::Unknown => {
                             Err(KslError::type_error(
                                 format!("Async verification inconclusive for {}", name),
                                 SourcePosition::new(1, 1),
+                                "E005".to_string(),
                             ))
                         }
                     }
@@ -216,6 +221,7 @@ impl<'a> Verifier<'a> {
                 Err(_) => Err(KslError::type_error(
                     format!("Async verification timeout for {}", name),
                     SourcePosition::new(1, 1),
+                    "E006".to_string(),
                 )),
             }
         });
@@ -229,13 +235,15 @@ impl<'a> Verifier<'a> {
 
     /// Create a Z3 variable for a given type
     fn create_z3_variable(&self, name: &str, ty: &TypeAnnotation) -> Result<Z3Variable<'a>, VerError> {
+        let name_string = name.to_string();
         match ty {
             TypeAnnotation::Simple(t) => match t.as_str() {
-                "u32" | "i32" | "usize" => Ok(Z3Variable::Int(Int::new_const(&self.ctx, name))),
-                "bool" => Ok(Z3Variable::Bool(Bool::new_const(&self.ctx, name))),
+                "u32" | "i32" | "usize" => Ok(Z3Variable::Int(Int::new_const(&self.ctx, &name_string))),
+                "bool" => Ok(Z3Variable::Bool(Bool::new_const(&self.ctx, &name_string))),
                 _ => Err(KslError::type_error(
                     format!("Unsupported type for verification: {}", t),
                     SourcePosition::new(1, 1),
+                    "E004".to_string(),
                 )),
             },
             TypeAnnotation::Array { element, size } => {
@@ -246,13 +254,15 @@ impl<'a> Verifier<'a> {
                     _ => return Err(KslError::type_error(
                         format!("Unsupported array element type: {}", element),
                         SourcePosition::new(1, 1),
+                        "E005".to_string(),
                     )),
                 };
-                Ok(Z3Variable::Array(Array::new_const(&self.ctx, name, &domain, &range)))
+                Ok(Z3Variable::Array(Array::new_const(&self.ctx, &name_string, &domain, &range)))
             }
             _ => Err(KslError::type_error(
                 format!("Unsupported type annotation: {:?}", ty),
                 SourcePosition::new(1, 1),
+                "E006".to_string(),
             )),
         }
     }
@@ -307,12 +317,14 @@ impl<'a> Verifier<'a> {
                 Err(KslError::type_error(
                     format!("Verification failed for {}: postcondition violated, model: {}", name, model),
                     SourcePosition::new(1, 1),
+                    "E007".to_string(),
                 ))
             }
             z3::SatResult::Unknown => {
                 Err(KslError::type_error(
                     format!("Verification inconclusive for {}", name),
                     SourcePosition::new(1, 1),
+                    "E008".to_string(),
                 ))
             }
         }
@@ -333,6 +345,7 @@ impl<'a> Verifier<'a> {
                                     _ => return Err(KslError::type_error(
                                         "Addition requires integer operands".to_string(),
                                         SourcePosition::new(1, 1),
+                                        "E007".to_string(),
                                     )),
                                 };
                                 self.add_constraint(result)?;
@@ -343,6 +356,7 @@ impl<'a> Verifier<'a> {
                                     _ => return Err(KslError::type_error(
                                         "Subtraction requires integer operands".to_string(),
                                         SourcePosition::new(1, 1),
+                                        "E008".to_string(),
                                     )),
                                 };
                                 self.add_constraint(result)?;
@@ -353,6 +367,7 @@ impl<'a> Verifier<'a> {
                                     _ => return Err(KslError::type_error(
                                         "Multiplication requires integer operands".to_string(),
                                         SourcePosition::new(1, 1),
+                                        "E009".to_string(),
                                     )),
                                 };
                                 self.add_constraint(result)?;
@@ -365,6 +380,7 @@ impl<'a> Verifier<'a> {
                                 return Err(KslError::type_error(
                                     format!("Unsupported operator: {}", op),
                                     SourcePosition::new(1, 1),
+                                    "E010".to_string(),
                                 ));
                             }
                         }
@@ -394,6 +410,7 @@ impl<'a> Verifier<'a> {
                             return Err(KslError::type_error(
                                 format!("Undefined function: {}", name),
                                 SourcePosition::new(1, 1),
+                                "E011".to_string(),
                             ));
                         }
                     }
@@ -409,6 +426,7 @@ impl<'a> Verifier<'a> {
                                 return Err(KslError::type_error(
                                     "Array access requires array and integer index".to_string(),
                                     SourcePosition::new(1, 1),
+                                    "E012".to_string(),
                                 ));
                             }
                         }
@@ -460,12 +478,14 @@ impl<'a> Verifier<'a> {
                     _ => return Err(KslError::type_error(
                         format!("Unsupported boolean comparison: {}", op),
                         SourcePosition::new(1, 1),
+                        "E013".to_string(),
                     )),
                 })
             }
             _ => Err(KslError::type_error(
                 "Comparison requires matching operand types".to_string(),
                 SourcePosition::new(1, 1),
+                "E014".to_string(),
             )),
         }
     }
@@ -488,6 +508,7 @@ impl<'a> Verifier<'a> {
                     _ => return Err(KslError::type_error(
                         "sha3 requires integer input".to_string(),
                         SourcePosition::new(1, 1),
+                        "E015".to_string(),
                     )),
                 };
                 Ok(Z3Variable::Int(func.apply(&[arg]).as_int().unwrap()))
@@ -502,6 +523,7 @@ impl<'a> Verifier<'a> {
                     _ => return Err(KslError::type_error(
                         "Crypto verification requires integer input".to_string(),
                         SourcePosition::new(1, 1),
+                        "E016".to_string(),
                     )),
                 };
                 Ok(Z3Variable::Bool(func.apply(&[arg]).as_bool().unwrap()))
@@ -509,6 +531,7 @@ impl<'a> Verifier<'a> {
             _ => Err(KslError::type_error(
                 format!("Unsupported function: {}", name),
                 SourcePosition::new(1, 1),
+                "E015".to_string(),
             )),
         }
     }
@@ -554,6 +577,7 @@ impl<'a> Verifier<'a> {
                 return Err(KslError::type_error(
                     "Invalid equality expression".to_string(),
                     SourcePosition::new(1, 1),
+                    "E017".to_string(),
                 ));
             }
             let left = self.parse_expr(parts[0])?;
@@ -564,12 +588,14 @@ impl<'a> Verifier<'a> {
                 _ => Err(KslError::type_error(
                     "Type mismatch in equality".to_string(),
                     SourcePosition::new(1, 1),
+                    "E016".to_string(),
                 )),
             }
         } else {
             Err(KslError::type_error(
                 format!("Unsupported postcondition: {}", expr),
                 SourcePosition::new(1, 1),
+                "E017".to_string(),
             ))
         }
     }
@@ -593,6 +619,7 @@ impl<'a> Verifier<'a> {
             Err(KslError::type_error(
                 format!("Unknown variable in expression: {}", expr),
                 SourcePosition::new(1, 1),
+                "E017".to_string(),
             ))
         }
     }

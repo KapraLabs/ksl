@@ -516,8 +516,9 @@ pub async fn generate_wasm_async(bytecode: KapraBytecode) -> Result<Vec<u8>, Vec
 
 /// Compiles KSL source to WASM with async support
 pub async fn compile_to_wasm(source: &str, config: CompileConfig) -> Result<Vec<u8>, Vec<WasmError>> {
+    let source_string = source.to_string();
     let mut compiler = Compiler::new(config);
-    let bytecode = compiler.compile(source)?;
+    let bytecode = compiler.compile(&source_string)?;
     generate_wasm_async(bytecode).await
 }
 

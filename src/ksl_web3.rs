@@ -211,7 +211,8 @@ impl Web3Runtime {
 
     /// Fetches off-chain data via an oracle asynchronously.
     pub async fn fetch_oracle_data(&self, url: &str) -> Result<FixedArray<32>, KslError> {
-        let request = HttpRequest::new(url.to_string());
+        let url_string = url.to_string();
+        let request = HttpRequest::new(url_string);
         let response = self.networking.http_get(request).await?;
         
         if response.status_code != 200 {

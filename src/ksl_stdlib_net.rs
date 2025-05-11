@@ -691,8 +691,9 @@ impl RDMAContext {
 
     /// Connects to a remote RDMA endpoint
     pub async fn connect(&mut self, host: &str, port: u32) -> Result<u64, String> {
+        let port_u32: u32 = port.try_into().unwrap();
         let mut device = self.device.lock().await;
-        let conn_id = device.create_connection(host, port).await?;
+        let conn_id = device.create_connection(host, port_u32).await?;
         Ok(conn_id)
     }
 

@@ -44,10 +44,7 @@ impl VSCodeConfig {
         let pos = SourcePosition::new(1, 1);
         // Create output directory
         fs::create_dir_all(&self.output_dir)
-            .map_err(|e| KslError::type_error(
-                format!("Failed to create output directory {}: {}", self.output_dir.display(), e),
-                pos,
-            ))?;
+            .map_err(|e| KslError::type_error(e.to_string(), pos, "E017"))?;
 
         // Initialize LSP server
         let lsp_server = LspServer::new(self.lsp_config.clone());
@@ -117,15 +114,9 @@ impl VSCodeConfig {
 
         let output_path = self.output_dir.join("language-configuration.json");
         File::create(&output_path)
-            .map_err(|e| KslError::type_error(
-                format!("Failed to create language config file {}: {}", output_path.display(), e),
-                pos,
-            ))?
+            .map_err(|e| KslError::type_error(e.to_string(), pos, "E018"))?
             .write_all(serde_json::to_string_pretty(&config)?.as_bytes())
-            .map_err(|e| KslError::type_error(
-                format!("Failed to write language config file {}: {}", output_path.display(), e),
-                pos,
-            ))?;
+            .map_err(|e| KslError::type_error(e.to_string(), pos, "E019"))?;
 
         Ok(())
     }
@@ -208,15 +199,9 @@ impl VSCodeConfig {
 
         let output_path = self.output_dir.join("snippets.json");
         File::create(&output_path)
-            .map_err(|e| KslError::type_error(
-                format!("Failed to create snippets file {}: {}", output_path.display(), e),
-                pos,
-            ))?
+            .map_err(|e| KslError::type_error(e.to_string(), pos, "E020"))?
             .write_all(serde_json::to_string_pretty(&snippets)?.as_bytes())
-            .map_err(|e| KslError::type_error(
-                format!("Failed to write snippets file {}: {}", output_path.display(), e),
-                pos,
-            ))?;
+            .map_err(|e| KslError::type_error(e.to_string(), pos, "E021"))?;
 
         Ok(())
     }
@@ -252,15 +237,9 @@ impl VSCodeConfig {
 
         let output_path = self.output_dir.join("settings.json");
         File::create(&output_path)
-            .map_err(|e| KslError::type_error(
-                format!("Failed to create settings file {}: {}", output_path.display(), e),
-                pos,
-            ))?
+            .map_err(|e| KslError::type_error(e.to_string(), pos, "E022"))?
             .write_all(serde_json::to_string_pretty(&settings)?.as_bytes())
-            .map_err(|e| KslError::type_error(
-                format!("Failed to write settings file {}: {}", output_path.display(), e),
-                pos,
-            ))?;
+            .map_err(|e| KslError::type_error(e.to_string(), pos, "E023"))?;
 
         Ok(())
     }
@@ -287,15 +266,9 @@ impl VSCodeConfig {
 
         let output_path = self.output_dir.join("launch.json");
         File::create(&output_path)
-            .map_err(|e| KslError::type_error(
-                format!("Failed to create launch config file {}: {}", output_path.display(), e),
-                pos,
-            ))?
+            .map_err(|e| KslError::type_error(e.to_string(), pos, "E024"))?
             .write_all(serde_json::to_string_pretty(&launch_config)?.as_bytes())
-            .map_err(|e| KslError::type_error(
-                format!("Failed to write launch config file {}: {}", output_path.display(), e),
-                pos,
-            ))?;
+            .map_err(|e| KslError::type_error(e.to_string(), pos, "E025"))?;
 
         Ok(())
     }
@@ -340,15 +313,9 @@ impl VSCodeConfig {
 
         let output_path = self.output_dir.join("tasks.json");
         File::create(&output_path)
-            .map_err(|e| KslError::type_error(
-                format!("Failed to create tasks config file {}: {}", output_path.display(), e),
-                pos,
-            ))?
+            .map_err(|e| KslError::type_error(e.to_string(), pos, "E026"))?
             .write_all(serde_json::to_string_pretty(&tasks_config)?.as_bytes())
-            .map_err(|e| KslError::type_error(
-                format!("Failed to write tasks config file {}: {}", output_path.display(), e),
-                pos,
-            ))?;
+            .map_err(|e| KslError::type_error(e.to_string(), pos, "E027"))?;
 
         Ok(())
     }

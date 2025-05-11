@@ -888,19 +888,6 @@ impl KSLIR {
         self.plugin_ops.get(&key)
     }
 
-    /// Validates required capabilities against supported ones
-    pub fn validate_capabilities(&self, required: &[String]) -> Result<(), String> {
-        for cap in required {
-            if !SUPPORTED_CAPABILITIES.contains(&cap.as_str()) {
-                return Err(format!("Unsupported capability: {}", cap));
-            }
-            if !self.supported_capabilities.contains(cap) {
-                return Err(format!("Capability not enabled for contract: {}", cap));
-            }
-        }
-        Ok(())
-    }
-
     /// Adds a supported capability
     pub fn add_capability(&mut self, capability: String) -> Result<(), String> {
         if !SUPPORTED_CAPABILITIES.contains(&capability.as_str()) {
@@ -929,7 +916,7 @@ pub enum SymbolKind {
 }
 
 /// Function IR
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FunctionIR {
     pub name: String,
     pub params: Vec<ParamIR>,
@@ -939,14 +926,14 @@ pub struct FunctionIR {
 }
 
 /// Parameter IR
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParamIR {
     pub name: String,
     pub type_: TypeIR,
 }
 
 /// Type IR
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TypeIR {
     Basic(String),
     Array(Box<TypeIR>),
@@ -955,7 +942,7 @@ pub enum TypeIR {
 }
 
 /// Statement IR
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum StatementIR {
     VarDecl {
         name: String,
@@ -977,7 +964,7 @@ pub enum StatementIR {
 }
 
 /// Expression IR
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ExpressionIR {
     Ident(String),
     Number(String),
@@ -999,7 +986,7 @@ pub enum ExpressionIR {
 }
 
 /// Global variable IR
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GlobalIR {
     pub name: String,
     pub type_: TypeIR,
@@ -1007,7 +994,7 @@ pub struct GlobalIR {
 }
 
 /// Plugin operation IR
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginOpIR {
     pub plugin: String,
     pub name: String,
@@ -1017,7 +1004,7 @@ pub struct PluginOpIR {
 }
 
 /// Plugin handler IR
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PluginHandlerIR {
     Native(String),
     Wasm(String),

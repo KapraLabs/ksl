@@ -364,10 +364,11 @@ impl UpdateManager {
 
     /// Fetches updates from registry
     pub fn fetch_updates(&self, channel: &str) -> Result<Vec<UpdateMetadata>, String> {
+        let channel_string = channel.to_string();
         let client = self.registry_client.as_ref()
             .ok_or_else(|| "Registry client not configured".to_string())?;
 
-        client.fetch_updates(channel)
+        client.fetch_updates(&channel_string)
     }
 
     /// Runs update in sandbox

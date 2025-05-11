@@ -16,6 +16,10 @@ pub mod ksl_types;
 pub mod ksl_stdlib_crypto;
 pub mod ksl_syscalls;
 pub mod ksl_validator_contract;
+mod ksl_package;
+mod ksl_version;
+mod ksl_export;
+mod ksl_stdlib;
 
 pub use ksl_ast::*;
 pub use ksl_parser::*;

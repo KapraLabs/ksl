@@ -586,9 +586,9 @@ pub mod blockchain {
     pub fn assert_kaprekar_stable(hash: &[u8]) -> Result<(), KslError> {
         use crate::ksl_stdlib_crypto::validation::kaprekar_valid;
         
-        let num = u64::from_be_bytes(hash[..8].try_into().map_err(|_| KslError::InvalidInput)?);
+        let num = u64::from_be_bytes(hash[..8].try_into().map_err(|_| KslError::compile("Hash is not Kaprekar stable".into(), SourcePosition::new(1, 1), "E014"))?);
         if !kaprekar_valid(num) {
-            return Err(KslError::ValidationFailed("Hash is not Kaprekar stable".into()));
+            return Err(KslError::compile("Hash is not Kaprekar stable".into(), SourcePosition::new(1, 1), "E014"));
         }
         Ok(())
     }

@@ -3,6 +3,7 @@ use crate::ksl_stdlib_crypto::validation::{kaprekar_valid, bls_verify, modulo_ch
 use crate::ksl_syscalls::blockchain::{get_block_hash, get_validator_pubkey, get_chain_state};
 use crate::ksl_errors::KslError;
 use std::time::{SystemTime, UNIX_EPOCH};
+use sha3::Digest;
 
 // Constants for validation
 const MAX_SUPPLY: u64 = 1_000_000_000;
@@ -43,18 +44,18 @@ pub fn validate_block(header: &BlockHeader, txs: &[Transaction]) -> Result<(), K
     // Check Kaprekar stability
     let block_hash = get_block_hash()?;
     if !kaprekar_valid(u64::from_be_bytes(block_hash[..8].try_into()?)) {
-        return Err(KslError::ValidationFailed("Block hash is not Kaprekar stable".into()));
+        return Err(KslError::compile("Block hash is not Kaprekar stable".into(), SourcePosition::new(1, 1), "E001"));
     }
 
     // Verify block signature
     let validator_pubkey = get_validator_pubkey()?;
     if !bls_verify(&block_hash, &header.signature, &validator_pubkey) {
-        return Err(KslError::ValidationFailed("Invalid block signature".into()));
+        return Err(KslError::compile("Invalid block signature".into(), SourcePosition::new(1, 1), "E002"));
     }
 
     // Check nonce meets difficulty requirement
     if header.nonce % 100000 != 0 {
-        return Err(KslError::ValidationFailed("Invalid nonce".into()));
+        return Err(KslError::compile("Invalid nonce".into(), SourcePosition::new(1, 1), "E003"));
     }
 
     // Validate transactions
@@ -76,20 +77,20 @@ fn verify_block_postconditions(header: &BlockHeader, txs: &[Transaction]) -> Res
         .unwrap()
         .as_secs();
     if header.timestamp > now {
-        return Err(KslError::ValidationFailed("Block timestamp is in the future".into()));
+        return Err(KslError::compile("Block timestamp is in the future".into(), SourcePosition::new(1, 1), "E004"));
     }
 
     // Check total supply hasn't exceeded maximum
     let total_supply = get_chain_state(b"total_supply")?;
     let total_supply = u64::from_be_bytes(total_supply[..8].try_into()?);
     if total_supply > MAX_SUPPLY {
-        return Err(KslError::ValidationFailed("Total supply exceeds maximum".into()));
+        return Err(KslError::compile("Total supply exceeds maximum".into(), SourcePosition::new(1, 1), "E005"));
     }
 
     // Check validator trust score
     let validator = Validator::new(header.miner.clone());
     if !validator.is_trusted() {
-        return Err(KslError::ValidationFailed("Validator trust score too low".into()));
+        return Err(KslError::compile("Validator trust score too low".into(), SourcePosition::new(1, 1), "E006"));
     }
 
     Ok(())
@@ -100,16 +101,16 @@ fn verify_block_postconditions(header: &BlockHeader, txs: &[Transaction]) -> Res
 /// @returns Result indicating success or failure
 fn validate_transaction(tx: &Transaction) -> Result<(), KslError> {
     // Verify transaction signature
-    let message = [&tx.sender, &tx.recipient, &tx.amount.to_be_bytes()].concat();
+    let message = [&tx.sender, &tx.recipient, &tx.amount.to_be_bytes().to_vec()].concat();
     if !bls_verify(&message, &tx.signature, &tx.sender) {
-        return Err(KslError::ValidationFailed("Invalid transaction signature".into()));
+        return Err(KslError::compile("Invalid transaction signature".into(), SourcePosition::new(1, 1), "E007"));
     }
 
     // Check sender has sufficient balance
     let balance = get_chain_state(&tx.sender)?;
     let balance = u64::from_be_bytes(balance[..8].try_into()?);
     if balance < tx.amount {
-        return Err(KslError::ValidationFailed("Insufficient balance".into()));
+        return Err(KslError::compile("Insufficient balance".into(), SourcePosition::new(1, 1), "E008"));
     }
 
     Ok(())
@@ -131,7 +132,7 @@ pub fn validate_transaction_inclusion(
     let mut hasher = sha3::Keccak256::new();
     hasher.update(&tx.sender);
     hasher.update(&tx.recipient);
-    hasher.update(&tx.amount.to_be_bytes());
+    hasher.update(&tx.amount.to_be_bytes().to_vec());
     hasher.update(&tx.nonce.to_be_bytes());
     hasher.update(&tx.signature);
     hasher.update(&tx.data);
@@ -139,7 +140,7 @@ pub fn validate_transaction_inclusion(
 
     // Verify Merkle proof
     if !merkle_verify(&tx_hash, root, proof, index) {
-        return Err(KslError::ValidationFailed("Invalid transaction inclusion proof".into()));
+        return Err(KslError::compile("Invalid transaction inclusion proof".into(), SourcePosition::new(1, 1), "E009"));
     }
 
     Ok(())
@@ -157,20 +158,20 @@ pub fn validate_cross_shard_transaction(
 ) -> Result<(), KslError> {
     // Verify the cross-shard proof
     if !verify_cross_shard_proof(tx, proof, shard_root) {
-        return Err(KslError::ValidationFailed("Invalid cross-shard proof".into()));
+        return Err(KslError::compile("Invalid cross-shard proof".into(), SourcePosition::new(1, 1), "E010"));
     }
 
     // Verify transaction signature
-    let message = [&tx.sender, &tx.recipient, &tx.amount.to_be_bytes()].concat();
+    let message = [&tx.sender, &tx.recipient, &tx.amount.to_be_bytes().to_vec()].concat();
     if !bls_verify(&message, &tx.signature, &tx.sender) {
-        return Err(KslError::ValidationFailed("Invalid transaction signature".into()));
+        return Err(KslError::compile("Invalid transaction signature".into(), SourcePosition::new(1, 1), "E011"));
     }
 
     // Check sender has sufficient balance
     let balance = get_chain_state(&tx.sender)?;
     let balance = u64::from_be_bytes(balance[..8].try_into()?);
     if balance < tx.amount {
-        return Err(KslError::ValidationFailed("Insufficient balance".into()));
+        return Err(KslError::compile("Insufficient balance".into(), SourcePosition::new(1, 1), "E012"));
     }
 
     Ok(())
@@ -194,7 +195,7 @@ pub fn validate_block_cross_shard(
     // Get shard roots from chain state
     let shard_roots = get_chain_state(b"shard_roots")?;
     let shard_roots: Vec<(u16, Vec<u8>)> = bincode::deserialize(&shard_roots)
-        .map_err(|_| KslError::ValidationFailed("Invalid shard roots format".into()))?;
+        .map_err(|_| KslError::compile("Invalid shard roots format".into(), SourcePosition::new(1, 1), "E013"))?;
 
     // Compute current shard root
     let current_shard_root = compute_shard_root(&shard_roots);
@@ -253,6 +254,7 @@ mod tests {
             timestamp: 1234567890,
             miner: vec![2; 32],
             shard: 1,
+            signature: vec![], // Default signature
         };
         let txs = vec![Transaction {
             sender: vec![3; 32],
@@ -283,10 +285,11 @@ mod tests {
             timestamp: 1234567890,
             miner: vec![2; 32],
             shard: 1,
+            signature: vec![], // Default signature
         };
 
         // Test valid signature
-        let block_hash = sha3(&[&header.parent, &header.nonce.to_be_bytes()].concat());
+        let block_hash = sha3(&[&header.parent, &header.nonce.to_be_bytes().to_vec()].concat());
         let valid_sig = vec![1; 96]; // Mock valid signature
         assert!(bls_verify(&block_hash, &valid_sig, &header.miner));
 
@@ -320,6 +323,7 @@ mod tests {
             timestamp: 1234567890,
             miner: vec![2; 32],
             shard: 1,
+            signature: vec![], // Default signature
         };
         assert!(header.shard < 1024); // Assuming max 1024 shards
 
@@ -330,6 +334,7 @@ mod tests {
             timestamp: 1234567880,
             miner: vec![2; 32],
             shard: 1,
+            signature: vec![], // Default signature
         };
         assert!(header.timestamp > parent_header.timestamp);
 
@@ -377,8 +382,9 @@ mod tests {
                 timestamp: 1234567890 + i * 10,
                 miner: vec![i as u8; 32],
                 shard: (i % 4) as u16,
+                signature: vec![], // Default signature
             };
-            parent_hash = sha3(&[&header.parent, &header.nonce.to_be_bytes()].concat());
+            parent_hash = sha3(&[&header.parent, &header.nonce.to_be_bytes().to_vec()].concat());
             blocks.push(header);
         }
 
@@ -387,7 +393,7 @@ mod tests {
             if i > 0 {
                 assert_eq!(header.parent, sha3(&[
                     &blocks[i-1].parent,
-                    &blocks[i-1].nonce.to_be_bytes()
+                    &blocks[i-1].nonce.to_be_bytes().to_vec()
                 ].concat()));
             }
             assert!(validate_block(header, &[]).is_ok());
@@ -405,6 +411,7 @@ mod tests {
                 .as_secs() + 1000, // Future timestamp
             miner: vec![2; 32],
             shard: 1,
+            signature: vec![], // Default signature
         };
         assert!(verify_block_postconditions(&header, &[]).is_err());
 
@@ -469,6 +476,7 @@ mod tests {
                     .as_secs(),
                 miner: vec![2; 32],
                 shard: 1,
+                signature: vec![], // Default signature
             },
             &[]
         ).is_ok());
@@ -486,6 +494,7 @@ mod tests {
                     .as_secs(),
                 miner: vec![2; 32],
                 shard: 1,
+                signature: vec![], // Default signature
             },
             &[]
         ).is_err());
@@ -557,6 +566,7 @@ mod tests {
                 .as_secs(),
             miner: vec![2; 32],
             shard: 2, // Target shard
+            signature: vec![], // Default signature
         };
 
         let cross_shard_txs = vec![(source_txs[0].clone(), proof)];

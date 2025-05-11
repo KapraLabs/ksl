@@ -4,10 +4,20 @@
 use std::str::Chars;
 use std::iter::Peekable;
 use std::collections::VecDeque;
+use std::collections::HashMap;
+use crate::ksl_errors::SourcePosition;
 
-// Assume ksl_macros.rs provides MacroExpander
-mod ksl_macros {
-    use super::{ParseError, TypeAnnotation, AstNode};
+// Re-export AstNode and related types from ksl_macros.rs
+pub use crate::ksl_macros::AstNode;
+pub use crate::ksl_macros::NetworkOpType;
+pub use crate::ksl_macros::Attribute;
+pub use crate::ksl_macros::AttributeArg;
+pub use crate::ksl_errors::SourcePosition;
+
+// Define stubs for internal use only
+mod internal {
+    use super::{AstNode, ParseError, TypeAnnotation};
+    
     pub struct MacroExpander;
     impl MacroExpander {
         pub fn validate_macro(
@@ -18,11 +28,7 @@ mod ksl_macros {
             Ok(()) // Placeholder
         }
     }
-}
-
-// Assume ksl_async.rs provides AsyncValidator
-mod ksl_async {
-    use super::{ParseError, AstNode};
+    
     pub struct AsyncValidator;
     impl AsyncValidator {
         pub fn validate_async_call(
@@ -45,101 +51,9 @@ enum Token {
     EOF,
 }
 
-/// AST node types representing KSL program structure.
-#[derive(Debug, PartialEq)]
-pub enum AstNode {
-    VarDecl {
-        is_mutable: bool,               // true for let/var, false for const
-        name: String,
-        type_annot: Option<TypeAnnotation>, // e.g., "u32", "array<u8, 32>"
-        expr: Box<AstNode>,
-    },
-    FnDecl {
-        doc: Option<String>,
-        name: String,
-        params: Vec<(String, TypeAnnotation)>, // (name, type)
-        return_type: TypeAnnotation,
-        required_capabilities: Vec<String>,
-        body: Vec<AstNode>,
-        attributes: Vec<Attribute>,
-    },
-    If {
-        condition: Box<AstNode>,
-        then_branch: Vec<AstNode>,
-        else_branch: Option<Vec<AstNode>>,
-    },
-    Match {
-        expr: Box<AstNode>,
-        arms: Vec<MatchArm>, // (pattern, body)
-    },
-    MacroDef {
-        name: String,
-        params: Vec<(String, TypeAnnotation)>, // (name, type)
-        body: Vec<AstNode>,
-    },
-    Expr {
-        kind: ExprKind,
-    },
-    ArrayLiteral {
-        elements: Vec<AstNode>,
-        element_type: TypeAnnotation,
-    },
-    ArrayAccess {
-        array: Box<AstNode>,
-        index: Box<AstNode>,
-    },
-    ShardBlock {
-        attributes: Vec<Attribute>,
-        params: Vec<(String, TypeAnnotation)>,
-        body: Vec<AstNode>,
-    },
-    ValidatorBlock {
-        attributes: Vec<Attribute>,
-        params: Vec<(String, TypeAnnotation)>,
-        body: Vec<AstNode>,
-    },
-    ContractBlock {
-        attributes: Vec<Attribute>,
-        name: String,
-        state: Vec<(String, TypeAnnotation)>,
-        methods: Vec<AstNode>,
-    },
-    VerifyBlock {
-        conditions: Vec<AstNode>,
-    },
-    /// Plugin declaration
-    PluginDecl {
-        name: String,
-        namespace: String,
-        version: String,
-        ops: Vec<PluginOp>,
-    },
-    /// Plugin operation declaration
-    PluginOp {
-        name: String,
-        signature: Vec<TypeAnnotation>,
-        return_type: TypeAnnotation,
-        handler: PluginHandler,
-    },
-    /// Plugin operation handler
-    PluginHandler {
-        kind: String, // "native", "wasm", or "syscall"
-        name: String,
-    },
-    /// Plugin usage declaration
-    UsePlugin {
-        name: String,
-        namespace: String,
-    },
-    /// Dynamic capability request
-    RequestCapability {
-        capability: String,
-    },
-}
-
 /// Type annotations for variables and parameters.
 #[derive(Debug, PartialEq, Clone)]
-enum TypeAnnotation {
+pub enum TypeAnnotation {
     Simple(String),            // e.g., "u32"
     Array { 
         element: Box<TypeAnnotation>, // e.g., "u8" in array<u8, 32>
@@ -152,8 +66,8 @@ enum TypeAnnotation {
 }
 
 /// Expression kinds within AST nodes.
-#[derive(Debug, PartialEq)]
-enum ExprKind {
+#[derive(Debug, PartialEq, Clone)]
+pub enum ExprKind {
     Ident(String),
     Number(String),
     String(String),
@@ -180,35 +94,18 @@ enum ExprKind {
     },
 }
 
+/// Documentation comment type
+#[derive(Debug, PartialEq, Clone)]
+pub struct DocComment {
+    pub text: String,
+    pub position: usize,
+}
+
 /// Parser error type.
 #[derive(Debug)]
 pub struct ParseError {
     pub message: String,
     pub position: usize,
-}
-
-/// Enhanced attribute system for KSL
-#[derive(Debug, Clone, PartialEq)]
-pub struct Attribute {
-    /// Attribute name (e.g., "shard", "validator", "contract")
-    pub name: String,
-    /// Attribute arguments
-    pub args: Vec<AttributeArg>,
-    /// Source position for error reporting
-    pub position: SourcePosition,
-}
-
-/// Attribute argument types
-#[derive(Debug, Clone, PartialEq)]
-pub enum AttributeArg {
-    /// String argument (e.g., name = "main")
-    String(String),
-    /// Number argument (e.g., size = 32)
-    Number(u64),
-    /// Identifier argument (e.g., type = u32)
-    Ident(String),
-    /// Key-value pair (e.g., config = { size = 32 })
-    KeyValue(String, Box<AttributeArg>),
 }
 
 /// Match arm structure
@@ -249,7 +146,7 @@ impl<'a> Lexer<'a> {
 
         self.position += 1;
         match ch {
-            'a'..='z' | 'A'.. Literatura='Z' | '_' => self.read_identifier(),
+            'a'..='z' | 'A'..='Z' | '_' => self.read_identifier(),
             '0'..='9' => self.read_number(),
             '"' => self.read_string(),
             '=' | ':' | '+' | '>' | '{' | '}' | '(' | ')' | ',' | ';' | '<' | '>' | '[' | ']' | '!' => {
@@ -661,7 +558,7 @@ impl<'a> Parser<'a> {
         }
         self.expect(Token::Symbol("}".to_string()))?;
         // Validate macro with ksl_macros
-        ksl_macros::MacroExpander::validate_macro(&name, &params, &body)?;
+        internal::MacroExpander::validate_macro(&name, &params, &body)?;
         Ok(AstNode::MacroDef {
             name,
             params,
@@ -930,7 +827,7 @@ impl<'a> Parser<'a> {
         self.expect(Token::Symbol(")".to_string()))?;
 
         // Validate async call
-        ksl_async::AsyncValidator::validate_async_call(&name, &args)?;
+        internal::AsyncValidator::validate_async_call(&name, &args)?;
 
         Ok(AstNode::Expr {
             kind: ExprKind::AsyncCall { name, args },

@@ -152,6 +152,7 @@ pub enum Type {
         type_params: Vec<Type>,
     },
     Void,
+    Primitive(String), // String representation of primitive type
 }
 
 impl Type {
