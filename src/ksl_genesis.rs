@@ -16,6 +16,7 @@ use zip::{ZipWriter, write::FileOptions};
 use trust_dns_resolver::{AsyncResolver, TokioAsyncResolver};
 use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
 use tera::{Tera, Context};
+use crate::ksl_scaffold::{ScaffoldOptions, Template};
 
 /// Genesis configuration
 #[derive(Debug, Serialize, Deserialize)]

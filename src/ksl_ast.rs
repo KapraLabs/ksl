@@ -1,8 +1,9 @@
 // ksl_ast.rs - Abstract Syntax Tree for KSL Language
 
-// Import Attribute from ksl_macros
+use crate::ksl_types::{Type, TypeSystem, TypeConstraint}; // Use Type, TypeSystem, TypeConstraint from ksl_types
 pub use crate::ksl_macros::Attribute;
 
+#[derive(Debug, Clone)]
 pub enum Literal {
     Int(i64),
     Float(f64),
@@ -11,6 +12,7 @@ pub enum Literal {
     Array(Vec<Literal>, Box<Type>), // Array literal with element type
 }
 
+#[derive(Debug, Clone, PartialEq)]
 pub enum BinaryOperator {
     Add,
     Sub,
@@ -27,6 +29,7 @@ pub enum BinaryOperator {
     Or,
 }
 
+#[derive(Debug, Clone)]
 pub enum Expr {
     Literal(Literal),
     Identifier(String),
@@ -64,11 +67,13 @@ pub enum Expr {
     },
 }
 
+#[derive(Debug, Clone)]
 pub struct MatchArm {
     pub pattern: Pattern,
     pub body: Expr,
 }
 
+#[derive(Debug, Clone)]
 pub enum Pattern {
     Literal(Literal),
     Wildcard,
@@ -77,6 +82,7 @@ pub enum Pattern {
     Array(Vec<Pattern>), // Array pattern matching
 }
 
+#[derive(Debug, Clone)]
 pub enum Stmt {
     Let {
         name: String,
@@ -108,6 +114,7 @@ pub enum Stmt {
     },
 }
 
+#[derive(Debug, Clone)]
 pub enum AssignTarget {
     Identifier(String),
     Index {
@@ -116,6 +123,7 @@ pub enum AssignTarget {
     },
 }
 
+#[derive(Debug, Clone)]
 pub struct Function {
     pub name: String,
     pub params: Vec<Parameter>,
@@ -125,121 +133,34 @@ pub struct Function {
     pub attributes: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
 pub struct Module {
     pub functions: Vec<Function>,
     pub structs: Vec<Struct>,
     pub externs: Vec<ExternBlock>,
 }
 
+#[derive(Debug, Clone)]
 pub struct Struct {
     pub name: String,
     pub fields: Vec<(String, Type)>,
     pub type_params: Vec<String>, // For generic structs
 }
 
+#[derive(Debug, Clone)]
 pub struct ExternBlock {
     pub functions: Vec<ExternFunction>,
 }
 
+#[derive(Debug, Clone)]
 pub struct ExternFunction {
     pub name: String,
     pub params: Vec<Type>,
     pub ret_type: Type,
 }
 
-#[derive(Clone, PartialEq, Debug)]
-pub enum Type {
-    Int,
-    Float,
-    Bool,
-    Str,
-    Array(Box<Type>, usize), // Fixed-size array type
-    DynamicArray(Box<Type>), // Dynamic-size array type
-    Result(Box<Type>, Box<Type>),
-    Custom(String),
-    Generic {
-        name: String,
-        type_params: Vec<Type>,
-    },
-    Void,
-    Primitive(String), // String representation of primitive type
-}
-
-impl Type {
-    pub fn is_numeric(&self) -> bool {
-        matches!(self, Type::Int | Type::Float)
-    }
-
-    pub fn is_array(&self) -> bool {
-        matches!(self, Type::Array(_, _) | Type::DynamicArray(_))
-    }
-
-    pub fn element_type(&self) -> Option<&Type> {
-        match self {
-            Type::Array(elem_type, _) | Type::DynamicArray(elem_type) => Some(elem_type),
-            _ => None
-        }
-    }
-
-    pub fn array_size(&self) -> Option<usize> {
-        match self {
-            Type::Array(_, size) => Some(*size),
-            _ => None
-        }
-    }
-}
-
-// Add a top-level AstNode type to wrap the existing types
-// This allows for compatibility with other modules that expect an AstNode type
-#[derive(Debug, Clone)]
-pub enum AstNode {
-    Expression(Expr),
-    Statement(Stmt),
-    Function(Function),
-    Module(Module),
-    Struct(Struct),
-    VerifyBlock { conditions: Vec<Expr> },
-    BinaryOp { left: Box<AstNode>, op: BinaryOperator, right: Box<AstNode> },
-    Literal(Literal),
-    Identifier(String),
-    Call { function: Box<AstNode>, args: Vec<AstNode> },
-    Index { base: Box<AstNode>, index: Box<AstNode> },
-    ArrayLiteral { elements: Vec<AstNode>, element_type: Type },
-    Return { value: Option<Box<AstNode>> },
-    If { condition: Box<AstNode>, then_branch: Box<AstNode>, else_branch: Option<Box<AstNode>> },
-    // Add plugin-related nodes
-    PluginDecl {
-        name: String,
-        namespace: String,
-        version: String,
-        ops: Vec<PluginOp>,
-    },
-    UsePlugin {
-        name: String,
-        namespace: String,
-    },
-    RequestCapability {
-        capability: String,
-    },
-    ShardBlock {
-        attributes: Vec<Attribute>,
-        params: Vec<(String, Type)>,
-        body: Vec<AstNode>,
-    },
-    ValidatorBlock {
-        attributes: Vec<Attribute>,
-        params: Vec<(String, Type)>,
-        body: Vec<AstNode>,
-    },
-    ContractBlock {
-        attributes: Vec<Attribute>,
-        name: String,
-        state: Vec<(String, Type)>,
-        methods: Vec<AstNode>,
-    },
-}
-
 // Add ContractAst type used in ksl_contract.rs
+#[derive(Debug, Clone)]
 pub struct ContractAst {
     pub name: String,
     pub functions: Vec<Function>,
@@ -249,6 +170,7 @@ pub struct ContractAst {
 }
 
 // Add Event type used in ContractAst
+#[derive(Debug, Clone)]
 pub struct Event {
     pub name: String,
     pub fields: Vec<(String, Type)>,
@@ -314,4 +236,77 @@ impl From<&str> for Literal {
     fn from(s: &str) -> Self {
         Literal::Str(s.to_string())
     }
+}
+
+// Add a top-level AstNode type to wrap the existing types
+// This allows for compatibility with other modules that expect an AstNode type
+#[derive(Debug, Clone)]
+pub enum AstNode {
+    Expression(Expr),
+    Statement(Stmt),
+    Function(Function),
+    Module(Module),
+    Struct(Struct),
+    VerifyBlock { conditions: Vec<Expr> },
+    BinaryOp { left: Box<AstNode>, op: BinaryOperator, right: Box<AstNode> },
+    Literal(Literal),
+    Identifier(String),
+    Call { function: Box<AstNode>, args: Vec<AstNode> },
+    Index { base: Box<AstNode>, index: Box<AstNode> },
+    ArrayLiteral { elements: Vec<AstNode>, element_type: Type },
+    Return { value: Option<Box<AstNode>> },
+    If { condition: Box<AstNode>, then_branch: Box<AstNode>, else_branch: Option<Box<AstNode>> },
+    // Add plugin-related nodes
+    PluginDecl {
+        name: String,
+        namespace: String,
+        version: String,
+        ops: Vec<PluginOp>,
+    },
+    UsePlugin {
+        name: String,
+        namespace: String,
+    },
+    RequestCapability {
+        capability: String,
+    },
+    ShardBlock {
+        attributes: Vec<Attribute>,
+        params: Vec<(String, Type)>,
+        body: Vec<AstNode>,
+    },
+    ValidatorBlock {
+        attributes: Vec<Attribute>,
+        params: Vec<(String, Type)>,
+        body: Vec<AstNode>,
+    },
+    ContractBlock {
+        attributes: Vec<Attribute>,
+        name: String,
+        state: Vec<(String, Type)>,
+        methods: Vec<AstNode>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum BinaryOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    Eq,
+    Neq,
+    Lt,
+    Lte,
+    Gt,
+    Gte,
+    And,
+    Or,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum UnaryOp {
+    Neg,
+    Not,
 }

@@ -247,7 +247,7 @@ impl TemplateValidator {
 
     /// Checks template variables
     fn check_template_variables(&self) -> Vec<LintResult> {
-        let mut results = Vec::new();
+        let results = Vec::new();
 
         // TODO: Implement template variable checking
         // This would require parsing the template files and checking for required variables
@@ -257,7 +257,7 @@ impl TemplateValidator {
 
     /// Checks syntax
     fn check_syntax(&self) -> Vec<LintResult> {
-        let mut results = Vec::new();
+        let results = Vec::new();
 
         // TODO: Implement syntax checking
         // This would require parsing the KSL files and checking for syntax errors
@@ -313,8 +313,8 @@ impl TemplateTestRunner {
     }
 
     /// Runs a single test case
-    fn run_test_case(&self, test_case: &TestCase) -> Vec<TestResult> {
-        let mut results = Vec::new();
+    fn run_test_case(&self, _test_case: &TestCase) -> Vec<TestResult> {
+        let results = Vec::new();
 
         // TODO: Implement test case running
         // This would require:

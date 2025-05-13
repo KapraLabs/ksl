@@ -46,6 +46,8 @@ use serde::{Deserialize, Serialize};
 use notify::{Watcher, RecursiveMode, Event};
 use futures::future::join_all;
 use regex;
+use opentelemetry_sdk::metrics::data::ResourceMetrics;
+use notify::{RecommendedWatcher, RecursiveMode, Watcher, event::Event};
 
 // Test configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -430,8 +432,8 @@ impl TestRunner {
     // Start file watcher with complete callback
     fn start_watcher(&mut self, file: &PathBuf) -> Result<(), String> {
         let (tx, rx) = std::sync::mpsc::channel();
-        let mut watcher = notify::watcher(tx, Duration::from_secs(1))
-            .map_err(|e| format!("Failed to create watcher: {}", e))?;
+        let mut watcher = RecommendedWatcher::new(tx, notify::Config::default())
+            .map_err(|e| format!("Failed to create file watcher: {}", e))?;
 
         watcher.watch(file, RecursiveMode::NonRecursive)
             .map_err(|e| format!("Failed to watch file: {}", e))?;
@@ -566,14 +568,14 @@ impl TestRunner {
             .map_err(|e| format!("Failed to read file: {}", e))?;
 
         // Look for test group declaration
-        if let Some(caps) = regex::Regex::new(r"\[test_group:\s*\"([^\"]+)\"\]")
+        if let Some(caps) = regex::Regex::new(r#"\[test_group:\s*"([^"]+)"\]"#)
             .map_err(|e| format!("Failed to create regex: {}", e))?
             .captures(&source)
         {
             let group_name = caps[1].to_string();
             
             // Parse group metadata
-            let description = regex::Regex::new(r"description:\s*\"([^\"]+)\"")
+            let description = regex::Regex::new(r#"description:\s*"([^"]+)""#)
                 .ok()
                 .and_then(|re| re.captures(&source))
                 .map(|caps| caps[1].to_string());
@@ -606,7 +608,7 @@ impl TestRunner {
     fn report_results(&self) -> Result<(), String> {
         let passed = self.results.iter().filter(|r| r.passed).count();
         let total = self.results.len();
-        println!("Test results: {} passed, {} failed", passed, total - passed);
+        println!("Test results: {} passed, {} failed ", passed, total - passed);
 
         // Group results by test group
         let mut group_results: HashMap<String, Vec<&TestResult>> = HashMap::new();
@@ -620,23 +622,23 @@ impl TestRunner {
 
         // Print results by group
         for (group_name, results) in group_results {
-            println!("\nTest Group: {}", group_name);
+            println!("\\nTest Group: {}", group_name);
             for result in results {
             if result.passed {
-                    println!("✓ {} ({:?}): Passed ({}ms)", 
+                    println!("\\u{2713} {} ({:?}): Passed ({} ms)", 
                         result.name, 
                         result.target, 
                         result.duration.as_millis());
                     
                 if let Some(net_metrics) = &result.network_metrics {
-                    println!("  Network: {} requests, {} errors, avg latency {}ms",
+                    println!("  Network: {} requests, {} errors, avg latency {} ms",
                         net_metrics.requests,
                         net_metrics.errors,
                         net_metrics.avg_latency.as_millis());
                 }
 
                 if let Some(async_metrics) = &result.async_metrics {
-                    println!("  Async: {} tasks, max concurrent {}, avg duration {}ms",
+                    println!("  Async: {} tasks, max concurrent {}, avg duration {} ms",
                         async_metrics.tasks_created,
                         async_metrics.max_concurrent_tasks,
                         async_metrics.avg_task_duration.as_millis());
@@ -649,13 +651,13 @@ impl TestRunner {
                             gas_metrics.avg_gas);
                     }
             } else {
-                    println!("✗ {} ({:?}): Failed - {}", 
+                    println!("\\u{2717} {} ({:?}): Failed - {}", 
                         result.name, 
                         result.target,
-                        result.error.as_ref().unwrap_or(&"Unknown error".to_string()));
+                        result.error.as_ref().unwrap_or(&"Unknown error ".to_string()));
 
                     if let Some(diff) = &result.snapshot_diff {
-                        println!("  Snapshot diff:\n{}", diff.diff);
+                        println!("  Snapshot diff:\\n{}", diff.diff);
                     }
                 }
             }
@@ -667,7 +669,7 @@ impl TestRunner {
         if passed == total {
             Ok(())
         } else {
-            Err(format!("{} test(s) failed", total - passed))
+            Err(format!("{} test(s) failed ", total - passed))
         }
     }
 }
@@ -768,7 +770,7 @@ mod tests {
 
         let result = run_tests_sync(&temp_file.path().to_path_buf(), config);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("test(s) failed"));
+        assert!(result.unwrap_err().contains("test(s) failed "));
     }
 
     #[test]
@@ -776,8 +778,8 @@ mod tests {
         let mut temp_file = NamedTempFile::new().unwrap();
         writeln!(
             temp_file,
-            "fn test_one() { let x: u32 = 1; assert(x == 1); }\n\
-             fn test_two() { let y: u32 = 2; assert(y == 3); }"
+            "fn test_one() {{ let x: u32 = 1; assert(x == 1); }}\\n\
+             fn test_two() {{ let y: u32 = 2; assert(y == 3); }}"
         ).unwrap();
 
         let config = TestConfig {
@@ -793,7 +795,7 @@ mod tests {
 
         let result = run_tests_sync(&temp_file.path().to_path_buf(), config);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("1 test(s) failed"));
+        assert!(result.unwrap_err().contains("1 test(s) failed "));
     }
 
     #[tokio::test]
@@ -824,8 +826,8 @@ mod tests {
         let mut temp_file = NamedTempFile::new().unwrap();
         writeln!(
             temp_file,
-            "#[test_validator]\n\
-             fn test_validator() { let x: u32 = 42; assert(x == 42); }"
+            "#[test_validator]\\n\
+             fn test_validator() {{ let x: u32 = 42; assert(x == 42); }}"
         ).unwrap();
 
         let config = TestConfig {
@@ -917,12 +919,12 @@ mod tests {
         let mut temp_file = NamedTempFile::new().unwrap();
         writeln!(
             temp_file,
-            "[test_group: \"contracts\"]\n\
-             description: \"Contract tests\"\n\
-             dependencies: [\"ksl_contract\", \"ksl_validator\"]\n\
-             timeout: 30\n\
-             \n\
-             fn test_contract() { let x: u32 = 42; assert(x == 42); }"
+            "[test_group: \\\"contracts\\\"]\\n\
+             description: \\\"Contract tests\\\"\\n\
+             dependencies: [\\\"ksl_contract\\\", \\\"ksl_validator\\\"]\\n\
+             timeout: 30\\n\
+             \\n\
+             fn test_contract() {{ let x: u32 = 42; assert(x == 42); }}"
         ).unwrap();
 
         let config = TestConfig {

@@ -17,6 +17,9 @@ use std::collections::HashMap;
 use std::net::{SocketAddr, IpAddr};
 use std::time::Duration;
 use std::sync::atomic::{AtomicU64, Ordering};
+use crate::ksl_types::{TypeAnnotation};
+use crate::ksl_value::Value as KslValue;
+use crate::ksl_async::format_type;
 
 /// Networking standard library function signature
 /// @struct NetStdLibFunction
@@ -470,11 +473,11 @@ impl NetStdLib {
                 }
                 let host = match &args[0] {
                     Value::String(s) => s,
-                    _ => return Err(KslError::type_error("tcp.connect: host must be a string".to_string(), pos)),
+                    _ => return Err(KslError::type_error("tcp.connect: host must be a string".to_string(), pos, "E501".to_string())),
                 };
                 let port = match &args[1] {
                     Value::U32(p) => *p,
-                    _ => return Err(KslError::type_error("tcp.connect: port must be a u32".to_string(), pos)),
+                    _ => return Err(KslError::type_error("tcp.connect: port must be a u32".to_string(), pos, "E502".to_string())),
                 };
                 let address = format!("{}:{}", host, port);
                 let stream = TcpStream::connect(&address)
@@ -494,17 +497,17 @@ impl NetStdLib {
                 }
                 let host = match &args[0] {
                     Value::String(s) => s,
-                    _ => return Err(KslError::type_error("udp.send: host must be a string".to_string(), pos)),
+                    _ => return Err(KslError::type_error("udp.send: host must be a string".to_string(), pos, "E503".to_string())),
                 };
                 let port = match &args[1] {
                     Value::U32(p) => *p,
-                    _ => return Err(KslError::type_error("udp.send: port must be a u32".to_string(), pos)),
+                    _ => return Err(KslError::type_error("udp.send: port must be a u32".to_string(), pos, "E504".to_string())),
                 };
                 let data = match &args[2] {
                     Value::Array(data, size) if *size <= 1024 => {
                         data.iter().map(|v| match v {
                             Value::U32(n) if *n <= 255 => Ok(*n as u8),
-                            _ => Err(KslError::type_error("udp.send: data must be an array of u8".to_string(), pos)),
+                            _ => Err(KslError::type_error("udp.send: data must be an array of u8".to_string(), pos, "E505".to_string())),
                         }).collect::<Result<Vec<u8>, KslError>>()?
                     }
                     _ => return Err(KslError::type_error("udp.send: data must be an array<u8, 1024>".to_string(), pos)),
@@ -533,7 +536,7 @@ impl NetStdLib {
                 }
                 let url = match &args[0] {
                     Value::String(s) => s,
-                    _ => return Err(KslError::type_error("http.get: url must be a string".to_string(), pos)),
+                    _ => return Err(KslError::type_error("http.get: url must be a string".to_string(), pos, "E506".to_string())),
                 };
                 let response = self.runtime.http_get(url)
                     .await
@@ -552,11 +555,11 @@ impl NetStdLib {
                 }
                 let url = match &args[0] {
                     Value::String(s) => s,
-                    _ => return Err(KslError::type_error("http.post: url must be a string".to_string(), pos)),
+                    _ => return Err(KslError::type_error("http.post: url must be a string".to_string(), pos, "E507".to_string())),
                 };
                 let data = match &args[1] {
                     Value::String(s) => s,
-                    _ => return Err(KslError::type_error("http.post: data must be a string".to_string(), pos)),
+                    _ => return Err(KslError::type_error("http.post: data must be a string".to_string(), pos, "E508".to_string())),
                 };
                 let response = self.runtime.http_post(url, data)
                     .await
@@ -575,11 +578,11 @@ impl NetStdLib {
                 }
                 let host = match &args[0] {
                     Value::String(s) => s,
-                    _ => return Err(KslError::type_error("rdma.connect: host must be a string".to_string(), pos)),
+                    _ => return Err(KslError::type_error("rdma.connect: host must be a string".to_string(), pos, "E509".to_string())),
                 };
                 let port = match &args[1] {
                     Value::U32(p) => *p,
-                    _ => return Err(KslError::type_error("rdma.connect: port must be a u32".to_string(), pos)),
+                    _ => return Err(KslError::type_error("rdma.connect: port must be a u32".to_string(), pos, "E510".to_string())),
                 };
 
                 if let Some(rdma) = &self.rdma_context {
@@ -590,7 +593,7 @@ impl NetStdLib {
                     ))?;
                     Ok(Value::U64(conn_id))
                 } else {
-                    Err(KslError::type_error("RDMA not available".to_string(), pos))
+                    Err(KslError::type_error("RDMA not available".to_string(), pos, "E511".to_string()))
                 }
             }
             "rdma.send" => {
@@ -602,13 +605,13 @@ impl NetStdLib {
                 }
                 let conn_id = match &args[0] {
                     Value::U64(id) => *id,
-                    _ => return Err(KslError::type_error("rdma.send: conn_id must be a u64".to_string(), pos)),
+                    _ => return Err(KslError::type_error("rdma.send: conn_id must be a u64".to_string(), pos, "E512".to_string())),
                 };
                 let data = match &args[1] {
                     Value::Array(data, size) if *size <= 1024 => {
                         data.iter().map(|v| match v {
                             Value::U32(n) if *n <= 255 => Ok(*n as u8),
-                            _ => Err(KslError::type_error("rdma.send: data must be an array of u8".to_string(), pos)),
+                            _ => Err(KslError::type_error("rdma.send: data must be an array of u8".to_string(), pos, "E513".to_string())),
                         }).collect::<Result<Vec<u8>, KslError>>()?
                     }
                     _ => return Err(KslError::type_error("rdma.send: data must be an array<u8, 1024>".to_string(), pos)),
@@ -622,7 +625,7 @@ impl NetStdLib {
                     ))?;
                     Ok(Value::U32(bytes_sent as u32))
                 } else {
-                    Err(KslError::type_error("RDMA not available".to_string(), pos))
+                    Err(KslError::type_error("RDMA not available".to_string(), pos, "E511".to_string()))
                 }
             }
             "p2p.connect" => {
@@ -634,7 +637,7 @@ impl NetStdLib {
                 }
                 let peer_id = match &args[0] {
                     Value::U64(id) => *id,
-                    _ => return Err(KslError::type_error("p2p.connect: peer_id must be a u64".to_string(), pos)),
+                    _ => return Err(KslError::type_error("p2p.connect: peer_id must be a u64".to_string(), pos, "E514".to_string())),
                 };
 
                 let mut p2p = self.p2p_manager.lock().await;

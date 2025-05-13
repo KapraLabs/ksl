@@ -32,7 +32,7 @@ use std::collections::HashSet;
 
 // Debug command enum
 #[derive(Debug, PartialEq)]
-enum DebugCommand {
+pub enum DebugCommand {
     Break(u32), // Set breakpoint at instruction index
     Step, // Execute one instruction
     Continue, // Run until breakpoint or end

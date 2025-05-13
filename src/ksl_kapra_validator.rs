@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, Mutex};
 use crate::ksl_async::{AsyncRuntime, AsyncResult};
 use crate::ksl_kapra_consensus::{ConsensusRuntime, ConsensusState};
 use crate::ksl_contract::{ContractState, ContractCompiler};
@@ -16,11 +16,15 @@ use crate::ksl_validator_keys::{ValidatorKeyPair, KeyStore};
 use crate::ksl_kapra_crypto::{KapraCrypto, SignatureScheme};
 use crate::ksl_hot_reload::{HotReloadConfig, HotReloadManager, ReloadableModule};
 use crate::ksl_compiler::{compile, CompileTarget, CompileOptions};
-use crate::kapra_vm::{KapraVM, KapraBytecode, Value};
+use crate::kapra_vm::{KapraVM, Value};
+use crate::ksl_bytecode::KapraBytecode;
 use serde::{Serialize, Deserialize};
 use libloading::{Library, Symbol};
+#[cfg(target_os = "linux")]
 use seccompiler::{SeccompFilter, SeccompAction};
 use chrono::{DateTime, Utc};
+use rand::Rng;
+use std::path::{Path, PathBuf};
 
 /// Represents KSL bytecode (aligned with ksl_bytecode.rs).
 #[derive(Debug, Clone)]
@@ -146,12 +150,12 @@ pub struct ValidatorState {
 /// Kapra VM with validator support (aligned with kapra_vm.rs).
 #[derive(Debug)]
 pub struct KapraVM {
-    stack: Vec<u64>,
-    crypto: KapraCrypto,
-    consensus_runtime: Arc<ConsensusRuntime>,
-    async_runtime: Arc<AsyncRuntime>,
-    contract_compiler: Arc<ContractCompiler>,
-    validator_state: Arc<RwLock<ValidatorState>>,
+    pub stack: Vec<u64>,
+    pub crypto: KapraCrypto,
+    pub consensus_runtime: Arc<ConsensusRuntime>,
+    pub async_runtime: Arc<AsyncRuntime>,
+    pub contract_compiler: Arc<ContractCompiler>,
+    pub validator_state: Arc<RwLock<ValidatorState>>,
 }
 
 impl KapraVM {
@@ -275,8 +279,8 @@ impl KapraVM {
                     // Validate contract execution
                     let result = self.contract_compiler.execute_async(contract_state, function, vec![]).await?;
                     self.stack.push(match result {
-                        Type::Bool(b) => b as u64,
-                        _ => 0,
+                        true => 1u64,
+                        false => 0u64,
                     });
                 }
                 OPCODE_VALIDATE_CONSENSUS => {
@@ -884,7 +888,7 @@ impl KapraValidator {
     fn generate_validator_id(&self) -> ValidatorId {
         use rand::Rng;
         let mut rng = rand::thread_rng();
-        rng.gen()
+        rng.r#gen()
     }
 }
 
@@ -1021,7 +1025,10 @@ pub struct ValidatorManager {
     /// Validator state
     state: Arc<RwLock<ValidatorState>>,
     /// Security sandbox
+    #[cfg(target_os = "linux")]
     sandbox: Arc<Mutex<SeccompFilter>>,
+    #[cfg(not(target_os = "linux"))]
+    sandbox: Arc<Mutex<()>>, // Placeholder for non-Linux
     /// Loaded library
     library: Arc<Mutex<Option<Library>>>,
 }
@@ -1059,22 +1066,28 @@ impl ValidatorManager {
         }));
 
         // Initialize security sandbox
-        let mut filter = SeccompFilter::new(vec![
-            // Allow necessary syscalls
-            ("read", SeccompAction::Allow),
-            ("write", SeccompAction::Allow),
-            ("exit", SeccompAction::Allow),
-            ("exit_group", SeccompAction::Allow),
-        ].into_iter().collect())?;
-
-        // Add memory and network restrictions
-        filter.add_memory_limit(1024 * 1024 * 1024); // 1GB
-        filter.add_network_rules(vec!["127.0.0.1:*"])?;
+        #[cfg(target_os = "linux")]
+        let sandbox_content = {
+            let mut filter = SeccompFilter::new(vec![
+                // Allow necessary syscalls
+                ("read", SeccompAction::Allow),
+                ("write", SeccompAction::Allow),
+                ("exit", SeccompAction::Allow),
+                ("exit_group", SeccompAction::Allow),
+            ].into_iter().collect()).map_err(|e| KslError::config_error(format!("Seccomp filter creation failed: {}", e)))?;
+    
+            // Add memory and network restrictions
+            filter.add_memory_limit(1024 * 1024 * 1024); // 1GB
+            filter.add_network_rules(vec!["127.0.0.1:*"]).map_err(|e| KslError::config_error(format!("Seccomp network rule failed: {}", e)))?;
+            filter
+        };
+        #[cfg(not(target_os = "linux"))]
+        let sandbox_content = (); // Placeholder
 
         Ok(ValidatorManager {
             hot_reload,
             state,
-            sandbox: Arc::new(Mutex::new(filter)),
+            sandbox: Arc::new(Mutex::new(sandbox_content)),
             library: Arc::new(Mutex::new(None)),
         })
     }
@@ -1100,8 +1113,11 @@ impl ValidatorManager {
         )?;
 
         // Load module in sandbox
-        let mut sandbox = self.sandbox.lock().unwrap();
-        sandbox.apply()?;
+        #[cfg(target_os = "linux")]
+        {
+            let mut sandbox_guard = self.sandbox.lock().unwrap();
+            sandbox_guard.apply().map_err(|e| KslError::runtime_error(format!("Failed to apply seccomp sandbox: {}", e), None))?;
+        }
 
         // Load library
         let library = unsafe {

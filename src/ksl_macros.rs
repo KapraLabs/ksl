@@ -5,12 +5,14 @@
 use crate::ksl_ast_transform::{AstTransformer, TransformConfig};
 use crate::ksl_errors::{KslError, SourcePosition};
 use crate::ksl_generics::{TypeParam, TraitBound};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use proc_macro::TokenStream;
-use quote::{quote, ToTokens};
-use syn::{parse_macro_input, ItemFn, Ident, FnArg, ReturnType, Type};
+use quote::{quote, ToTokens, format_ident};
+use syn::{parse_macro_input, ItemFn, Ident, FnArg, ReturnType, AttributeArgs, PatType, Type as SynType, Stmt};
 use proc_macro2::Span;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::fmt::Display;
 
 // Stub for ParseError that was imported from ksl_parser
 #[derive(Debug)]
@@ -52,6 +54,8 @@ pub enum AttributeArg {
     Array(Vec<AttributeArg>),
     /// Tuple of arguments (e.g., point = (1, 2))
     Tuple(Vec<AttributeArg>),
+    /// Boolean argument
+    Bool(bool),
 }
 
 /// Represents a code attribute (e.g., #[contract], #[test], #[shard])
@@ -121,6 +125,16 @@ pub enum TokenType {
     Expr,
     /// Type annotation
     Type,
+    /// A unit type token
+    Unit,
+    /// A map type token
+    Map,
+    /// A network endpoint type token
+    NetworkEndpoint,
+    /// A network headers type token
+    NetworkHeaders,
+    /// An async task type token
+    AsyncTask,
 }
 
 /// Integer types
@@ -527,7 +541,7 @@ pub struct ProcMacro {
 }
 
 /// Arguments for procedural macros
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ProcMacroArg {
     /// String literal argument
     String(String),
@@ -541,6 +555,43 @@ pub enum ProcMacroArg {
     Array(Vec<ProcMacroArg>),
     /// Tuple of arguments
     Tuple(Vec<ProcMacroArg>),
+    /// Boolean argument
+    Bool(bool),
+    /// Type argument
+    Type(Type),
+}
+
+impl std::fmt::Display for ProcMacroArg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProcMacroArg::String(s) => write!(f, "{}", s),
+            ProcMacroArg::Number(n) => write!(f, "{}", n),
+            ProcMacroArg::Ident(i) => write!(f, "{}", i),
+            ProcMacroArg::KeyValue(k, v) => write!(f, "{}: {}", k, v),
+            ProcMacroArg::Array(arr) => {
+                write!(f, "[")?;
+                for (i, item) in arr.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", item)?;
+                }
+                write!(f, "]")
+            }
+            ProcMacroArg::Tuple(tup) => {
+                write!(f, "(")?;
+                for (i, item) in tup.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", item)?;
+                }
+                write!(f, ")")
+            }
+            ProcMacroArg::Bool(b) => write!(f, "{}", b),
+            ProcMacroArg::Type(t) => write!(f, "{}", t),
+        }
+    }
 }
 
 /// Contract configuration for #[contract] macro
@@ -950,7 +1001,7 @@ impl ProcMacro {
             name: "run_test".to_string(),
             args: vec![
                 AstNode::Literal("test_name".to_string()),
-                Box::new(*self.target.clone()),
+                (*self.target).clone(),
             ],
         });
 
@@ -972,6 +1023,7 @@ impl ProcMacro {
             _ => return Err(KslError::type_error(
                 "#[hot_reloadable] can only be applied to functions".to_string(),
                 self.position,
+                "E1001".to_string(),
             )),
         };
 
@@ -1149,6 +1201,7 @@ impl ProcMacro {
                                 return Err(KslError::type_error(
                                     "Contract owner must be a string".to_string(),
                                     self.position,
+                                    "E1003".to_string(),
                                 ));
                             }
                         }
@@ -1159,6 +1212,7 @@ impl ProcMacro {
                                 return Err(KslError::type_error(
                                     "Contract gas limit must be a number".to_string(),
                                     self.position,
+                                    "E1004".to_string(),
                                 ));
                             }
                         }
@@ -1174,6 +1228,7 @@ impl ProcMacro {
                     return Err(KslError::type_error(
                         "Contract macro arguments must be key-value pairs".to_string(),
                         self.position,
+                        "E1005".to_string(),
                     ));
                 }
             }
@@ -1183,11 +1238,13 @@ impl ProcMacro {
         let owner = owner.ok_or_else(|| KslError::type_error(
             "Missing 'owner' argument for #[contract] macro".to_string(),
             self.position,
+            "E1006".to_string(),
         ))?;
 
         let gas_limit = gas_limit.ok_or_else(|| KslError::type_error(
             "Missing 'gas' argument for #[contract] macro".to_string(),
             self.position,
+            "E1007".to_string(),
         ))?;
 
         let mut config = ContractConfig::new(owner, gas_limit);
@@ -1290,6 +1347,7 @@ impl ProcMacro {
             return Err(KslError::type_error(
                 "Event name is required".to_string(),
                 self.position,
+                "E1002".to_string(),
             ));
         }
 
@@ -1593,6 +1651,7 @@ impl ProcMacro {
             return Err(KslError::type_error(
                 "Not a cfg attribute".to_string(),
                 self.position,
+                "E1003".to_string(),
             ));
         }
 
@@ -1600,6 +1659,7 @@ impl ProcMacro {
             return Err(KslError::type_error(
                 "cfg attribute requires exactly one argument".to_string(),
                 self.position,
+                "E1004".to_string(),
             ));
         }
 
@@ -1608,6 +1668,7 @@ impl ProcMacro {
             _ => Err(KslError::type_error(
                 "cfg argument must be a string".to_string(),
                 self.position,
+                "E1005".to_string(),
             )),
         }
     }
@@ -1646,11 +1707,11 @@ pub trait MacroPlugin: Send + Sync {
 /// Update MacroExpander with caching and plugins
 impl MacroExpander {
     /// Expansion cache
-    expansion_cache: HashMap<ExpansionCacheKey, CachedExpansion>,
+    // expansion_cache: HashMap<ExpansionCacheKey, CachedExpansion>,
     /// External macro plugins
-    plugins: HashMap<String, Box<dyn MacroPlugin>>,
+    // plugins: HashMap<String, Box<dyn MacroPlugin>>,
     /// Unique identifier counter for hygiene
-    unique_id: std::sync::atomic::AtomicU64,
+    // unique_id: std::sync::atomic::AtomicU64,
 
     /// Creates a new macro expander
     pub fn new() -> Self {
@@ -1666,9 +1727,10 @@ impl MacroExpander {
             }),
             expansion_log_config: ExpansionLogConfig::default(),
             compile_config: CompileConfig::default(),
-            expansion_cache: HashMap::new(),
+            // expansion_cache: HashMap::new(),
+            // plugins: HashMap::new(),
+            // unique_id: std::sync::atomic::AtomicU64::new(0),
             plugins: HashMap::new(),
-            unique_id: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -1679,6 +1741,7 @@ impl MacroExpander {
             return Err(KslError::type_error(
                 format!("Plugin '{}' is already registered", name),
                 SourcePosition::new(1, 1), // TODO: Better position
+                "E1006".to_string(),
             ));
         }
         self.plugins.insert(name, plugin);
@@ -1686,69 +1749,71 @@ impl MacroExpander {
     }
 
     /// Generate a unique identifier for hygiene
-    fn generate_unique_id(&self) -> u64 {
-        self.unique_id.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-    }
+    // fn generate_unique_id(&self) -> u64 {
+    //     self.unique_id.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    // }
 
     /// Make an identifier hygienic by adding a unique prefix
     fn make_hygienic(&self, name: &str) -> String {
-        format!("__ksl_{}__{}", self.generate_unique_id(), name)
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let id = COUNTER.fetch_add(1, Ordering::SeqCst);
+        format!("__ksl_{}__{}", id, name)
     }
 
     /// Compute cache key for a macro expansion
-    fn compute_cache_key(&self, macro_call: &MacroCall) -> ExpansionCacheKey {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        
-        // Hash macro name
-        macro_call.name.hash(&mut hasher);
-        
-        // Hash arguments
-        for arg in &macro_call.args {
-            format!("{:?}", arg).hash(&mut hasher);
-        }
-        let args_hash = hasher.finish();
-        
-        // Hash configuration
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        format!("{:?}", self.compile_config).hash(&mut hasher);
-        let config_hash = hasher.finish();
-
-        ExpansionCacheKey {
-            macro_name: macro_call.name.clone(),
-            args_hash,
-            config_hash,
-        }
-    }
+    // fn compute_cache_key(&self, macro_call: &MacroCall) -> ExpansionCacheKey {
+    //     use std::hash::{Hash, Hasher};
+    //     let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    //     
+    //     // Hash macro name
+    //     macro_call.name.hash(&mut hasher);
+    //     
+    //     // Hash arguments
+    //     for arg in &macro_call.args {
+    //         format!("{:?}", arg).hash(&mut hasher);
+    //     }
+    //     let args_hash = hasher.finish();
+    //     
+    //     // Hash configuration
+    //     let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    //     format!("{:?}", self.compile_config).hash(&mut hasher);
+    //     let config_hash = hasher.finish();
+    //
+    //     ExpansionCacheKey {
+    //         macro_name: macro_call.name.clone(),
+    //         args_hash,
+    //         config_hash,
+    //     }
+    // }
 
     /// Check expansion cache
-    fn check_cache(&self, key: &ExpansionCacheKey) -> Option<Vec<AstNode>> {
-        self.expansion_cache.get(key).map(|cached| {
-            // Check if cache is still valid (e.g., not too old)
-            if cached.timestamp.elapsed().unwrap() < std::time::Duration::from_secs(300) {
-                Some(cached.nodes.clone())
-            } else {
-                None
-            }
-        }).flatten()
-    }
+    // fn check_cache(&self, key: &ExpansionCacheKey) -> Option<Vec<AstNode>> {
+    //     self.expansion_cache.get(key).map(|cached| {
+    //         // Check if cache is still valid (e.g., not too old)
+    //         if cached.timestamp.elapsed().unwrap() < std::time::Duration::from_secs(300) {
+    //             Some(cached.nodes.clone())
+    //         } else {
+    //             None
+    //         }
+    //     }).flatten()
+    // }
 
     /// Update cache with expansion result
-    fn update_cache(&mut self, key: ExpansionCacheKey, nodes: Vec<AstNode>, pos: SourcePosition) {
-        self.expansion_cache.insert(key, CachedExpansion {
-            nodes,
-            timestamp: std::time::SystemTime::now(),
-            position: pos,
-        });
-    }
+    // fn update_cache(&mut self, key: ExpansionCacheKey, nodes: Vec<AstNode>, pos: SourcePosition) {
+    //     self.expansion_cache.insert(key, CachedExpansion {
+    //         nodes,
+    //         timestamp: std::time::SystemTime::now(),
+    //         position: pos,
+    //     });
+    // }
 
     /// Expand a macro call with caching and hygiene
     pub fn expand(&mut self, macro_call: &MacroCall) -> Result<Vec<AstNode>, KslError> {
         // Check cache first
-        let cache_key = self.compute_cache_key(macro_call);
-        if let Some(cached) = self.check_cache(&cache_key) {
-            return Ok(cached);
-        }
+        // let cache_key = self.compute_cache_key(macro_call);
+        // if let Some(cached) = self.check_cache(&cache_key) {
+        //     return Ok(cached);
+        // }
 
         // Get source position from macro call
         let pos = macro_call.position.clone();
@@ -1762,6 +1827,7 @@ impl MacroExpander {
             .ok_or_else(|| KslError::type_error(
                 format!("Macro '{}' not found", macro_call.name),
                     pos.clone(),
+                    "E1007".to_string(),
             ))?;
 
             // Expand based on kind
@@ -1776,6 +1842,7 @@ impl MacroExpander {
                     macro_call.name, required_args, macro_call.args.len()
                 ),
                             pos.clone(),
+                            "E1008".to_string(),
                         ));
                     }
 
@@ -1806,7 +1873,7 @@ impl MacroExpander {
         };
 
         // Update cache
-        self.update_cache(cache_key, expanded.clone(), pos);
+        // self.update_cache(cache_key, expanded.clone(), pos);
 
         // Log expansion
         self.log_expansion(macro_call, &expanded, None);
@@ -1832,6 +1899,7 @@ impl MacroExpander {
                                 format!("Type mismatch for parameter '{}': expected {:?}, got {:?}",
                                     name, param_type, arg),
                                 pos.clone(),
+                                "E1009".to_string(),
                             ));
                         }
                         arg.clone()
@@ -1858,12 +1926,14 @@ impl MacroExpander {
                                     return Err(KslError::type_error(
                                         format!("Expected identifier for parameter '{}', got {:?}", name, arg),
                                         pos.clone(),
+                                        "E1010".to_string(),
                                     ));
                                 }
                             }
                             _ => return Err(KslError::type_error(
                                 format!("Invalid parameter type for function name: {:?}", param_type),
                                 pos.clone(),
+                                "E1011".to_string(),
                             )),
                         }
                     } else {
@@ -1881,6 +1951,7 @@ impl MacroExpander {
                             return Err(KslError::type_error(
                                 format!("Expected identifier for parameter '{}', got {:?}", name, arg),
                                 pos.clone(),
+                                "E1010".to_string(),
                             ));
                         }
                     } else {
@@ -1895,6 +1966,7 @@ impl MacroExpander {
                             return Err(KslError::type_error(
                                 format!("Expected string for parameter '{}', got {:?}", s, arg),
                                 pos.clone(),
+                                "E1012".to_string(),
                             ));
                         }
                     } else {
@@ -1918,6 +1990,10 @@ pub struct MacroExpander {
     ast_transformer: AstTransformer,
     /// Expansion log configuration
     expansion_log_config: ExpansionLogConfig,
+    /// External macro plugins
+    plugins: HashMap<String, Box<dyn MacroPlugin>>,
+    /// Compilation configuration
+    compile_config: CompileConfig,
 }
 
 impl MacroExpander {
@@ -1930,6 +2006,7 @@ impl MacroExpander {
             return Err(KslError::type_error(
                 format!("Macro '{}' is already registered", name),
                 SourcePosition::new(1, 1),
+                "E1013".to_string(),
             ));
         }
 
@@ -1977,6 +2054,7 @@ impl MacroExpander {
             .ok_or_else(|| KslError::type_error(
                 format!("Macro '{}' not found", macro_call.name),
                 pos,
+                "E1014".to_string(),
             ))?;
 
         // Expand based on kind
@@ -1991,6 +2069,7 @@ impl MacroExpander {
                     macro_call.name, required_args, macro_call.args.len()
                 ),
                 pos,
+                "E1015".to_string(),
             ));
         }
 
@@ -2141,6 +2220,21 @@ impl MacroExpander {
 
         docs
     }
+
+    /// Get metadata for a node
+    pub fn get_node_metadata<'a>(&self, node: &'a AstNode) -> Option<&'a NodeMetadata> {
+        node.metadata()
+    }
+
+    /// Get contract metadata for a node
+    pub fn get_contract_metadata<'a>(&self, node: &'a AstNode) -> Option<&'a ContractMetadata> {
+        node.contract_metadata()
+    }
+
+    /// Get all metadata values for a node
+    pub fn get_metadata_values<'a>(&self, node: &'a AstNode) -> Option<&'a HashMap<String, String>> {
+        node.metadata().map(|m| &m.values)
+    }
 }
 
 /// Integrate with the type checker (used by ksl_checker.rs).
@@ -2188,6 +2282,7 @@ impl MacroTypeChecker {
             AstNode::MacroDef(_) => Err(KslError::type_error(
                 "Nested macro definitions not supported".to_string(),
                 pos,
+                "E1016".to_string(),
             )),
             AstNode::MacroCall(_) => Ok(()), // Will be expanded before type checking
             AstNode::AsyncFnDecl { name: _, params: _, body } => {
@@ -2227,7 +2322,7 @@ pub enum Type {
     /// Network headers type
     NetworkHeaders,
     /// Async task type
-    AsyncTask,
+    AsyncTask(Box<Type>),
     /// 64-bit unsigned integer type
     U64,
     /// Boolean type
@@ -2240,6 +2335,8 @@ pub enum Type {
     Type,
     /// Map type
     Map(Box<Type>, Box<Type>),
+    /// Unit type
+    Unit,
 }
 
 // Add helper methods for metadata access
@@ -2266,134 +2363,6 @@ impl AstNode {
     /// Get metadata value by key
     pub fn get_metadata_value(&self, key: &str) -> Option<&String> {
         self.metadata().and_then(|m| m.values.get(key))
-    }
-}
-
-// Add helper methods for runtime metadata access
-impl MacroExpander {
-    /// Get metadata for a node
-    pub fn get_node_metadata(&self, node: &AstNode) -> Option<&NodeMetadata> {
-        node.metadata()
-    }
-
-    /// Get contract metadata for a node
-    pub fn get_contract_metadata(&self, node: &AstNode) -> Option<&ContractMetadata> {
-        node.contract_metadata()
-    }
-
-    /// Get all metadata values for a node
-    pub fn get_metadata_values(&self, node: &AstNode) -> Option<&HashMap<String, String>> {
-        node.metadata().map(|m| &m.values)
-    }
-}
-
-/// Helper trait for converting between AST nodes
-pub trait NodeConversion {
-    /// Convert to identifier
-    fn as_ident(&self) -> Option<String>;
-    /// Convert to boolean
-    fn as_bool(&self) -> Option<bool>;
-    /// Convert to string
-    fn as_string(&self) -> Option<String>;
-    /// Convert to integer
-    fn as_int(&self) -> Option<(String, IntType)>;
-    /// Convert to float
-    fn as_float(&self) -> Option<(String, FloatType)>;
-    /// Convert to char
-    fn as_char(&self) -> Option<char>;
-}
-
-impl NodeConversion for AstNode {
-    fn as_ident(&self) -> Option<String> {
-        match self {
-            AstNode::Ident(s) => Some(s.clone()),
-            AstNode::String(s) => Some(s.clone()),
-            _ => None,
-        }
-    }
-
-    fn as_bool(&self) -> Option<bool> {
-        match self {
-            AstNode::Bool(b) => Some(*b),
-            AstNode::String(s) => s.parse().ok(),
-            _ => None,
-        }
-    }
-
-    fn as_string(&self) -> Option<String> {
-        match self {
-            AstNode::String(s) => Some(s.clone()),
-            AstNode::Ident(s) => Some(s.clone()),
-            AstNode::Bool(b) => Some(b.to_string()),
-            AstNode::Int(n, _) => Some(n.clone()),
-            AstNode::Float(n, _) => Some(n.clone()),
-            AstNode::Char(c) => Some(c.to_string()),
-            _ => None,
-        }
-    }
-
-    fn as_int(&self) -> Option<(String, IntType)> {
-        match self {
-            AstNode::Int(n, t) => Some((n.clone(), t.clone())),
-            AstNode::String(s) => {
-                // Try to parse as integer and default to i32
-                s.parse::<i32>().ok().map(|_| (s.clone(), IntType::I32))
-            }
-            _ => None,
-        }
-    }
-
-    fn as_float(&self) -> Option<(String, FloatType)> {
-        match self {
-            AstNode::Float(n, t) => Some((n.clone(), t.clone())),
-            AstNode::String(s) => {
-                // Try to parse as float and default to f64
-                s.parse::<f64>().ok().map(|_| (s.clone(), FloatType::F64))
-            }
-            _ => None,
-        }
-    }
-
-    fn as_char(&self) -> Option<char> {
-        match self {
-            AstNode::Char(c) => Some(*c),
-            AstNode::String(s) if s.len() == 1 => s.chars().next(),
-            _ => None,
-        }
-    }
-}
-
-// Add tests for new node types and substitution
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_node_conversion() {
-        // Test identifier conversion
-        let ident = AstNode::Ident("test".to_string());
-        assert_eq!(ident.as_ident(), Some("test".to_string()));
-        assert_eq!(ident.as_string(), Some("test".to_string()));
-
-        // Test boolean conversion
-        let bool_node = AstNode::Bool(true);
-        assert_eq!(bool_node.as_bool(), Some(true));
-        assert_eq!(bool_node.as_string(), Some("true".to_string()));
-
-        // Test number conversion
-        let int_node = AstNode::Int("42".to_string(), IntType::I32);
-        assert_eq!(int_node.as_int(), Some(("42".to_string(), IntType::I32)));
-        assert_eq!(int_node.as_string(), Some("42".to_string()));
-    }
-
-    #[test]
-    fn test_type_matching() {
-        let ident_type = ParamType::Token(TokenType::Ident);
-        let bool_type = ParamType::Token(TokenType::Bool);
-
-        assert!(ident_type.matches_node(&AstNode::Ident("test".to_string())));
-        assert!(bool_type.matches_node(&AstNode::Bool(true)));
-        assert!(!ident_type.matches_node(&AstNode::Bool(false)));
     }
 }
 
@@ -2540,41 +2509,44 @@ impl HotReloadableFunctions for Vec<AstNode> {
             .filter_map(|node| {
                 if let AstNode::WithMetadata { node, metadata } = node {
                     if let Some(TypeMetadata::HotReloadable(meta)) = &metadata.type_info {
-                        if let AstNode::FnDecl { name: fn_name, .. } = node.as_ref() {
+                        if let AstNode::FnDecl { name: fn_name, params, return_type, .. } = node.as_ref() {
                             if fn_name == name {
-                                Some(meta)
-                            } else {
-                                None
+                                return Some(HotReloadableFunction {
+                                    original_name: fn_name.clone(),
+                                    export_name: meta.export_name.clone().unwrap_or_else(|| format!("hr_{}", fn_name)),
+                                    signature: FunctionSignature {
+                                        // TODO: Fix these Type conversions if ksl_macros::Type and ksl_types::Type are different
+                                        params: params.iter().map(|(_, t)| t.clone()).collect(),
+                                        return_type: return_type.clone(),
+                                        is_async: false, // Assuming not async for now, needs proper check
+                                    },
+                                    position: metadata.position.clone(),
+                                    attributes: meta.attributes.clone(),
+                                });
                             }
-                        } else {
-                            None
                         }
-                    } else {
-                        None
                     }
-                } else {
-                    None
                 }
+                None
             })
-            .next()
+            .next() // TODO: This might need .cloned() or other handling if it returns a reference to a temporary
     }
 }
 
-/// Marks a function as hot reloadable, generating necessary FFI and metadata.
-/// 
-/// This macro:
-/// 1. Adds #[no_mangle] attribute
-/// 2. Generates FFI-safe exports
-/// 3. Adds hot reload metadata
-/// 
-/// Example:
-/// ```rust
-/// #[hot_reloadable]
-/// fn my_function(x: u32) -> u32 {
-///     x * 2
+/// Procedural macro attribute for making functions hot-reloadable.
+///
+/// Usage:
+/// ```ksl
+/// #[hot_reloadable(export_name = "my_updated_func")]
+/// fn my_func(a: u32, b: u32) -> u32 {
+///     a + b
 /// }
 /// ```
-#[proc_macro_attribute]
+/// This will:
+/// 1. Generate an FFI-safe wrapper for `my_func`.
+/// 2. Embed metadata for hot reloading.
+// #[proc_macro_attribute] // Commented out due to crate type mismatch
+/* Commenting out the function as well to avoid related errors
 pub fn hot_reloadable(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Parse the function
     let input_fn = parse_macro_input!(item as ItemFn);
@@ -2594,7 +2566,7 @@ pub fn hot_reloadable(attr: TokenStream, item: TokenStream) -> TokenStream {
         ReturnType::Type(_, ty) => quote! { #ty },
     };
 
-    // Generate FFI-safe wrapper
+    // Generate FFI wrapper function
     let ffi_wrapper = generate_ffi_wrapper(&fn_name, &export_name, &params, &return_type);
 
     // Add hot reload metadata
@@ -2613,6 +2585,7 @@ pub fn hot_reloadable(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     TokenStream::from(expanded)
 }
+*/
 
 /// Generates FFI-safe wrapper for the hot reloadable function
 fn generate_ffi_wrapper(
@@ -2650,10 +2623,11 @@ fn generate_hot_reload_metadata(
     fn_name: &Ident,
     export_name: &str,
 ) -> proc_macro2::TokenStream {
+    let static_metadata_ident = format_ident!("HR_METADATA_{}", fn_name);
     quote! {
         #[doc(hidden)]
         #[allow(non_upper_case_globals)]
-        static HOT_RELOAD_METADATA_#fn_name: HotReloadableMetadata = HotReloadableMetadata {
+        static #static_metadata_ident: HotReloadableMetadata = HotReloadableMetadata {
             reloadable: true,
             export_name: Some(#export_name.to_string()),
             attributes: {
@@ -2663,5 +2637,115 @@ fn generate_hot_reload_metadata(
                 map
             },
         };
+    }
+}
+
+/// Helper trait for converting between AST nodes
+pub trait NodeConversion {
+    /// Convert to identifier
+    fn as_ident(&self) -> Option<String>;
+    /// Convert to boolean
+    fn as_bool(&self) -> Option<bool>;
+    /// Convert to string
+    fn as_string(&self) -> Option<String>;
+    /// Convert to integer
+    fn as_int(&self) -> Option<(String, IntType)>;
+    /// Convert to float
+    fn as_float(&self) -> Option<(String, FloatType)>;
+    /// Convert to char
+    fn as_char(&self) -> Option<char>;
+}
+
+impl NodeConversion for AstNode {
+    fn as_ident(&self) -> Option<String> {
+        match self {
+            AstNode::Ident(s) => Some(s.clone()),
+            AstNode::String(s) => Some(s.clone()),
+            _ => None,
+        }
+    }
+
+    fn as_bool(&self) -> Option<bool> {
+        match self {
+            AstNode::Bool(b) => Some(*b),
+            AstNode::String(s) => s.parse().ok(),
+            _ => None,
+        }
+    }
+
+    fn as_string(&self) -> Option<String> {
+        match self {
+            AstNode::String(s) => Some(s.clone()),
+            AstNode::Ident(s) => Some(s.clone()),
+            AstNode::Bool(b) => Some(b.to_string()),
+            AstNode::Int(n, _) => Some(n.clone()),
+            AstNode::Float(n, _) => Some(n.clone()),
+            AstNode::Char(c) => Some(c.to_string()),
+            _ => None,
+        }
+    }
+
+    fn as_int(&self) -> Option<(String, IntType)> {
+        match self {
+            AstNode::Int(n, t) => Some((n.clone(), t.clone())),
+            AstNode::String(s) => {
+                // Try to parse as integer and default to i32
+                s.parse::<i32>().ok().map(|_| (s.clone(), IntType::I32))
+            }
+            _ => None,
+        }
+    }
+
+    fn as_float(&self) -> Option<(String, FloatType)> {
+        match self {
+            AstNode::Float(n, t) => Some((n.clone(), t.clone())),
+            AstNode::String(s) => {
+                // Try to parse as float and default to f64
+                s.parse::<f64>().ok().map(|_| (s.clone(), FloatType::F64))
+            }
+            _ => None,
+        }
+    }
+
+    fn as_char(&self) -> Option<char> {
+        match self {
+            AstNode::Char(c) => Some(*c),
+            AstNode::String(s) if s.len() == 1 => s.chars().next(),
+            _ => None,
+        }
+    }
+}
+
+// Add tests for new node types and substitution
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_node_conversion() {
+        // Test identifier conversion
+        let ident = AstNode::Ident("test".to_string());
+        assert_eq!(ident.as_ident(), Some("test".to_string()));
+        assert_eq!(ident.as_string(), Some("test".to_string()));
+
+        // Test boolean conversion
+        let bool_node = AstNode::Bool(true);
+        assert_eq!(bool_node.as_bool(), Some(true));
+        assert_eq!(bool_node.as_string(), Some("true".to_string()));
+
+        // Test number conversion
+        let int_node = AstNode::Int("42".to_string(), IntType::I32);
+        assert_eq!(int_node.as_int(), Some(("42".to_string(), IntType::I32)));
+        assert_eq!(int_node.as_string(), Some("42".to_string()));
+    }
+
+    #[test]
+    fn test_type_matching() {
+        let ident_type = ParamType::Token(TokenType::Ident);
+        let bool_type = ParamType::Token(TokenType::Bool);
+
+        assert!(ident_type.matches_node(&AstNode::Ident("test".to_string())));
+        assert!(bool_type.matches_node(&AstNode::Bool(true)));
+        assert!(!ident_type.matches_node(&AstNode::Bool(false)));
     }
 }

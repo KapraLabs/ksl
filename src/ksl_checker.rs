@@ -1,8 +1,10 @@
 // ksl_checker.rs
 // Performs type checking and inference on KSL AST to ensure type safety.
 
-use crate::ksl_types::{Type, TypeContext, TypeError, TypeSystem};
-use crate::ksl_parser::{AstNode, ExprKind};
+use crate::ksl_ast::{BinaryOp, UnaryOp, AstNode};
+use crate::ksl_types::{Type, TypeContext, TypeSystem, ExprKind, TypeAnnotation, TypeError};
+use crate::ksl_macros::MacroExpander;
+use crate::ksl_generics::GenericResolver;
 
 // Assume ksl_macros.rs provides MacroExpander
 mod ksl_macros {
@@ -388,98 +390,179 @@ impl TypeChecker {
     /// @param position Source position
     fn check_expr(&mut self, kind: &ExprKind, position: usize) {
         match kind {
-            ExprKind::MacroCall { name, args } => {
-                // Check macro call arguments against macro definition
-                let macro_type = self.ctx.get_binding(name).cloned().ok_or_else(|| TypeError {
-                    message: format!("Undefined macro: {}", name),
-                    position,
-                });
-                if let Ok(Type::Tuple(param_types)) = macro_type {
-                    if param_types.len() != args.len() {
+            ExprKind::Literal(lit) => {
+                match lit {
+                    Literal::Int(_) => Type::Int,
+                    Literal::Float(_) => Type::Float,
+                    Literal::String(_) => Type::String,
+                    Literal::Bool(_) => Type::Bool,
+                    Literal::Array(elems) => {
+                        let mut elem_types = Vec::new();
+                        for elem in elems {
+                            match TypeSystem::infer_type(elem, &self.ctx, position) {
+                                Ok(ty) => elem_types.push(ty),
+                                Err(err) => {
+                                    self.errors.push(err);
+                                    return;
+                                }
+                            }
+                        }
+                        Type::Array(Box::new(elem_types[0].clone()))
+                    }
+                }
+            }
+            ExprKind::Identifier(name) => {
+                match self.ctx.get_type(name) {
+                    Some(ty) => ty,
+                    None => {
                         self.errors.push(TypeError {
-                            message: format!(
-                                "Expected {} arguments for macro {}, got {}",
-                                param_types.len(),
-                                name,
-                                args.len()
-                            ),
+                            message: format!("Undefined variable: {}", name),
                             position,
                         });
-                        return;
+                        Type::Error
                     }
-                    for (arg, param_type) in args.iter().zip(param_types.iter()) {
-                        let arg_type = match TypeSystem::infer_type(arg, &self.ctx, position) {
-                            Ok(ty) => ty,
-                            Err(err) => {
-                                self.errors.push(err);
-                                continue;
+                }
+            }
+            ExprKind::BinaryOp { op, left, right } => {
+                let left_type = TypeSystem::infer_type(left, &self.ctx, position);
+                let right_type = TypeSystem::infer_type(right, &self.ctx, position);
+
+                match (left_type, right_type) {
+                    (Ok(left_ty), Ok(right_ty)) => {
+                        match op {
+                            BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div => {
+                                if left_ty == Type::Int && right_ty == Type::Int {
+                                    Type::Int
+                                } else if left_ty == Type::Float && right_ty == Type::Float {
+                                    Type::Float
+                                } else {
+                                    self.errors.push(TypeError {
+                                        message: format!(
+                                            "Cannot apply operator {:?} to types {:?} and {:?}",
+                                            op, left_ty, right_ty
+                                        ),
+                                        position,
+                                    });
+                                    Type::Error
+                                }
                             }
-                        };
-                        if !TypeSystem::is_compatible(param_type, &arg_type) {
+                            BinaryOp::Eq | BinaryOp::Neq => {
+                                if TypeSystem::is_compatible(&left_ty, &right_ty) {
+                                    Type::Bool
+                                } else {
+                                    self.errors.push(TypeError {
+                                        message: format!(
+                                            "Cannot compare types {:?} and {:?}",
+                                            left_ty, right_ty
+                                        ),
+                                        position,
+                                    });
+                                    Type::Error
+                                }
+                            }
+                            _ => {
+                                self.errors.push(TypeError {
+                                    message: format!("Unsupported operator: {:?}", op),
+                                    position,
+                                });
+                                Type::Error
+                            }
+                        }
+                    }
+                    (Err(err), _) | (_, Err(err)) => {
+                        self.errors.push(err);
+                        Type::Error
+                    }
+                }
+            }
+            ExprKind::Call { callee, args } => {
+                let callee_type = TypeSystem::infer_type(callee, &self.ctx, position);
+                match callee_type {
+                    Ok(Type::Function { params, ret }) => {
+                        if args.len() != params.len() {
                             self.errors.push(TypeError {
                                 message: format!(
-                                    "Macro argument type mismatch: expected {:?}, got {:?}",
-                                    param_type, arg_type
+                                    "Expected {} arguments, got {}",
+                                    params.len(),
+                                    args.len()
                                 ),
                                 position,
                             });
+                            return;
                         }
+
+                        for (arg, param_ty) in args.iter().zip(params.iter()) {
+                            match TypeSystem::infer_type(arg, &self.ctx, position) {
+                                Ok(arg_ty) => {
+                                    if !TypeSystem::is_compatible(&arg_ty, param_ty) {
+                                        self.errors.push(TypeError {
+                                            message: format!(
+                                                "Type mismatch in function call: expected {:?}, got {:?}",
+                                                param_ty, arg_ty
+                                            ),
+                                            position,
+                                        });
+                                    }
+                                }
+                                Err(err) => {
+                                    self.errors.push(err);
+                                }
+                            }
+                        }
+                        *ret
                     }
-                } else {
-                    self.errors.push(TypeError {
-                        message: format!("Invalid macro type for {}", name),
-                        position,
-                    });
-                }
-            }
-            ExprKind::AsyncCall { name, args } => {
-                // Check async call arguments
-                let fn_type = self.ctx.get_binding(name).cloned().ok_or_else(|| TypeError {
-                    message: format!("Undefined async function: {}", name),
-                    position,
-                });
-                if let Ok(Type::Tuple(param_types)) = fn_type {
-                    if param_types.len() != args.len() {
+                    Ok(_) => {
                         self.errors.push(TypeError {
-                            message: format!(
-                                "Expected {} arguments for async function {}, got {}",
-                                param_types.len(),
-                                name,
-                                args.len()
-                            ),
+                            message: "Cannot call non-function type".to_string(),
                             position,
                         });
-                        return;
+                        Type::Error
                     }
-                    for (arg, param_type) in args.iter().zip(param_types.iter()) {
-                        let arg_type = match TypeSystem::infer_type(arg, &self.ctx, position) {
-                            Ok(ty) => ty,
-                            Err(err) => {
-                                self.errors.push(err);
-                                continue;
-                            }
-                        };
-                        if !TypeSystem::is_compatible(param_type, &arg_type) {
-                            self.errors.push(TypeError {
-                                message: format!(
-                                    "Async function argument type mismatch: expected {:?}, got {:?}",
-                                    param_type, arg_type
-                                ),
-                                position,
-                            });
-                        }
+                    Err(err) => {
+                        self.errors.push(err);
+                        Type::Error
                     }
-                } else {
-                    self.errors.push(TypeError {
-                        message: format!("Invalid async function type for {}", name),
-                        position,
-                    });
                 }
             }
-            _ => {
-                // Infer type to ensure expression is valid
-                if let Err(err) = TypeSystem::infer_type(&AstNode::Expr { kind: kind.clone() }, &self.ctx, position) {
-                    self.errors.push(err);
+            ExprKind::ArrayAccess { array, index } => {
+                match self.check_array_access(array, index, position) {
+                    Ok(ty) => ty,
+                    Err(err) => {
+                        self.errors.push(err);
+                        Type::Error
+                    }
+                }
+            }
+            ExprKind::UnaryOp { op, expr } => {
+                match TypeSystem::infer_type(expr, &self.ctx, position) {
+                    Ok(ty) => match op {
+                        UnaryOp::Neg => {
+                            if ty == Type::Int || ty == Type::Float {
+                                ty
+                            } else {
+                                self.errors.push(TypeError {
+                                    message: format!("Cannot negate type {:?}", ty),
+                                    position,
+                                });
+                                Type::Error
+                            }
+                        }
+                        UnaryOp::Not => {
+                            if ty == Type::Bool {
+                                Type::Bool
+                            } else {
+                                self.errors.push(TypeError {
+                                    message: format!("Cannot apply not operator to type {:?}", ty),
+                                    position,
+                                });
+                                Type::Error
+                            }
+                        }
+                    },
+                    Err(err) => {
+                        self.errors.push(err);
+                        Type::Error
+                    }
                 }
             }
         }
@@ -1010,13 +1093,4 @@ mod tests {
         );
         assert!(result.is_err());
     }
-}
-
-// Assume ksl_types.rs and ksl_parser.rs are in the same crate
-mod ksl_types {
-    pub use super::{Type, TypeContext, TypeError, TypeSystem};
-}
-
-mod ksl_parser {
-    pub use super::{AstNode, ExprKind};
 }

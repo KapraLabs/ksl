@@ -28,7 +28,7 @@ use crate::ksl_bytecode::{KapraBytecode, KapraInstruction, KapraOpCode};
 use crate::kapra_vm::{KapraVM, run};
 use crate::ksl_module::ModuleSystem;
 use crate::ksl_errors::{KslError, SourcePosition};
-use crate::ksl_async::{AsyncRuntime, AsyncProcessor};
+use crate::ksl_async::{AsyncConfig, AsyncRuntime, AsyncProcessor};
 use crate::ksl_debug::{Debugger, DebugCommand};
 use rustyline::error::ReadlineError;
 use rustyline::Editor;
@@ -79,6 +79,41 @@ enum ModuleState {
     Active,
     Paused,
     Error(String),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Type {
+    // Add actual variants as needed, or use a placeholder for now
+    Placeholder,
+}
+
+impl Type {
+    pub fn satisfies_constraint(&self, _constraint: &Type) -> bool {
+        // Placeholder: always return true
+        true
+    }
+}
+
+impl std::fmt::Display for Type {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Type::Placeholder => write!(f, "Placeholder"),
+        }
+    }
+}
+
+pub struct TypeSystem;
+
+impl TypeSystem {
+    pub fn satisfies_constraint(_ty: &Type, _constraint: &Type) -> bool {
+        // Placeholder: always return true
+        true
+    }
+
+    pub fn implements_trait(_ty: &Type, _trait_name: &str) -> bool {
+        // Placeholder: always return true
+        true
+    }
 }
 
 impl Repl {
@@ -683,7 +718,7 @@ mod ksl_errors {
 }
 
 mod ksl_async {
-    pub use super::{AsyncRuntime, AsyncProcessor, AsyncConfig};
+    pub use super::{AsyncConfig, AsyncRuntime, AsyncProcessor};
 }
 
 mod ksl_debug {

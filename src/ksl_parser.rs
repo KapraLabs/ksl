@@ -1,35 +1,23 @@
 // ksl_parser.rs
 // Parses KSL source code into an Abstract Syntax Tree (AST).
 
+use crate::ksl_ast::{Expr, Literal, BinaryOp, UnaryOp, PluginOp, PluginHandler};
+use crate::ksl_macros::{AstNode, NetworkOpType, MacroExpander, MacroDef, HotReloadableFunction, HotReloadableFunctions, HotReloadConfig};
 use std::str::Chars;
 use std::iter::Peekable;
 use std::collections::VecDeque;
 use std::collections::HashMap;
+use crate::ksl_types::Type as AstType;
 
 // Re-export AstNode and related types from ksl_macros.rs
-pub use crate::ksl_macros::AstNode;
-pub use crate::ksl_macros::NetworkOpType;
 pub use crate::ksl_macros::Attribute;
 pub use crate::ksl_macros::AttributeArg;
 pub use crate::ksl_errors::SourcePosition;
-// Import plugin types from ksl_ast.rs
-use crate::ksl_ast::{PluginOp, PluginHandler, Type as AstType};
 
 // Define stubs for internal use only
 mod internal {
     use super::{AstNode, ParseError, TypeAnnotation};
     
-    pub struct MacroExpander;
-    impl MacroExpander {
-        pub fn validate_macro(
-            _name: &str,
-            _params: &[(String, TypeAnnotation)],
-            _body: &[AstNode],
-        ) -> Result<(), ParseError> {
-            Ok(()) // Placeholder
-    }
-}
-
     pub struct AsyncValidator;
     impl AsyncValidator {
         pub fn validate_async_call(
@@ -150,7 +138,7 @@ impl<'a> Lexer<'a> {
             'a'..='z' | 'A'..='Z' | '_' => self.read_identifier(),
             '0'..='9' => self.read_number(),
             '"' => self.read_string(),
-            '=' | ':' | '+' | '>' | '{' | '}' | '(' | ')' | ',' | ';' | '<' | '>' | '[' | ']' | '!' => {
+            '=' | ':' | '+' | '>' | '{' | '}' | '(' | ')' | ',' | ';' | '<' | '[' | ']' | '!' => {
                 self.input.next();
                 Ok(Token::Symbol(ch.to_string()))
             }
@@ -281,7 +269,7 @@ impl<'a> Parser<'a> {
         match &self.current {
             Token::Symbol(s) if s == "#" => {
                 // Look ahead for block type
-                let attrs = self.parse_attributes()?;
+                let _attrs = self.parse_attributes()?;
                 match &self.current {
                     Token::Keyword(k) => match k.as_str() {
                         "shard" => self.parse_shard_block(),
@@ -732,101 +720,70 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_expr(&mut self) -> Result<AstNode, ParseError> {
-        self.parse_binary_op(0)
+        let expr = self.parse_binary_op(0)?;
+        Ok(AstNode::Expression(expr))
     }
 
-    fn parse_binary_op(&mut self, precedence: u8) -> Result<AstNode, ParseError> {
+    fn parse_binary_op(&mut self, precedence: u8) -> Result<Expr, ParseError> {
         let mut left = self.parse_primary()?;
+        
         while let Token::Symbol(op) = &self.current {
-            let op_precedence = match op.as_str() {
-                ">" | "==" => 1,
-                "+" => 2,
-                _ => 0,
-            };
+            let op_precedence = self.get_operator_precedence(op);
             if op_precedence < precedence {
                 break;
             }
-            let op = op.clone();
+            
             self.advance()?;
             let right = self.parse_binary_op(op_precedence + 1)?;
-            left = AstNode::Expr {
-                kind: ExprKind::BinaryOp {
-                    op,
-                    left: Box::new(left),
-                    right: Box::new(right),
-                },
+            
+            left = Expr::BinaryOp {
+                left: Box::new(AstNode::Expression(left)),
+                op: op.clone(),
+                right: Box::new(AstNode::Expression(right)),
             };
         }
+        
         Ok(left)
     }
 
-    fn parse_primary(&mut self) -> Result<AstNode, ParseError> {
-        if let Token::Keyword(k) = &self.current {
-            if k == "async" {
-                self.advance()?;
-                return self.parse_async_call();
-            }
-        }
+    fn parse_primary(&mut self) -> Result<Expr, ParseError> {
         match &self.current {
             Token::Ident(name) => {
                 let name = name.clone();
                 self.advance()?;
-                if self.current == Token::Symbol("!".to_string()) {
-                    // Parse macro call
-                    self.advance()?;
-                    self.expect(Token::Symbol("(".to_string()))?;
-                    let mut args = Vec::new();
-                    if self.current != Token::Symbol(")".to_string()) {
-                        loop {
-                            args.push(self.parse_expr()?);
-                            if self.current == Token::Symbol(",".to_string()) {
-                                self.advance()?;
-                            } else {
-                                break;
-                            }
-                        }
-                    }
-                    self.expect(Token::Symbol(")".to_string()))?;
-                    Ok(AstNode::Expr {
-                        kind: ExprKind::MacroCall { name, args },
-                    })
-                } else if self.current == Token::Symbol("(".to_string()) {
-                    // Parse function call
+                
+                if self.match_symbol("(") {
                     self.advance()?;
                     let mut args = Vec::new();
-                    if self.current != Token::Symbol(")".to_string()) {
+                    
+                    if !self.match_symbol(")") {
                         loop {
                             args.push(self.parse_expr()?);
-                            if self.current == Token::Symbol(",".to_string()) {
-                                self.advance()?;
-                            } else {
+                            if !self.match_symbol(",") {
                                 break;
                             }
+                            self.advance()?;
                         }
+                        self.expect_symbol(")")?;
                     }
-                    self.expect(Token::Symbol(")".to_string()))?;
-                    Ok(AstNode::Expr {
-                        kind: ExprKind::Call { name, args },
+                    
+                    Ok(Expr::Call {
+                        name,
+                        args,
                     })
                 } else {
-                    Ok(AstNode::Expr {
-                        kind: ExprKind::Ident(name),
-                    })
+                    Ok(Expr::Identifier(name))
                 }
             }
-            Token::Number(num) => {
-                let num = num.clone();
+            Token::Number(n) => {
+                let n = n.clone();
                 self.advance()?;
-                Ok(AstNode::Expr {
-                    kind: ExprKind::Number(num),
-                })
+                Ok(Expr::Literal(Literal::Int(n.parse().unwrap_or(0))))
             }
             Token::String(s) => {
                 let s = s.clone();
                 self.advance()?;
-                Ok(AstNode::Expr {
-                    kind: ExprKind::String(s),
-                })
+                Ok(Expr::Literal(Literal::Str(s)))
             }
             _ => Err(ParseError {
                 message: format!("Unexpected token: {:?}", self.current),

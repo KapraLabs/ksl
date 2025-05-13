@@ -3,6 +3,7 @@
 
 use crate::ksl_types::{Type, TypeError};
 use crate::ksl_errors::{KslError, SourcePosition};
+use crate::ksl_kapra_zkp::ZkProofType;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
@@ -28,7 +29,7 @@ impl Value {
             Value::String(_) => Type::String,
             Value::Array(_) => Type::Array(Box::new(Type::U8), 0), // Simplified
             Value::Tuple(_) => Type::Tuple(vec![]), // Simplified
-            Value::ZkProof(_) => Type::ZkProof(crate::ksl_kapra_zkp::ZkProofType::Generic),
+            Value::ZkProof(_) => Type::ZkProof(ZkProofType::Generic),
             Value::Signature(_) => Type::Signature(crate::ksl_types::SignatureType::Ed25519),
             Value::Void => Type::Void,
         }

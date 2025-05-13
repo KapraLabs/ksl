@@ -23,7 +23,8 @@ use tokio::sync::RwLock;
 use serde::{Deserialize, Serialize};
 use wasmtime::{Engine, Module, Store, Linker};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder};
-use seccompiler::{compile, SeccompAction, SeccompFilter, SeccompRule};
+#[cfg(target_os = "linux")]
+use seccompiler::{compile as seccomp_compile, SeccompAction, SeccompFilter, SeccompRule};
 use sha2::{Sha256, Digest};
 use chrono::{Local, DateTime};
 use serde_json;
@@ -206,7 +207,10 @@ pub struct ContractFingerprint {
 pub struct SandboxManager {
     config: SandboxConfig,
     wasm_engine: Option<Engine>,
+    #[cfg(target_os = "linux")]
     seccomp_filters: HashMap<String, SeccompFilter>,
+    #[cfg(not(target_os = "linux"))]
+    seccomp_filters: HashMap<String, ()>, // Placeholder
     violation_logs: Arc<RwLock<Vec<ViolationLog>>>,
     contract_fingerprints: Arc<RwLock<HashMap<String, ContractFingerprint>>>,
 }
@@ -516,4 +520,70 @@ mod tests {
         let errors = result.unwrap_err();
         assert!(errors[0].to_string().contains("Memory limit exceeded"));
     }
+}
+
+impl SandboxManager {
+    pub fn new(config: SandboxConfig) -> Result<Self, KslError> {
+        let wasm_engine = if config.use_wasi { Some(Engine::default()) } else { None };
+        let mut seccomp_filters = HashMap::new();
+
+        #[cfg(target_os = "linux")]
+        {
+            if let Some(profile_path) = &config.seccomp_profile {
+                if profile_path.exists() {
+                    let profile_content = fs::read_to_string(profile_path)
+                        .map_err(|e| KslError::config_error(format!("Failed to read seccomp profile: {}", e)))?;
+                    
+                    // Determine format (JSON or TOML) and compile
+                    let filter = if profile_path.extension().map_or(false, |ext| ext == "json") {
+                        seccomp_compile::compile_from_json(&profile_content, None, None, None)
+                    } else if profile_path.extension().map_or(false, |ext| ext == "toml") {
+                        seccomp_compile::compile_from_toml(&profile_content, None, None, None)
+                    } else {
+                        return Err(KslError::config_error("Unsupported seccomp profile format".to_string()));
+                    };
+
+                    seccomp_filters.insert("default".to_string(), filter.map_err(|e| KslError::config_error(format!("Failed to compile seccomp profile: {}",e)))?);
+                }
+            }
+        }
+        
+        Ok(SandboxManager {
+            config,
+            wasm_engine,
+            seccomp_filters,
+            violation_logs: Arc::new(RwLock::new(Vec::new())),
+            contract_fingerprints: Arc::new(RwLock::new(HashMap::new())),
+        })
+    }
+
+    pub async fn run_in_sandbox<T: Send + 'static>(
+        &self,
+        contract_id: &str,
+        bytecode: KapraBytecode,
+        // ... other params ...
+    ) -> Result<T, KslError> {
+        // ...
+        #[cfg(target_os = "linux")]
+        {
+            if let Some(filter) = self.seccomp_filters.get("default") { // Or contract_id specific
+                filter.apply().map_err(|e| KslError::runtime_error(format!("Failed to apply seccomp filter: {}", e), None))?;
+            }
+        }
+        // ... rest of the function
+        Ok(unsafe { std::mem::zeroed() }) // Placeholder return
+    }
+
+    fn log_violation(&self, violation: ViolationLog) {
+        if self.config.enable_logging {
+            // Implement logging to file or console
+            if let Some(log_path) = &self.config.log_path {
+                // Append to file
+            } else {
+                println!("Sandbox Violation: {:?}", violation);
+            }
+            // self.violation_logs.write().await.push(violation); // if storing in memory too
+        }
+    }
+    // ... other methods
 }

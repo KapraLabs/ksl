@@ -20,18 +20,19 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
 use crate::ksl_bytecode::{KapraBytecode, CompileTarget};
+use crate::ksl_validator_keys::ValidatorKeys;
+use ed25519_dalek::Signature;
 use crate::ksl_contract::{ContractAbi, ContractFunction};
-use crate::ksl_validator_keys::{ValidatorKeys, Signature};
-use crate::ksl_shard_manager::ShardManager;
-use crate::ksl_consensus_manager::ConsensusManager;
 use crate::ksl_analyzer::{Analyzer, GasStats};
 use sysinfo::{System, SystemExt, ProcessExt, CpuExt};
-use heim::memory;
+// use heim::memory;
 use indicatif::{ProgressBar, ProgressStyle};
 use chrono::Local;
 use tera::{Context, Tera};
 use plotters::prelude::*;
 use rayon::prelude::*;
+use crate::ksl_shard_manager::ShardManager;
+use crate::ksl_consensus_manager::ConsensusManager;
 
 /// Enhanced benchmark configuration with async and metrics support
 #[derive(Debug)]
@@ -409,7 +410,7 @@ pub async fn benchmark(
 ) -> Result<BenchmarkResult, KslError> {
     let pos = SourcePosition::new(1, 1);
     if iterations == 0 {
-        return Err(KslError::type_error("Iterations must be greater than 0".to_string(), pos));
+        return Err(KslError::type_error("Iterations must be greater than 0".to_string(), pos, "E1101".to_string()));
     }
     if output_format != "csv" && output_format != "json" {
         return Err(KslError::type_error(

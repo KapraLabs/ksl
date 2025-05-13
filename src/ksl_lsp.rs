@@ -115,6 +115,7 @@ impl LspServer {
             .map_err(|e| KslError::type_error(
                 format!("Failed to bind to port {}: {}", self.config.port, e),
                 pos,
+                "LSP_BIND_ERR".to_string()
             ))?;
         println!("LSP server started on port {}", self.config.port);
 
@@ -122,6 +123,7 @@ impl LspServer {
             let stream = stream.map_err(|e| KslError::type_error(
                 format!("Failed to accept connection: {}", e),
                 pos,
+                "LSP_ACCEPT_ERR".to_string()
             ))?;
             let mut server = self.clone();
             thread::spawn(move || {
@@ -143,7 +145,7 @@ impl LspServer {
         loop {
             buffer.clear();
             let bytes_read = reader.read_line(&mut buffer)
-                .map_err(|e| KslError::type_error(format!("Failed to read from stream: {}", e), pos))?;
+                .map_err(|e| KslError::type_error(format!("Failed to read from stream: {}", e), pos, "LSP_READ_ERR".to_string()))?;
             if bytes_read == 0 {
                 break; // Client disconnected
             }
@@ -154,16 +156,16 @@ impl LspServer {
             }
             let content_length: usize = buffer[15..].trim()
                 .parse()
-                .map_err(|e| KslError::type_error(format!("Invalid Content-Length: {}", e), pos))?;
+                .map_err(|e| KslError::type_error(format!("Invalid Content-Length: {}", e), pos, "LSP_HEADER_ERR".to_string()))?;
             reader.read_line(&mut buffer) // Skip empty line
-                .map_err(|e| KslError::type_error(format!("Failed to read from stream: {}", e), pos))?;
+                .map_err(|e| KslError::type_error(format!("Failed to read from stream: {}", e), pos, "LSP_READ_ERR".to_string()))?;
 
             // Read the JSON-RPC message
             let mut message_bytes = vec![0; content_length];
             reader.read_exact(&mut message_bytes)
-                .map_err(|e| KslError::type_error(format!("Failed to read message: {}", e), pos))?;
+                .map_err(|e| KslError::type_error(format!("Failed to read message: {}", e), pos, "LSP_READ_MSG_ERR".to_string()))?;
             let message: JsonValue = serde_json::from_slice(&message_bytes)
-                .map_err(|e| KslError::type_error(format!("Failed to parse JSON-RPC message: {}", e), pos))?;
+                .map_err(|e| KslError::type_error(format!("Failed to parse JSON-RPC message: {}", e), pos, "LSP_PARSE_JSON_ERR".to_string()))?;
 
             // Process the LSP request
             let response = if self.config.enable_async {
@@ -176,14 +178,14 @@ impl LspServer {
             };
 
             let response_bytes = serde_json::to_vec(&response)
-                .map_err(|e| KslError::type_error(format!("Failed to serialize response: {}", e), pos))?;
+                .map_err(|e| KslError::type_error(format!("Failed to serialize response: {}", e), pos, "LSP_SER_RESP_ERR".to_string()))?;
             let response_header = format!("Content-Length: {}\r\n\r\n", response_bytes.len());
             stream.write_all(response_header.as_bytes())
-                .map_err(|e| KslError::type_error(format!("Failed to write to stream: {}", e), pos))?;
+                .map_err(|e| KslError::type_error(format!("Failed to write to stream: {}", e), pos, "LSP_WRITE_ERR".to_string()))?;
             stream.write_all(&response_bytes)
-                .map_err(|e| KslError::type_error(format!("Failed to write to stream: {}", e), pos))?;
+                .map_err(|e| KslError::type_error(format!("Failed to write to stream: {}", e), pos, "LSP_WRITE_ERR".to_string()))?;
             stream.flush()
-                .map_err(|e| KslError::type_error(format!("Failed to flush stream: {}", e), pos))?;
+                .map_err(|e| KslError::type_error(format!("Failed to flush stream: {}", e), pos, "LSP_FLUSH_ERR".to_string()))?;
         }
 
         Ok(())
@@ -193,10 +195,10 @@ impl LspServer {
     async fn handle_request_async(&mut self, request: &JsonValue) -> Result<JsonValue, KslError> {
         let pos = SourcePosition::new(1, 1);
         let id = request.get("id")
-            .ok_or_else(|| KslError::type_error("Missing request ID".to_string(), pos))?;
+            .ok_or_else(|| KslError::type_error("Missing request ID".to_string(), pos, "E201".to_string()))?;
         let method = request.get("method")
             .and_then(|m| m.as_str())
-            .ok_or_else(|| KslError::type_error("Missing or invalid method".to_string(), pos))?;
+            .ok_or_else(|| KslError::type_error("Missing or invalid method".to_string(), pos, "E202".to_string()))?;
         let params = request.get("params").unwrap_or(&json!({}));
 
         match method {
@@ -229,11 +231,11 @@ impl LspServer {
                 let uri = params.get("textDocument")
                     .and_then(|doc| doc.get("uri"))
                     .and_then(|uri| uri.as_str())
-                    .ok_or_else(|| KslError::type_error("Missing URI".to_string(), pos))?;
+                    .ok_or_else(|| KslError::type_error("Missing URI".to_string(), pos, "E203".to_string()))?;
                 let text = params.get("textDocument")
                     .and_then(|doc| doc.get("text"))
                     .and_then(|text| text.as_str())
-                    .ok_or_else(|| KslError::type_error("Missing text".to_string(), pos))?;
+                    .ok_or_else(|| KslError::type_error("Missing text".to_string(), pos, "E204".to_string()))?;
                 self.documents.insert(uri.to_string(), text.to_string());
 
                 // Run async analysis if enabled
@@ -258,9 +260,9 @@ impl LspServer {
                 let uri = params.get("textDocument")
                     .and_then(|doc| doc.get("uri"))
                     .and_then(|uri| uri.as_str())
-                    .ok_or_else(|| KslError::type_error("Missing URI".to_string(), pos))?;
+                    .ok_or_else(|| KslError::type_error("Missing URI".to_string(), pos, "E203".to_string()))?;
                 let text = self.documents.get(uri)
-                    .ok_or_else(|| KslError::type_error(format!("Document not found: {}", uri), pos))?;
+                    .ok_or_else(|| KslError::type_error(format!("Document not found: {}", uri), pos, "LSP_DOC_NOT_FOUND".to_string()))?;
                 let completions = self.generate_completions(text)?;
                 Ok(json!({
                     "jsonrpc": "2.0",
@@ -272,17 +274,17 @@ impl LspServer {
                 let uri = params.get("textDocument")
                     .and_then(|doc| doc.get("uri"))
                     .and_then(|uri| uri.as_str())
-                    .ok_or_else(|| KslError::type_error("Missing URI".to_string(), pos))?;
+                    .ok_or_else(|| KslError::type_error("Missing URI".to_string(), pos, "E203".to_string()))?;
                 let position = params.get("position")
-                    .ok_or_else(|| KslError::type_error("Missing position".to_string(), pos))?;
+                    .ok_or_else(|| KslError::type_error("Missing position".to_string(), pos, "E205".to_string()))?;
                 let line = position.get("line")
                     .and_then(|l| l.as_u64())
-                    .ok_or_else(|| KslError::type_error("Invalid line".to_string(), pos))? as usize;
+                    .ok_or_else(|| KslError::type_error("Invalid line".to_string(), pos, "E206".to_string()))? as usize;
                 let character = position.get("character")
                     .and_then(|c| c.as_u64())
-                    .ok_or_else(|| KslError::type_error("Invalid character".to_string(), pos))? as usize;
+                    .ok_or_else(|| KslError::type_error("Invalid character".to_string(), pos, "E207".to_string()))? as usize;
                 let text = self.documents.get(uri)
-                    .ok_or_else(|| KslError::type_error(format!("Document not found: {}", uri), pos))?;
+                    .ok_or_else(|| KslError::type_error(format!("Document not found: {}", uri), pos, "LSP_DOC_NOT_FOUND".to_string()))?;
                 let definition = self.goto_definition(text, line, character)?;
                 Ok(json!({
                     "jsonrpc": "2.0",
@@ -294,17 +296,17 @@ impl LspServer {
                 let uri = params.get("textDocument")
                     .and_then(|doc| doc.get("uri"))
                     .and_then(|uri| uri.as_str())
-                    .ok_or_else(|| KslError::type_error("Missing URI".to_string(), pos))?;
+                    .ok_or_else(|| KslError::type_error("Missing URI".to_string(), pos, "E203".to_string()))?;
                 let position = params.get("position")
-                    .ok_or_else(|| KslError::type_error("Missing position".to_string(), pos))?;
+                    .ok_or_else(|| KslError::type_error("Missing position".to_string(), pos, "E205".to_string()))?;
                 let line = position.get("line")
                     .and_then(|l| l.as_u64())
-                    .ok_or_else(|| KslError::type_error("Invalid line".to_string(), pos))? as usize;
+                    .ok_or_else(|| KslError::type_error("Invalid line".to_string(), pos, "E206".to_string()))? as usize;
                 let character = position.get("character")
                     .and_then(|c| c.as_u64())
-                    .ok_or_else(|| KslError::type_error("Invalid character".to_string(), pos))? as usize;
+                    .ok_or_else(|| KslError::type_error("Invalid character".to_string(), pos, "E207".to_string()))? as usize;
                 let text = self.documents.get(uri)
-                    .ok_or_else(|| KslError::type_error(format!("Document not found: {}", uri), pos))?;
+                    .ok_or_else(|| KslError::type_error(format!("Document not found: {}", uri), pos, "LSP_DOC_NOT_FOUND".to_string()))?;
                 let hover = self.hover(text, line, character)?;
                 Ok(json!({
                     "jsonrpc": "2.0",
@@ -393,6 +395,7 @@ impl LspServer {
             .map_err(|e| KslError::type_error(
                 format!("Parse error at position {}: {}", e.position, e.message),
                 pos,
+                "LSP_PARSE_ERR".to_string()
             ))?;
 
         let mut completions = Vec::new();
@@ -451,6 +454,7 @@ impl LspServer {
             .map_err(|e| KslError::type_error(
                 format!("Parse error at position {}: {}", e.position, e.message),
                 pos,
+                "LSP_PARSE_ERR".to_string()
             ))?;
 
         // Find the identifier at the given position (simplified: check line only)
@@ -537,6 +541,7 @@ impl LspServer {
             .map_err(|e| KslError::type_error(
                 format!("Parse error at position {}: {}", e.position, e.message),
                 pos,
+                "LSP_PARSE_ERR".to_string()
             ))?;
 
         // Find the identifier at the given position (simplified: check line only)
@@ -654,38 +659,10 @@ impl LspServer {
 
 // Public API to start the LSP server with async support
 pub fn start_lsp(port: u16, enable_async: bool, analyzer_config: Option<AnalyzerConfig>) -> Result<(), KslError> {
-    let config = LspServerConfig {
-        port,
-        enable_async,
-        analyzer_config,
-    };
-    let mut server = LspServer::new(config, "".to_string());
+    let config = LspServerConfig { port, enable_async, analyzer_config };
+    let workspace_root = std::env::current_dir().unwrap_or_default().to_string_lossy().into_owned();
+    let mut server = LspServer::new(config, workspace_root);
     server.start()
-}
-
-// Assume ksl_parser.rs, ksl_linter.rs, ksl_docgen.rs, ksl_errors.rs, ksl_analyzer.rs, and ksl_async.rs are in the same crate
-mod ksl_parser {
-    pub use super::{parse, AstNode, ExprKind, ParseError};
-}
-
-mod ksl_linter {
-    pub use super::{LintError, lint};
-}
-
-mod ksl_docgen {
-    pub use super::generate_docgen;
-}
-
-mod ksl_errors {
-    pub use super::{KslError, SourcePosition};
-}
-
-mod ksl_analyzer {
-    pub use super::{Analyzer, AnalysisResult, AnalyzerConfig};
-}
-
-mod ksl_async {
-    pub use super::{AsyncRuntime, AsyncVM};
 }
 
 #[cfg(test)]

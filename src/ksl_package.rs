@@ -13,12 +13,13 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use crate::ksl_validator_keys::{ValidatorKeys, Signature};
+use crate::ksl_validator_keys::ValidatorKeys;
+use ed25519_dalek::Signature;
 use crate::ksl_macros::{MacroDef, MacroKind};
 use crate::ksl_contract::{ContractAbi, ContractFunction};
 use crate::ksl_analyzer::{Analyzer, GasStats};
 use reqwest;
-use sha2::{Sha256, Digest};
+use sha2::Sha256;
 
 /// Enhanced package metadata structure with features and async support
 #[derive(Debug, Serialize, Deserialize)]
@@ -299,15 +300,6 @@ pub async fn resolve_project_dependencies_async(project_dir: &Path) -> Result<Mo
 /// - Async packages can use async/await syntax
 /// - Async packages can use async runtime features
 pub mod package_manifest {}
-
-// Assume ksl_module.rs and ksl_errors.rs are in the same crate
-mod ksl_module {
-    pub use super::ModuleSystem;
-}
-
-mod ksl_errors {
-    pub use super::{KslError, SourcePosition};
-}
 
 #[cfg(test)]
 mod tests {

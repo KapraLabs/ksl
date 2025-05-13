@@ -1,8 +1,9 @@
 // ksl_compiler.rs
 // Compiles type-checked KSL AST into KapraBytecode 2.0, Native, or WASM with parallel compilation and advanced optimizations.
 
-use crate::ksl_parser::{parse, AstNode, ExprKind, TypeAnnotation};
-use crate::ksl_types::{Type, TypeContext, TypeSystem};
+use crate::ksl_parser::parse;
+use crate::ksl_ast::AstNode;
+use crate::ksl_types::{ExprKind, TypeAnnotation, Type, TypeContext, TypeSystem};
 use crate::ksl_bytecode::{KapraBytecode, KapraInstruction, KapraOpCode, Operand};
 use crate::ksl_stdlib::StdLib;
 use crate::ksl_stdlib_crypto::CryptoStdLib;
@@ -32,35 +33,7 @@ use std::io::Write;
 use serde::{Serialize, Deserialize};
 use crate::ksl_irgen::generate_ir;
 use crate::ksl_export::export_ir_to_json;
-
-// Re-export dependencies
-mod ksl_parser {
-    pub use super::{parse, AstNode, ExprKind, TypeAnnotation};
-}
-
-mod ksl_types {
-    pub use super::{Type, TypeContext, TypeSystem};
-}
-
-mod ksl_bytecode {
-    pub use super::{KapraBytecode, KapraInstruction, KapraOpCode, Operand};
-}
-
-mod ksl_stdlib {
-    pub use super::StdLib;
-}
-
-mod ksl_stdlib_crypto {
-    pub use super::CryptoStdLib;
-}
-
-mod ksl_macros {
-    pub use super::{MacroExpander, MacroDef, HotReloadableFunction, HotReloadableFunctions, HotReloadConfig};
-}
-
-mod ksl_generics {
-    pub use super::{GenericCompiler, GenericDef, TypeParam};
-}
+use crate::ksl_errors::KslError;
 
 /// Compilation error type.
 #[derive(Debug, PartialEq)]
@@ -382,423 +355,118 @@ impl<'ctx> LLVMCodegen<'ctx> {
     /// Generates LLVM IR for a single AST node
     fn generate_node(&mut self, node: &AstNode) -> Result<BasicValueEnum<'ctx>, KslError> {
         match node {
-            AstNode::FnDecl { name, params, ret_type, body, .. } => {
-                self.generate_function(name, params, ret_type, body)
-            }
-            AstNode::VarDecl { name, type_annot, expr, is_mutable, .. } => {
-                self.generate_var_decl(name, type_annot, expr, *is_mutable)
-            }
-            AstNode::If { condition, then_branch, else_branch } => {
-                self.generate_if(condition, then_branch, else_branch)
-            }
-            AstNode::Match { expr, arms } => {
-                self.generate_match(expr, arms)
-            }
-            AstNode::Expr { kind } => {
-                self.generate_expr(kind)
-            }
-            AstNode::AsyncFnDecl { name, params, body, .. } => {
-                self.generate_async_function(name, params, body)
-            }
+            AstNode::Expression(expr) => self.generate_expr(expr),
+            AstNode::Statement(stmt) => self.generate_stmt(stmt),
+            AstNode::Function(func) => self.generate_function(
+                &func.name,
+                &func.params,
+                &func.return_type,
+                &func.body,
+            ),
             AstNode::VerifyBlock { conditions } => {
-                // Generate code for each condition
                 for condition in conditions {
-                    let cond_value = self.generate_node(condition)?;
-                    
-                    // Convert condition to boolean if needed
-                    let bool_value = if cond_value.get_type().is_int_type() {
-                        self.builder.build_int_compare(
-                            inkwell::IntPredicate::NE,
-                            cond_value.into_int_value(),
-                            self.context.i32_type().const_int(0, false),
-                            "verify_cond"
-                        )
-                    } else {
-                        cond_value.into_int_value()
-                    };
-
-                    // Create error message for assertion failure
-                    let error_msg = self.builder.build_global_string_ptr(
-                        "Verification condition failed",
-                        "verify_error"
-                    );
-
-                    // Create assertion failure block
-                    let fail_bb = self.context.append_basic_block(
-                        self.fn_value_opt.unwrap(),
-                        "verify_fail"
-                    );
-
-                    // Create success block
-                    let success_bb = self.context.append_basic_block(
-                        self.fn_value_opt.unwrap(),
-                        "verify_success"
-                    );
-
-                    // Branch based on condition
-                    self.builder.build_conditional_branch(
-                        bool_value,
-                        success_bb,
-                        fail_bb
-                    );
-
-                    // Generate failure block code
-                    self.builder.position_at_end(fail_bb);
-                    let printf_fn = self.module.get_function("printf").unwrap();
+                    let cond_value = match condition {
+                        AstNode::Expression(e) => self.generate_expr(e),
+                        _ => Err(KslError::type_error(
+                            format!("Expected Expression node in verify block, found {:?}", condition),
+                            SourcePosition::new(1, 1),
+                            "E203".to_string()
+                        ))
+                    }?;
                     self.builder.build_call(
-                        printf_fn,
-                        &[error_msg.as_pointer_value().into()],
-                        "print_error"
+                        self.module.get_function("verify_condition").unwrap(),
+                        &[cond_value.into()],
+                        "verify",
                     );
-                    self.builder.build_unconditional_branch(success_bb);
-
-                    // Continue with success block
-                    self.builder.position_at_end(success_bb);
                 }
-
-                // Return void for verify block
-                Ok(self.context.void_type().const_void().as_basic_value_enum())
-            }
+                Ok(self.context.i32_type().const_int(0, false).into())
+            },
+            AstNode::If { condition, then_branch, else_branch } => {
+                let cond_value = match condition.as_ref() {
+                    AstNode::Expression(e) => self.generate_expr(e),
+                    _ => Err(KslError::type_error(
+                        format!("Expected Expression node in if condition, found {:?}", condition),
+                        SourcePosition::new(1, 1),
+                        "E203".to_string()
+                    ))
+                }?;
+                self.generate_if(condition, then_branch, else_branch.as_deref())
+            },
             _ => Err(KslError::type_error(
                 format!("Unsupported AST node: {:?}", node),
                 SourcePosition::new(1, 1),
+                "E303".to_string()
             )),
         }
     }
 
-    /// Generates LLVM IR for a function declaration
-    fn generate_function(
-        &mut self,
-        name: &str,
-        params: &[(String, TypeAnnotation)],
-        ret_type: &TypeAnnotation,
-        body: &[AstNode],
-    ) -> Result<BasicValueEnum<'ctx>, KslError> {
-        debug!("Generating function: {}", name);
-
-        // Create function type
-        let ret_type = self.type_to_llvm_type(ret_type)?;
-        let param_types: Vec<BasicTypeEnum> = params
-            .iter()
-            .map(|(_, ty)| self.type_to_llvm_type(ty))
-            .collect::<Result<Vec<_>, _>>()?;
-        let fn_type = ret_type.fn_type(&param_types, false);
-
-        // Create function
-        let function = self.module.add_function(name, fn_type, None);
-        self.fn_value_opt = Some(function);
-
-        // Add debug info for function
-        if let (Some(dib), Some(cu)) = (&self.debug_builder, &self.debug_compile_unit) {
-            let subprogram = dib.create_function(
-                cu.as_scope(),
-                name,
-                None,
-                cu.get_file(),
-                1,
-                dib.create_subroutine_type(cu.get_file(), None, &[], inkwell::debug_info::DIFlags::Public),
-                true,
-                true,
-                1,
-                inkwell::debug_info::DIFlags::Prototyped,
-                false,
-            );
-            function.set_subprogram(subprogram);
-        }
-
-        // Create entry block
-        let entry = self.context.append_basic_block(function, "entry");
-        self.builder.position_at_end(entry);
-
-        // Add parameters to scope
-        self.variables.clear();
-        for (i, (param_name, _)) in params.iter().enumerate() {
-            let param = function.get_nth_param(i as u32).unwrap();
-            let alloca = self.create_entry_block_alloca(param_name, param.get_type());
-            self.builder.build_store(alloca, param);
-            self.variables.insert(param_name.clone(), alloca);
-        }
-
-        // Generate body
-        let mut last_value = None;
-        for node in body {
-            last_value = Some(self.generate_node(node)?);
-        }
-
-        // Add return instruction
-        if let Some(val) = last_value {
-            self.builder.build_return(Some(&val));
-        } else {
-            self.builder.build_return(None);
-        }
-
-        Ok(function.as_global_value().as_basic_value_enum())
-    }
-
-    /// Generates LLVM IR for an async function
-    fn generate_async_function(
-        &mut self,
-        name: &str,
-        params: &[(String, TypeAnnotation)],
-        body: &[AstNode],
-    ) -> Result<BasicValueEnum<'ctx>, KslError> {
-        debug!("Generating async function: {}", name);
-
-        // Create state type for async function
-        let state_type = self.create_async_state_type(name, params)?;
-        
-        // Create poll function
-        let poll_fn_name = format!("{}_poll", name);
-        let poll_type = self.context.i32_type().fn_type(
-            &[self.context.i8_type().ptr_type(AddressSpace::Generic).into()],
-            false,
-        );
-        let poll_fn = self.module.add_function(&poll_fn_name, poll_type, None);
-
-        // Generate state machine
-        self.generate_state_machine(poll_fn, state_type, body)?;
-
-        Ok(poll_fn.as_global_value().as_basic_value_enum())
-    }
-
-    /// Generates LLVM IR for variable declaration
-    fn generate_var_decl(
-        &mut self,
-        name: &str,
-        type_annot: &Option<TypeAnnotation>,
-        expr: &AstNode,
-        is_mutable: bool,
-    ) -> Result<BasicValueEnum<'ctx>, KslError> {
-        debug!("Generating variable declaration: {}", name);
-
-        // Generate expression
-        let value = self.generate_node(expr)?;
-
-        // Create alloca
-        let var_type = if let Some(ty) = type_annot {
-            self.type_to_llvm_type(ty)?
-        } else {
-            value.get_type()
-        };
-        let alloca = self.create_entry_block_alloca(name, var_type);
-        
-        // Store value
-        self.builder.build_store(alloca, value);
-        self.variables.insert(name.to_string(), alloca);
-
-        Ok(value)
-    }
-
-    /// Generates LLVM IR for if statement
-    fn generate_if(
-        &mut self,
-        condition: &AstNode,
-        then_branch: &[AstNode],
-        else_branch: &Option<Vec<AstNode>>,
-    ) -> Result<BasicValueEnum<'ctx>, KslError> {
-        debug!("Generating if statement");
-
-        let parent = self.fn_value_opt.unwrap();
-        let cond_value = self.generate_node(condition)?;
-
-        let then_bb = self.context.append_basic_block(parent, "then");
-        let else_bb = self.context.append_basic_block(parent, "else");
-        let merge_bb = self.context.append_basic_block(parent, "merge");
-
-        self.builder.build_conditional_branch(cond_value.into_int_value(), then_bb, else_bb);
-
-        // Generate then block
-        self.builder.position_at_end(then_bb);
-        let mut then_value = None;
-        for node in then_branch {
-            then_value = Some(self.generate_node(node)?);
-        }
-        self.builder.build_unconditional_branch(merge_bb);
-
-        // Generate else block
-        self.builder.position_at_end(else_bb);
-        let mut else_value = None;
-        if let Some(else_nodes) = else_branch {
-            for node in else_nodes {
-                else_value = Some(self.generate_node(node)?);
-            }
-        }
-        self.builder.build_unconditional_branch(merge_bb);
-
-        // Generate merge block
-        self.builder.position_at_end(merge_bb);
-        if let (Some(then_val), Some(else_val)) = (then_value, else_value) {
-            let phi = self.builder.build_phi(then_val.get_type(), "if_result");
-            phi.add_incoming(&[(&then_val, then_bb), (&else_val, else_bb)]);
-            Ok(phi.as_basic_value())
-        } else {
-            Ok(self.context.i32_type().const_int(0, false).as_basic_value_enum())
-        }
-    }
-
-    /// Generates LLVM IR for match expression
-    fn generate_match(
-        &mut self,
-        expr: &AstNode,
-        arms: &[MatchArm],
-    ) -> Result<BasicValueEnum<'ctx>, KslError> {
-        debug!("Generating match expression");
-
-        let match_value = self.generate_node(expr)?;
-        let parent = self.fn_value_opt.unwrap();
-
-        let mut arm_blocks = Vec::new();
-        let merge_bb = self.context.append_basic_block(parent, "match_end");
-
-        // Create blocks for each arm
-        for (i, _) in arms.iter().enumerate() {
-            let bb = self.context.append_basic_block(parent, &format!("arm_{}", i));
-            arm_blocks.push(bb);
-        }
-
-        // Generate comparison and branching
-        for (i, arm) in arms.iter().enumerate() {
-            let pattern_value = self.generate_pattern(&arm.pattern)?;
-            let cmp = self.builder.build_int_compare(
-                inkwell::IntPredicate::EQ,
-                match_value.into_int_value(),
-                pattern_value.into_int_value(),
-                "match_cmp",
-            );
-            
-            let next_bb = if i < arms.len() - 1 {
-                arm_blocks[i + 1]
-            } else {
-                merge_bb
-            };
-            
-            self.builder.build_conditional_branch(cmp, arm_blocks[i], next_bb);
-            self.builder.position_at_end(arm_blocks[i]);
-        }
-
-        // Generate arm bodies
-        let mut arm_values = Vec::new();
-        for (i, (arm, bb)) in arms.iter().zip(arm_blocks.iter()).enumerate() {
-            self.builder.position_at_end(*bb);
-            let value = self.generate_node(&arm.body)?;
-            arm_values.push((value, *bb));
-            self.builder.build_unconditional_branch(merge_bb);
-        }
-
-        // Generate merge block with phi node
-        self.builder.position_at_end(merge_bb);
-        if !arm_values.is_empty() {
-            let first_type = arm_values[0].0.get_type();
-            let phi = self.builder.build_phi(first_type, "match_result");
-            phi.add_incoming(&arm_values.iter().map(|(val, bb)| (val, bb)).collect::<Vec<_>>());
-            Ok(phi.as_basic_value())
-        } else {
-            Ok(self.context.i32_type().const_int(0, false).as_basic_value_enum())
-        }
-    }
-
-    /// Generates LLVM IR for expression
-    fn generate_expr(&mut self, kind: &ExprKind) -> Result<BasicValueEnum<'ctx>, KslError> {
-        match kind {
-            ExprKind::Number(n) => {
-                let value = n.parse::<i64>().map_err(|_| {
-                    KslError::type_error("Invalid number literal".to_string(), SourcePosition::new(1, 1))
-                })?;
-                Ok(self.context.i64_type().const_int(value as u64, false).as_basic_value_enum())
-            }
-            ExprKind::String(s) => {
-                let str_value = self.builder.build_global_string_ptr(s, "str");
-                Ok(str_value.as_pointer_value().as_basic_value_enum())
-            }
-            ExprKind::Ident(name) => {
-                if let Some(ptr) = self.variables.get(name) {
-                    Ok(self.builder.build_load(*ptr, name))
+    fn generate_expr(&mut self, expr: &Expr) -> Result<BasicValueEnum<'ctx>, KslError> {
+        match expr {
+            Expr::Literal(lit) => {
+                match lit {
+                    Literal::Int(n) => Ok(self.context.i32_type().const_int(*n as u64, false).into()),
+                    Literal::Float(f) => Ok(self.context.f64_type().const_float(*f).into()),
+                    Literal::Bool(b) => Ok(self.context.bool_type().const_int(*b as u64, false).into()),
+                    Literal::Str(s) => {
+                        let string_type = self.context.i8_type().ptr_type(AddressSpace::Generic);
+                        let string_value = self.builder.build_global_string_ptr(s, "str");
+                        Ok(string_value.into())
+                    },
+                    _ => Err(KslError::type_error(
+                        format!("Unsupported literal: {:?}", lit),
+                        SourcePosition::new(1, 1),
+                        "E302".to_string()
+                    )),
+                }
+            },
+            Expr::Identifier(name) => {
+                if let Some(var) = self.variables.get(name) {
+                    Ok(self.builder.build_load(*var, name).into())
                 } else {
                     Err(KslError::type_error(
                         format!("Undefined variable: {}", name),
                         SourcePosition::new(1, 1),
+                        "E301".to_string()
                     ))
                 }
-            }
-            ExprKind::BinaryOp { op, left, right } => {
-                let lhs = self.generate_node(left)?;
-                let rhs = self.generate_node(right)?;
+            },
+            Expr::BinaryOp { left, op, right } => {
+                let left_value = self.generate_expr(left)?;
+                let right_value = self.generate_expr(right)?;
                 
-                match op.as_str() {
-                    "+" => Ok(self.builder.build_int_add(
-                        lhs.into_int_value(),
-                        rhs.into_int_value(),
-                        "add",
-                    ).as_basic_value_enum()),
-                    "-" => Ok(self.builder.build_int_sub(
-                        lhs.into_int_value(),
-                        rhs.into_int_value(),
-                        "sub",
-                    ).as_basic_value_enum()),
-                    "*" => Ok(self.builder.build_int_mul(
-                        lhs.into_int_value(),
-                        rhs.into_int_value(),
-                        "mul",
-                    ).as_basic_value_enum()),
-                    "/" => Ok(self.builder.build_int_signed_div(
-                        lhs.into_int_value(),
-                        rhs.into_int_value(),
-                        "div",
-                    ).as_basic_value_enum()),
-                    "==" => Ok(self.builder.build_int_compare(
-                        inkwell::IntPredicate::EQ,
-                        lhs.into_int_value(),
-                        rhs.into_int_value(),
-                        "eq",
-                    ).as_basic_value_enum()),
+                match op {
+                    BinaryOperator::Add => {
+                        if left_value.is_int_value() {
+                            Ok(self.builder.build_int_add(left_value.into_int_value(), right_value.into_int_value(), "add").into())
+                        } else {
+                            Ok(self.builder.build_float_add(left_value.into_float_value(), right_value.into_float_value(), "add").into())
+                        }
+                    },
+                    BinaryOperator::Sub => {
+                        if left_value.is_int_value() {
+                            Ok(self.builder.build_int_sub(left_value.into_int_value(), right_value.into_int_value(), "sub").into())
+                        } else {
+                            Ok(self.builder.build_float_sub(left_value.into_float_value(), right_value.into_float_value(), "sub").into())
+                        }
+                    },
+                    BinaryOperator::Mul => {
+                        if left_value.is_int_value() {
+                            Ok(self.builder.build_int_mul(left_value.into_int_value(), right_value.into_int_value(), "mul").into())
+                        } else {
+                            Ok(self.builder.build_float_mul(left_value.into_float_value(), right_value.into_float_value(), "mul").into())
+                        }
+                    },
                     _ => Err(KslError::type_error(
-                        format!("Unsupported binary operator: {}", op),
+                        format!("Unsupported binary operator: {:?}", op),
                         SourcePosition::new(1, 1),
+                        "E301".to_string()
                     )),
                 }
-            }
-            ExprKind::Call { name, args } => {
-                let fn_val = self.module.get_function(name).ok_or_else(|| {
-                    KslError::type_error(
-                        format!("Undefined function: {}", name),
-                        SourcePosition::new(1, 1),
-                    )
-                })?;
-
-                let mut arg_values = Vec::new();
-                for arg in args {
-                    arg_values.push(self.generate_node(arg)?);
-                }
-
-                Ok(self.builder.build_call(
-                    fn_val,
-                    &arg_values,
-                    "call",
-                ).try_as_basic_value().left().unwrap())
-            }
-            ExprKind::ShardOp { kind, args } => {
-                let fn_name = match kind.as_str() {
-                    "split" => "ksl_shard_split",
-                    "merge" => "ksl_shard_merge",
-                    _ => return Err(KslError::type_error(
-                        format!("Unsupported shard operation: {}", kind),
-                        SourcePosition::new(1, 1),
-                    )),
-                };
-                let fn_val = self.module.get_function(fn_name).unwrap();
-                let mut arg_values = Vec::new();
-                for arg in args {
-                    arg_values.push(self.generate_node(arg)?);
-                }
-                Ok(self.builder.build_call(
-                    fn_val,
-                    &arg_values,
-                    "shard_call",
-                ).try_as_basic_value().left().unwrap())
-            }
+            },
             _ => Err(KslError::type_error(
-                format!("Unsupported expression: {:?}", kind),
+                format!("Unsupported expression: {:?}", expr),
                 SourcePosition::new(1, 1),
+                "E304".to_string()
             )),
         }
     }

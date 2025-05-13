@@ -7,6 +7,10 @@ use tokio::sync::RwLock;
 use std::time::{Duration, Instant};
 use std::sync::atomic::{AtomicU64, Ordering};
 use rand::Rng;
+use crate::ksl_metrics::BlockResult;
+use crate::ksl_async::{AsyncRuntime, AsyncResult};
+use crate::ksl_kapra_consensus::ConsensusRuntime;
+use crate::ksl_errors::{KslError, SourcePosition};
 
 /// Represents KSL bytecode (aligned with ksl_bytecode.rs).
 #[derive(Debug, Clone)]

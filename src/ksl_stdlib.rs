@@ -69,7 +69,7 @@ impl StdLibFunctionTrait for StdLibFunction {
     }
 
     fn opcode(&self) -> Option<KapraOpCode> {
-        self.opcode
+        self.opcode.clone()
     }
 
     fn is_async(&self) -> bool {

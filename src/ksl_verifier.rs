@@ -2,14 +2,14 @@
 /// Implements Z3-based formal verification for KSL functions, supporting async execution,
 /// new type system features, and comprehensive verification rules.
 
-use crate::ksl_parser::{AstNode, ExprKind, TypeAnnotation};
+use crate::ksl_parser::{AstNode, ExprKind, TypeAnnotation, Attribute};
 use crate::ksl_types::{Type, TypeSystem, TypeContext};
 use crate::ksl_errors::{KslError, SourcePosition};
 use crate::ksl_stdlib::StdLib;
 use crate::ksl_stdlib_crypto::CryptoStdLib;
 use crate::ksl_checker::{check_types, TypeCheckResult};
 use crate::ksl_async::{AsyncRuntime, AsyncTask};
-use z3::{ast::{Int, Bool, Array}, Config, Context, Solver, ast::Ast};
+use z3::{ast::{Int, Bool, Array, Ast, FuncDecl}, Config, Context, Solver, Sort};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
@@ -468,7 +468,11 @@ impl<'a> Verifier<'a> {
                     "<=" => l.le(&r),
                     "==" => l._eq(&r),
                     "!=" => !l._eq(&r),
-                    _ => unreachable!(),
+                    _ => return Err(KslError::type_error(
+                        format!("Unsupported comparison operator: {}", op),
+                        SourcePosition::new(1, 1),
+                        "E012".to_string(),
+                    )),
                 })
             }
             (Z3Variable::Bool(l), Z3Variable::Bool(r)) => {
@@ -646,7 +650,7 @@ pub async fn verify(ast: &[AstNode], enable_async: bool) -> Result<(), Vec<VerEr
 
 // Assume ksl_parser.rs, ksl_types.rs, ksl_errors.rs, ksl_stdlib.rs, and ksl_stdlib_crypto.rs are in the same crate
 mod ksl_parser {
-    pub use super::{AstNode, ExprKind, TypeAnnotation};
+    pub use super::{AstNode, ExprKind, TypeAnnotation, Attribute};
 }
 
 mod ksl_types {

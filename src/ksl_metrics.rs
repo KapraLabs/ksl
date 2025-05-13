@@ -93,9 +93,10 @@ impl MetricsCollector {
         
         // Initialize OpenTelemetry meter provider
         let meter_provider = if let Some(endpoint) = &config.otel_endpoint {
-            let exporter = opentelemetry_otlp::new_exporter()
-                .tonic()
-                .with_endpoint(endpoint);
+            let exporter = opentelemetry_otlp::MetricExporter::builder()
+                .with_tonic()
+                .with_endpoint(endpoint)
+                .build()?;
             
             MeterProvider::builder()
                 .with_reader(PeriodicReader::builder(exporter, Tokio).build())
@@ -103,7 +104,7 @@ impl MetricsCollector {
                 .build()
         } else {
             MeterProvider::builder()
-                .with_reader(PeriodicReader::builder(opentelemetry_stdout::new(), Tokio).build())
+                .with_reader(PeriodicReader::builder(opentelemetry_stdout::metrics_exporter(std::io::stdout()), Tokio).build())
                 .with_resource(Resource::new(vec![KeyValue::new("service.name", "ksl")]))
                 .build()
         };
@@ -528,9 +529,10 @@ impl MetricsVM for KapraVM {
 }
 
 // Metrics data structure for KapraVM
-struct MetricsData {
-    memory_usage: usize,
-    operation_latencies: Vec<(KapraOpCode, Duration)>,
+#[derive(Debug)]
+pub struct MetricsData {
+    pub memory_usage: usize,
+    pub operation_latencies: Vec<(KapraOpCode, Duration)>,
 }
 
 // Public API to collect metrics

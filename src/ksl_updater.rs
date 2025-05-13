@@ -11,6 +11,7 @@ use semver::{Version, VersionReq};
 use crate::ksl_validator_keys::{ValidatorKeyPair, KeyType};
 use crate::ksl_kapra_crypto::{KapraCrypto, SignatureScheme};
 use tera::{Tera, Context};
+use clap::{App, Arg, Command};
 
 /// Update target type
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

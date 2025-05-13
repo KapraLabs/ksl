@@ -38,7 +38,8 @@ use sha2::{Sha256, Digest};
 use chrono::Local;
 use tera::{Tera, Context};
 use reqwest;
-use ed25519_dalek;
+use ed25519_dalek::Keypair;
+use crate::ksl_tester::TestRunner;
 
 // CI configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,7 +86,7 @@ pub struct CiTestResult {
     pub passed: bool,
     pub error: Option<String>,
     pub duration: Duration,
-    pub gas_metrics: Option<GasMetrics>,
+    pub gas_metrics: Option<GasStats>,
     pub resource_metrics: Option<ResourceMetrics>,
     pub wasm_output: Option<String>,
     pub test_hash: String,
@@ -502,7 +503,7 @@ impl CiSystem {
             passed: test_result.is_ok(),
             error: test_result.err(),
             duration,
-            gas_metrics: self.analyzer.get_gas_stats().map(|stats| GasMetrics {
+            gas_metrics: self.analyzer.get_gas_stats().map(|stats| GasStats {
                 total_gas: stats.total_gas,
                 max_gas: stats.max_gas,
                 avg_gas: stats.avg_gas,

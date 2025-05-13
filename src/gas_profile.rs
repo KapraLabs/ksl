@@ -22,6 +22,10 @@ pub fn gas_cost(opcode: &KapraOpCode) -> u64 {
         KapraOpCode::Call => 10,
         KapraOpCode::Return => 5,
 
+        // Auth operations
+        KapraOpCode::Auth => 15,
+        KapraOpCode::AuthCall => 20,
+
         // Crypto operations - high cost
         KapraOpCode::Sha3 => 50,
         KapraOpCode::Sha3_512 => 100,
@@ -49,6 +53,13 @@ pub fn gas_cost(opcode: &KapraOpCode) -> u64 {
         KapraOpCode::Sqrt => 20,
         KapraOpCode::MatrixMul => 50,
         KapraOpCode::TensorReduce => 40,
+        
+        // Verification operations
+        KapraOpCode::Verify => 10,
+        
+        // Plugin operations - variable cost based on plugin
+        KapraOpCode::PluginCall { .. } => 25,
+        KapraOpCode::CallSyscall { .. } => 30,
     }
 }
 

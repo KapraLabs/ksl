@@ -3,6 +3,8 @@
 // Supports async code documentation and integration with ksl_docgen.rs.
 
 use crate::ksl_parser::{AstNode, TypeAnnotation, DocComment};
+use crate::ksl_types::Type;
+use crate::ksl_ast::Expr;
 use crate::ksl_module::{ModuleSystem, load_and_link};
 use crate::ksl_stdlib::StdLib;
 use crate::ksl_stdlib_crypto::CryptoStdLib;
@@ -17,6 +19,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use std::collections::HashMap;
 
 /// Documentation generator state with async support
 pub struct DocGenerator {

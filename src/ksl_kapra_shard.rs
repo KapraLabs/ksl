@@ -10,13 +10,15 @@ use crate::ksl_async::{AsyncRuntime, AsyncResult};
 use crate::ksl_kapra_consensus::{ConsensusRuntime, ConsensusState};
 use crate::ksl_errors::{KslError, SourcePosition};
 use crossbeam_queue::SegQueue;
-use packed_simd::{u8x32, u32x8, u64x4};
+// packed_simd usage temporarily commented out due to compilation issues with stable Rust
+// // use packed_simd::{u8x32, u32x8, u64x4}; 
 use rand::Rng;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use crate::ksl_metrics::{BlockResult, log_metrics};
 use std::time::{Instant};
 use tokio::sync::Mutex;
+use serde::Serialize;
 
 /// Represents KSL bytecode (aligned with ksl_bytecode.rs).
 #[derive(Debug, Clone)]
@@ -77,7 +79,7 @@ pub enum Type {
 }
 
 /// Shard state for tracking shard-specific information
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ShardState {
     pub last_block: [u8; 32],
     pub validators: Vec<[u8; 32]>,
@@ -591,12 +593,17 @@ pub async fn run_shard_benchmark(shard_id: usize, txs: Vec<Transaction>) -> Bloc
     let kaprekar_ratio = kaprekar_successes as f64 / txs.len() as f64;
 
     let result = BlockResult {
-        processed_txs: state_guard.processed_txs,
-        failed_txs: state_guard.failed_txs,
+        processed_txs: state_guard.processed_txs as u64,
+        failed_txs: state_guard.failed_txs as u64,
         gas_used: state_guard.gas_used,
-        block_time: duration.as_millis() as u64,
-        validator_count: state_guard.validator_count,
+        block_time: duration,
+        validator_count: state_guard.validator_count as u32,
         kaprekar_pass_ratio: kaprekar_ratio,
+        zk_proof_scheme: None,
+        zk_proof_size: None,
+        zk_proof_valid: None,
+        zk_proof_gen_time: None,
+        zk_proof_verify_time: None,
     };
 
     // Log metrics
@@ -720,3 +727,14 @@ mod tests {
         assert_eq!(state.gas_used, 5000);
     }
 }
+
+// Placeholder definitions for missing types and constants
+#[derive(Debug)] pub struct StateTransitionEngine { state_size: usize }
+impl StateTransitionEngine { pub fn new(state_size: usize) -> Self { Self { state_size } } }
+
+#[derive(Debug)] pub struct GossipProtocol { interval: Duration, cache_size: usize }
+impl GossipProtocol { pub fn new(interval: Duration, cache_size: usize) -> Self { Self { interval, cache_size } } }
+
+const OPCODE_SHARD_ROUTE: u8 = 0xF0; // Placeholder value
+const OPCODE_SHARD_SEND: u8 = 0xF1;  // Placeholder value
+const OPCODE_PUSH: u8 = 0xF2;       // Placeholder value, distinct from ksl_bytecode::KapraOpCode values

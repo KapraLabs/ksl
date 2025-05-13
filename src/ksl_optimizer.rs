@@ -5,6 +5,9 @@
 use crate::ksl_bytecode::{KapraBytecode, KapraInstruction, KapraOpCode, Operand, Constant};
 use crate::ksl_types::Type;
 use crate::ksl_errors::{KslError, SourcePosition};
+use crate::ksl_macros::NetworkOpType;
+use crate::ksl_module::Module;
+use inkwell::attributes::AttributeKind;
 use std::collections::{HashMap, HashSet};
 
 /// Optimization error
@@ -292,15 +295,17 @@ impl Optimizer {
                 continue;
             }
 
-            if instr.opcode == OPCODE_MOV {
+            if instr.opcode == KapraOpCode::Mov {
                 if let (Operand::Register(dst), Operand::Immediate(data)) = (&instr.operands[0], &instr.operands[1]) {
                     if let Ok(value) = u64::from_le_bytes(data.as_slice().try_into().map_err(|_| ())) {
                         constant_map.insert(*dst, value);
                     }
                 }
-            } else if instr.opcode == OPCODE_PUSH {
+            } else if instr.opcode == KapraOpCode::Noop {
                 if i + 1 < result.instructions.len() {
-                    let const_idx = result.instructions[i + 1] as usize;
+                    let const_idx = result.instructions[i + 1].operands.get(0)
+                        .and_then(|op| if let Operand::Immediate(data) = op { Some(u32::from_le_bytes(data.as_slice().try_into().unwrap_or([0u8;4])) as usize) } else { None } )
+                        .unwrap_or(constants.len());
                     if const_idx < constants.len() {
                         match &constants[const_idx] {
                             Constant::U64(val) => {
@@ -310,7 +315,7 @@ impl Optimizer {
                         }
                     }
                 }
-            } else if instr.opcode == OPCODE_ADD {
+            } else if instr.opcode == KapraOpCode::Add {
                 if let (Operand::Register(dst), Operand::Register(src1), Operand::Register(src2)) =
                     (&instr.operands[0], &instr.operands[1], &instr.operands[2])
                 {
@@ -327,7 +332,7 @@ impl Optimizer {
                         constant_map.insert(*dst, result_val);
                     }
                 }
-            } else if instr.opcode == OPCODE_MATRIX_MUL {
+            } else if instr.opcode == KapraOpCode::MatrixMul {
                 if let (Operand::Register(dst), Operand::Register(src1), Operand::Register(src2)) =
                     (&instr.operands[0], &instr.operands[1], &instr.operands[2])
                 {
@@ -463,11 +468,11 @@ impl Optimizer {
                     } else {
                         None
                     })
-                    .unwrap_or(bodycode.instructions.len());
+                    .unwrap_or(bytecode.instructions.len());
                 i = body_end + 1;
 
                 // Only unroll small loops to avoid code bloat
-                if iterations <= unroll_limit {
+                if iterations <= self.config.max_unroll_iterations {
                     // Unroll the loop by repeating the body
                     for _ in 0..iterations {
                         result.instructions.extend_from_slice(&bytecode.instructions[body_start..body_end]);

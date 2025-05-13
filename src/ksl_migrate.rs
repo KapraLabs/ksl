@@ -2,7 +2,7 @@
 // Supports migration of KSL code between versions or platforms, detecting deprecated
 // features and updating code to the latest version with a migration report.
 
-use crate::ksl_parser::{parse, AstNode, ExprKind, ParseError};
+use crate::ksl_parser::{parse, AstNode, ExprKind, ParseError, TypeAnnotation};
 use crate::ksl_ast_transform::{AstTransformer, TransformError};
 use crate::ksl_checker::check;
 use crate::ksl_doc::{StdLibFunctionTrait};

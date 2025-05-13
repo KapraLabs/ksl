@@ -10,7 +10,7 @@
 /// - Integration with KapraVM for consistent execution
 /// - Comprehensive error handling and reporting
 
-use crate::ksl_parser::parse;
+use crate::ksl_parser::{parse, AstNode, ExprKind};
 use crate::ksl_checker::check;
 use crate::ksl_compiler::compile;
 use crate::ksl_bytecode::{KapraBytecode, KapraInstruction, KapraOpCode, Operand};
@@ -35,6 +35,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use crate::ksl_abi::{ABIGenerator, ContractABI};
 use crate::ksl_version::{ContractVersion, VersionManager};
+use crate::ksl_macros::{NetworkOpType, CompileConfig};
 
 /// Backend type for AOT compilation
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

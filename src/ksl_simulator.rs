@@ -219,7 +219,7 @@ impl Simulator {
         for i in 0..5 {
             let tx = BlockchainTx {
                 id: i + 1,
-                data: rand::thread_rng().gen::<[u8; 32]>().to_vec(),
+                data: rand::thread_rng().r#gen::<[u8; 32]>().to_vec(),
                 timestamp: Instant::now(),
             };
             self.blockchain_txs.push_back(tx);
@@ -279,7 +279,7 @@ impl Simulator {
             std::thread::sleep(network_config.latency);
 
             // Simulate network errors
-            if rand::thread_rng().gen::<f32>() < network_config.error_rate {
+            if rand::thread_rng().r#gen::<f32>() < network_config.error_rate {
                 self.logs.push(format!("Network error for request to {}", request.url));
                 continue;
             }
@@ -347,35 +347,35 @@ impl SimVM for KapraVM {
                     }
                 }
             }
-            KapraOpCode::DeviceSensor => {
+            KapraOpCode::SensorRead => {
                 if simulator.config.env == "iot" {
                     if let Some(sensor) = simulator.sensors.get(&1) {
                         if let Some(reading) = sensor.readings.front() {
                             self.simulation_data.as_mut().unwrap().sensor_reading = Some(*reading);
-                            simulator.logs.push(format!("Simulated sensor reading: {}", reading));
+                            simulator.logs.push(format!("Read sensor value: {}", reading));
                         }
                     }
                 }
             }
-            KapraOpCode::HttpGet => {
+            KapraOpCode::HttpRequest => {
                 if simulator.config.env == "network" {
                     if let Some(response) = simulator.network_state.response_queue.pop_front() {
                         self.simulation_data.as_mut().unwrap().http_response = Some(response);
-                        simulator.logs.push("Processed HTTP response".to_string());
                     }
                 }
             }
             _ => {}
         }
-        self.execute_instruction(instr)
+        Ok(())
     }
 }
 
 // Simulation data for KapraVM
-struct SimulationData {
-    tx_index: usize,
-    sensor_reading: Option<f32>,
-    http_response: Option<HttpResponse>,
+#[derive(Debug, Clone)]
+pub struct SimulationData {
+    pub tx_index: usize,
+    pub sensor_reading: Option<f64>,
+    pub http_response: Option<HttpResponse>,
 }
 
 // Public API to run simulation

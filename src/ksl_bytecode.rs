@@ -30,6 +30,7 @@ mod ksl_docgen {
 pub enum Operand {
     Register(u8),       // Virtual register (0–15)
     Immediate(Vec<u8>), // Immediate value (e.g., number, string)
+    String(String),
 }
 
 impl Operand {
@@ -48,6 +49,7 @@ impl Operand {
                 bytes.extend(data);
                 bytes
             }
+            Operand::String(s) => s.bytes().collect(),
         }
     }
 
@@ -83,7 +85,7 @@ impl Operand {
 }
 
 /// Kapra bytecode operation codes
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum KapraOpCode {
     // Core operations
     Mov,         // Mov dst_reg, src_reg_or_imm
@@ -409,259 +411,288 @@ impl KapraInstruction {
     /// // Returns "store i32 42, i32* %r0"
     /// ```
     pub fn to_jit_ir(&self) -> String {
-        match self.opcode {
-            KapraOpCode::Mov => {
-                if let [Operand::Register(dst), src] = self.operands.as_slice() {
-                    match src {
-                        Operand::Register(src_reg) => {
-                            format!("store i32 %r{}, i32* %r{}", src_reg, dst)
-                        }
-                        Operand::Immediate(data) => {
-                            let value = data.iter().fold(0, |acc, &x| (acc << 8) | x as u32);
-                            format!("store i32 {}, i32* %r{}", value, dst)
-                        }
-                    }
-                } else {
-                    "unreachable".to_string()
-                }
-            }
+        match &self.opcode {
             KapraOpCode::Add => {
-                if let [Operand::Register(dst), Operand::Register(src1), Operand::Register(src2)] =
-                    self.operands.as_slice()
-                {
-                    format!(
-                        "%r{} = add i32 %r{}, %r{}",
-                        dst, src1, src2
-                    )
-                } else {
-                    "unreachable".to_string()
+                match &self.operands[..] {
+                    [Operand::Register(dst), Operand::Register(src1), Operand::Register(src2)] => {
+                        format!(
+                            "%r{} = add i32 %r{}, %r{}",
+                            dst, src1, src2
+                        )
+                    }
+                    _ => "unreachable".to_string(),
                 }
             }
             KapraOpCode::Sub => {
-                if let [Operand::Register(dst), Operand::Register(src1), Operand::Register(src2)] =
-                    self.operands.as_slice()
-                {
-                    format!(
-                        "%r{} = sub i32 %r{}, %r{}",
-                        dst, src1, src2
-                    )
-                } else {
-                    "unreachable".to_string()
+                match &self.operands[..] {
+                    [Operand::Register(dst), Operand::Register(src1), Operand::Register(src2)] => {
+                        format!(
+                            "%r{} = sub i32 %r{}, %r{}",
+                            dst, src1, src2
+                        )
+                    }
+                    _ => "unreachable".to_string(),
                 }
             }
             KapraOpCode::Mul => {
-                if let [Operand::Register(dst), Operand::Register(src1), Operand::Register(src2)] =
-                    self.operands.as_slice()
-                {
-                    format!(
-                        "%r{} = mul i32 %r{}, %r{}",
-                        dst, src1, src2
-                    )
-                } else {
-                    "unreachable".to_string()
-                }
-            }
-            KapraOpCode::Halt => "ret void".to_string(),
-            KapraOpCode::Fail => "unreachable".to_string(),
-            KapraOpCode::Jump => {
-                if let [Operand::Immediate(offset)] = self.operands.as_slice() {
-                    let value = offset.iter().fold(0, |acc, &x| (acc << 8) | x as u32);
-                    format!("br label %{}", value)
-                } else {
-                    "unreachable".to_string()
-                }
-            }
-            KapraOpCode::Call => {
-                if let [Operand::Immediate(index)] = self.operands.as_slice() {
-                    let value = index.iter().fold(0, |acc, &x| (acc << 8) | x as u32);
-                    format!("call void @func{}", value)
-                } else {
-                    "unreachable".to_string()
-                }
-            }
-            KapraOpCode::Return => "ret void".to_string(),
-            KapraOpCode::Auth => {
-                if let [Operand::Register(delegatee)] = self.operands.as_slice() {
-                    format!("call void @auth(i32 %r{})", delegatee)
-                } else {
-                    "unreachable".to_string()
-                }
-            }
-            KapraOpCode::AuthCall => {
-                if let [Operand::Register(target)] = self.operands.as_slice() {
-                    format!("call void @auth_call(i32 %r{})", target)
-                } else {
-                    "unreachable".to_string()
-                }
-            }
-            KapraOpCode::Sha3 => {
-                if let [Operand::Register(dst), Operand::Register(src)] = self.operands.as_slice() {
-                    format!("%r{} = call [32 x i8] @sha3(i32 %r{})", dst, src)
-                } else {
-                    "unreachable".to_string()
-                }
-            }
-            KapraOpCode::Sha3_512 => {
-                if let [Operand::Register(dst), Operand::Register(src)] = self.operands.as_slice() {
-                    format!("%r{} = call [64 x i8] @sha3_512(i32 %r{})", dst, src)
-                } else {
-                    "unreachable".to_string()
-                }
-            }
-            KapraOpCode::Kaprekar => {
-                if let [Operand::Register(dst), Operand::Register(src)] = self.operands.as_slice() {
-                    format!("%r{} = call i32 @kaprekar(i32 %r{})", dst, src)
-                } else {
-                    "unreachable".to_string()
+                match &self.operands[..] {
+                    [Operand::Register(dst), Operand::Register(src1), Operand::Register(src2)] => {
+                        format!(
+                            "%r{} = mul i32 %r{}, %r{}",
+                            dst, src1, src2
+                        )
+                    }
+                    _ => "unreachable".to_string(),
                 }
             }
             KapraOpCode::BlsVerify => {
-                if let [Operand::Register(dst), Operand::Register(msg), Operand::Register(pubkey), Operand::Register(sig)] =
-                    self.operands.as_slice()
-                {
-                    format!(
-                        "%r{} = call i32 @bls_verify(i32 %r{}, i32 %r{}, i32 %r{})",
-                        dst, msg, pubkey, sig
-                    )
-                } else {
-                    "unreachable".to_string()
+                match &self.operands[..] {
+                    [Operand::Register(dst), Operand::Register(msg), Operand::Register(pubkey), Operand::Register(sig)] => {
+                        format!(
+                            "%r{} = call i32 @bls_verify(i32 %r{}, i32 %r{}, i32 %r{})",
+                            dst, msg, pubkey, sig
+                        )
+                    }
+                    _ => "unreachable".to_string(),
                 }
             }
             KapraOpCode::DilithiumVerify => {
-                if let [Operand::Register(dst), Operand::Register(msg), Operand::Register(pubkey), Operand::Register(sig)] =
-                    self.operands.as_slice()
-                {
-                    format!(
-                        "%r{} = call i32 @dilithium_verify(i32 %r{}, i32 %r{}, i32 %r{})",
-                        dst, msg, pubkey, sig
-                    )
-                } else {
-                    "unreachable".to_string()
-                }
-            }
-            KapraOpCode::MerkleVerify => {
-                if let [Operand::Register(dst), Operand::Register(root), Operand::Register(proof)] =
-                    self.operands.as_slice()
-                {
-                    format!(
-                        "%r{} = call i32 @merkle_verify(i32 %r{}, i32 %r{})",
-                        dst, root, proof
-                    )
-                } else {
-                    "unreachable".to_string()
-                }
-            }
-            KapraOpCode::AsyncCall => {
-                if let [Operand::Register(dst), Operand::Immediate(index)] = self.operands.as_slice() {
-                    let value = index.iter().fold(0, |acc, &x| (acc << 8) | x as u32);
-                    format!("%r{} = call i32 @async_func{}", dst, value)
-                } else {
-                    "unreachable".to_string()
-                }
-            }
-            // New opcodes
-            KapraOpCode::TcpConnect => {
-                if let [Operand::Register(dst), Operand::Register(host), Operand::Register(port)] = self.operands.as_slice() {
-                    format!("%r{} = call i32 @tcp_connect(i32 %r{}, i32 %r{}, i32 %r{})", dst, host, port)
-                } else {
-                    "unreachable".to_string()
+                match &self.operands[..] {
+                    [Operand::Register(dst), Operand::Register(msg), Operand::Register(pubkey), Operand::Register(sig)] => {
+                        format!(
+                            "%r{} = call i32 @dilithium_verify(i32 %r{}, i32 %r{}, i32 %r{})",
+                            dst, msg, pubkey, sig
+                        )
+                    }
+                    _ => "unreachable".to_string(),
                 }
             }
             KapraOpCode::UdpSend => {
-                if let [Operand::Register(dst), Operand::Register(host), Operand::Register(port), Operand::Register(data)] = self.operands.as_slice() {
-                    format!("%r{} = call i32 @udp_send(i32 %r{}, i32 %r{}, i32 %r{}, i32 %r{})", dst, host, port, data)
-                } else {
-                    "unreachable".to_string()
+                match &self.operands[..] {
+                    [Operand::Register(dst), Operand::Register(host), Operand::Register(port), Operand::Register(data)] => {
+                        format!("%r{} = call i32 @udp_send(i32 %r{}, i32 %r{}, i32 %r{})", dst, host, port, data)
+                    }
+                    _ => "unreachable".to_string(),
+                }
+            }
+            KapraOpCode::MerkleVerify => {
+                match &self.operands[..] {
+                    [Operand::Register(dst), Operand::Register(root), Operand::Register(proof)] => {
+                        format!(
+                            "%r{} = call i32 @merkle_verify(i32 %r{}, i32 %r{})",
+                            dst, root, proof
+                        )
+                    }
+                    _ => "unreachable".to_string(),
+                }
+            }
+            KapraOpCode::TcpConnect => {
+                match &self.operands[..] {
+                    [Operand::Register(dst), Operand::Register(host), Operand::Register(port)] => {
+                        format!("%r{} = call i32 @tcp_connect(i32 %r{}, i32 %r{})", dst, host, port)
+                    }
+                    _ => "unreachable".to_string(),
                 }
             }
             KapraOpCode::HttpPost => {
-                if let [Operand::Register(dst), Operand::Register(url), Operand::Register(data)] = self.operands.as_slice() {
-                    format!("%r{} = call i32 @http_post(i32 %r{}, i32 %r{}, i32 %r{})", dst, url, data)
-                } else {
-                    "unreachable".to_string()
-                }
-            }
-            KapraOpCode::HttpGet => {
-                if let [Operand::Register(dst), Operand::Register(url)] = self.operands.as_slice() {
-                    format!("%r{} = call i32 @http_get(i32 %r{}, i32 %r{})", dst, url)
-                } else {
-                    "unreachable".to_string()
-                }
-            }
-            KapraOpCode::Print => {
-                if let [Operand::Register(src)] = self.operands.as_slice() {
-                    format!("call void @print(i32 %r{})", src)
-                } else {
-                    "unreachable".to_string()
-                }
-            }
-            KapraOpCode::DeviceSensor => {
-                if let [Operand::Register(dst), Operand::Register(id)] = self.operands.as_slice() {
-                    format!("%r{} = call i32 @device_sensor(i32 %r{}, i32 %r{})", dst, id)
-                } else {
-                    "unreachable".to_string()
-                }
-            }
-            KapraOpCode::Sin => {
-                if let [Operand::Register(dst), Operand::Register(src)] = self.operands.as_slice() {
-                    format!("%r{} = call f64 @sin(f64 %r{})", dst, src)
-                } else {
-                    "unreachable".to_string()
-                }
-            }
-            KapraOpCode::Cos => {
-                if let [Operand::Register(dst), Operand::Register(src)] = self.operands.as_slice() {
-                    format!("%r{} = call f64 @cos(f64 %r{})", dst, src)
-                } else {
-                    "unreachable".to_string()
-                }
-            }
-            KapraOpCode::Sqrt => {
-                if let [Operand::Register(dst), Operand::Register(src)] = self.operands.as_slice() {
-                    format!("%r{} = call f64 @sqrt(f64 %r{})", dst, src)
-                } else {
-                    "unreachable".to_string()
+                match &self.operands[..] {
+                    [Operand::Register(dst), Operand::Register(url), Operand::Register(data)] => {
+                        format!("%r{} = call i32 @http_post(i32 %r{}, i32 %r{})", dst, url, data)
+                    }
+                    _ => "unreachable".to_string(),
                 }
             }
             KapraOpCode::MatrixMul => {
-                if let [Operand::Register(dst), Operand::Register(a), Operand::Register(b)] = self.operands.as_slice() {
-                    format!("%r{} = call [32 x i8] @matrix_mul(i32 %r{}, i32 %r{}, i32 %r{})", dst, a, b)
-                } else {
-                    "unreachable".to_string()
+                match &self.operands[..] {
+                    [Operand::Register(dst), Operand::Register(a), Operand::Register(b)] => {
+                        format!("%r{} = call [32 x i8] @matrix_mul(i32 %r{}, i32 %r{})", dst, a, b)
+                    }
+                    _ => "unreachable".to_string(),
                 }
             }
             KapraOpCode::TensorReduce => {
-                if let [Operand::Register(dst), Operand::Register(src)] = self.operands.as_slice() {
-                    format!("%r{} = call [32 x i8] @tensor_reduce(i32 %r{}, i32 %r{})", dst, src)
-                } else {
-                    "unreachable".to_string()
+                match &self.operands[..] {
+                    [Operand::Register(dst), Operand::Register(src)] => {
+                        format!("%r{} = call [32 x i8] @tensor_reduce(i32 %r{})", dst, src)
+                    }
+                    _ => "unreachable".to_string(),
+                }
+            }
+            KapraOpCode::Sqrt => {
+                match &self.operands[..] {
+                    [Operand::Register(dst), Operand::Register(src)] => {
+                        format!("%r{} = call f64 @sqrt(f64 %r{})", dst, src)
+                    }
+                    _ => "unreachable".to_string(),
+                }
+            }
+            KapraOpCode::Cos => {
+                match &self.operands[..] {
+                    [Operand::Register(dst), Operand::Register(src)] => {
+                        format!("%r{} = call f64 @cos(f64 %r{})", dst, src)
+                    }
+                    _ => "unreachable".to_string(),
+                }
+            }
+            KapraOpCode::Sin => {
+                match &self.operands[..] {
+                    [Operand::Register(dst), Operand::Register(src)] => {
+                        format!("%r{} = call f64 @sin(f64 %r{})", dst, src)
+                    }
+                    _ => "unreachable".to_string(),
+                }
+            }
+            KapraOpCode::DeviceSensor => {
+                match &self.operands[..] {
+                    [Operand::Register(dst), Operand::Register(id)] => {
+                        format!("%r{} = call i32 @device_sensor(i32 %r{})", dst, id)
+                    }
+                    _ => "unreachable".to_string(),
+                }
+            }
+            KapraOpCode::HttpGet => {
+                match &self.operands[..] {
+                    [Operand::Register(dst), Operand::Register(url)] => {
+                        format!("%r{} = call i32 @http_get(i32 %r{})", dst, url)
+                    }
+                    _ => "unreachable".to_string(),
+                }
+            }
+            KapraOpCode::AsyncCall => {
+                match &self.operands[..] {
+                    [Operand::Register(dst), Operand::Immediate(index)] => {
+                        let value = index.iter().fold(0, |acc, &x| (acc << 8) | x as u32);
+                        format!("%r{} = call i32 @async_func{}", dst, value)
+                    }
+                    _ => "unreachable".to_string(),
+                }
+            }
+            KapraOpCode::Kaprekar => {
+                match &self.operands[..] {
+                    [Operand::Register(dst), Operand::Register(src)] => {
+                        format!("%r{} = call i32 @kaprekar(i32 %r{})", dst, src)
+                    }
+                    _ => "unreachable".to_string(),
+                }
+            }
+            KapraOpCode::Sha3_512 => {
+                match &self.operands[..] {
+                    [Operand::Register(dst), Operand::Register(src)] => {
+                        format!("%r{} = call [64 x i8] @sha3_512(i32 %r{})", dst, src)
+                    }
+                    _ => "unreachable".to_string(),
+                }
+            }
+            KapraOpCode::Sha3 => {
+                match &self.operands[..] {
+                    [Operand::Register(dst), Operand::Register(src)] => {
+                        format!("%r{} = call [32 x i8] @sha3(i32 %r{})", dst, src)
+                    }
+                    _ => "unreachable".to_string(),
+                }
+            }
+            KapraOpCode::AuthCall => {
+                match &self.operands[..] {
+                    [Operand::Register(_dst), Operand::Register(target)] => {
+                        format!("call void @auth_call(i32 %r{})", target)
+                    }
+                    _ => "unreachable".to_string(),
+                }
+            }
+            KapraOpCode::Auth => {
+                match &self.operands[..] {
+                    [Operand::Register(_dst), Operand::Register(delegatee)] => {
+                        format!("call void @auth(i32 %r{})", delegatee)
+                    }
+                    _ => "unreachable".to_string(),
+                }
+            }
+            KapraOpCode::Call => {
+                match &self.operands[..] {
+                    [Operand::Register(_dst), Operand::Immediate(index)] => {
+                        let value = index.iter().fold(0, |acc, &x| (acc << 8) | x as u32);
+                        format!("call void @func{}", value)
+                    }
+                    _ => "unreachable".to_string(),
+                }
+            }
+            KapraOpCode::Jump => {
+                match &self.operands[..] {
+                    [Operand::Register(_dst), Operand::Immediate(offset)] => {
+                        let value = offset.iter().fold(0, |acc, &x| (acc << 8) | x as u32);
+                        format!("br label %{}", value)
+                    }
+                    _ => "unreachable".to_string(),
+                }
+            }
+            KapraOpCode::Mov => {
+                match &self.operands[..] {
+                    [Operand::Register(dst), Operand::Register(src)] => {
+                        format!("store i32 %r{}, i32* %r{}", src, dst)
+                    }
+                    [Operand::Register(dst), Operand::Immediate(data)] => {
+                        let value = data.iter().fold(0, |acc, &x| (acc << 8) | x as u32);
+                        format!("store i32 {}, i32* %r{}", value, dst)
+                    }
+                    [Operand::Register(dst), Operand::String(_)] => {
+                        format!("store i32 0, i32* %r{} // String operand not supported in JIT IR", dst)
+                    }
+                    _ => "unreachable".to_string(),
+                }
+            }
+            KapraOpCode::Print => {
+                match &self.operands[..] {
+                    [Operand::Register(src)] => {
+                        format!("call void @print(i32 %r{})", src)
+                    }
+                    _ => "unreachable".to_string(),
                 }
             }
             KapraOpCode::Assert => {
-                if let [Operand::Register(cond)] = self.operands.as_slice() {
-                    format!(
-                        "br i1 %r{}, label %continue, label %fail",
-                        cond
-                    )
-                } else {
-                    "unreachable".to_string()
+                match &self.operands[..] {
+                    [Operand::Register(cond)] => {
+                        format!(
+                            "br i1 %r{}, label %continue, label %fail",
+                            cond
+                        )
+                    }
+                    _ => "unreachable".to_string(),
                 }
             }
+            KapraOpCode::PluginCall { .. } => {
+                match &self.operands[..] {
+                    [Operand::Register(_dst), Operand::Immediate(data)] => {
+                        format!("call void @plugin_call(i32 %r{}, i32 %r{}, i32 %r{})", data[0], data[1], data[2])
+                    }
+                    _ => "unreachable".to_string(),
+                }
+            }
+            KapraOpCode::CallSyscall { .. } => {
+                match &self.operands[..] {
+                    [Operand::String(name)] => {
+                        format!("call void @syscall({})", name)
+                    }
+                    _ => "unreachable".to_string(),
+                }
+            }
+            KapraOpCode::Halt => {
+                "call void @halt()".to_string()
+            }
+            KapraOpCode::Fail => {
+                "call void @fail()".to_string()
+            }
+            KapraOpCode::Return => {
+                "ret void".to_string()
+            }
             KapraOpCode::Verify => {
-                "unreachable".to_string()
-            }
-            KapraOpCode::PluginCall { plugin, op } => {
-                format!("call void @plugin_call(i32 %r{}, i32 %r{}, i32 %r{})", plugin, op, self.operands[0].encode()[0])
-            }
-            KapraOpCode::CallSyscall { name } => {
-                format!("call void @syscall({})", name)
+                "call void @verify()".to_string()
             }
         }
     }
 }
 
 /// Configuration for bytecode generation
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BytecodeConfig {
     /// Whether to skip bytecode generation for LLVM compilation
     pub skip_for_llvm: bool,
@@ -694,7 +725,7 @@ pub struct KapraBytecode {
 }
 
 /// Micro-VM specific optimizations
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MicroVMOptimizations {
     pub register_usage: HashMap<u8, usize>,
     pub hot_paths: Vec<Vec<usize>>,
@@ -845,12 +876,12 @@ impl KapraBytecode {
         let mut i = 0;
         while i < self.instructions.len() {
             let instr = &self.instructions[i];
-            match instr.opcode {
+            match &instr.opcode {
                 KapraOpCode::Add | KapraOpCode::Sub | KapraOpCode::Mul => {
-                    if let [Operand::Register(dst), Operand::Immediate(a), Operand::Immediate(b)] = &instr.operands {
+                    if let [Operand::Register(dst), Operand::Immediate(a), Operand::Immediate(b)] = &instr.operands[..] {
                         let a_val = u32::from_le_bytes(a.as_slice().try_into().map_err(|_| "Invalid immediate value")?);
                         let b_val = u32::from_le_bytes(b.as_slice().try_into().map_err(|_| "Invalid immediate value")?);
-                        let result = match instr.opcode {
+                        let result = match &instr.opcode {
                             KapraOpCode::Add => a_val + b_val,
                             KapraOpCode::Sub => a_val - b_val,
                             KapraOpCode::Mul => a_val * b_val,
@@ -906,11 +937,6 @@ impl fmt::Display for KapraBytecode {
         }
         Ok(())
     }
-}
-
-// Assume ksl_types.rs is in the same crate
-mod ksl_types {
-    pub use super::Type;
 }
 
 #[cfg(test)]

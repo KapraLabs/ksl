@@ -54,7 +54,7 @@ impl ConfigManager {
     pub fn new() -> Result<Self, KslError> {
         let pos = SourcePosition::new(1, 1);
         let config_path = home_dir()
-            .ok_or_else(|| KslError::type_error("Failed to locate home directory".to_string(), pos))?
+            .ok_or_else(|| KslError::type_error("Failed to locate home directory".to_string(), pos, "E1001".to_string()))?
             .join(".ksl/config.toml");
 
         let config = if config_path.exists() {
@@ -62,17 +62,20 @@ impl ConfigManager {
                 .map_err(|e| KslError::type_error(
                     format!("Failed to open config file {}: {}", config_path.display(), e),
                     pos,
+                    "E1002".to_string(),
                 ))?;
             let mut contents = String::new();
             file.read_to_string(&mut contents)
                 .map_err(|e| KslError::type_error(
                     format!("Failed to read config file {}: {}", config_path.display(), e),
                     pos,
+                    "E1003".to_string(),
                 ))?;
             toml::from_str(&contents)
                 .map_err(|e| KslError::type_error(
                     format!("Failed to parse config file: {}", e),
                     pos,
+                    "E1004".to_string(),
                 ))?
         } else {
             // Create default config
@@ -93,21 +96,25 @@ impl ConfigManager {
                 .map_err(|e| KslError::type_error(
                     format!("Failed to serialize default config: {}", e),
                     pos,
+                    "E1005".to_string(),
                 ))?;
             fs::create_dir_all(config_path.parent().unwrap())
                 .map_err(|e| KslError::type_error(
                     format!("Failed to create config directory {}: {}", config_path.parent().unwrap().display(), e),
                     pos,
+                    "E1006".to_string(),
                 ))?;
             File::create(&config_path)
                 .map_err(|e| KslError::type_error(
                     format!("Failed to create config file {}: {}", config_path.display(), e),
                     pos,
+                    "E1007".to_string(),
                 ))?
                 .write_all(contents.as_bytes())
                 .map_err(|e| KslError::type_error(
                     format!("Failed to write config file {}: {}", config_path.display(), e),
                     pos,
+                    "E1008".to_string(),
                 ))?;
             default_config
         };
@@ -131,6 +138,7 @@ impl ConfigManager {
                 .map_err(|e| KslError::type_error(
                     format!("Invalid Prometheus port: {}", e),
                     pos,
+                    "E1009".to_string(),
                 ))?;
             self.config.prometheus_port = Some(port);
         }
@@ -139,6 +147,7 @@ impl ConfigManager {
                 .map_err(|e| KslError::type_error(
                     format!("Invalid docserver port: {}", e),
                     pos,
+                    "E1010".to_string(),
                 ))?;
             self.config.docserver_port = Some(port);
         }
@@ -150,6 +159,7 @@ impl ConfigManager {
                 .map_err(|e| KslError::type_error(
                     format!("Invalid optimize level: {}", e),
                     pos,
+                    "E1011".to_string(),
                 ))?;
             self.config.optimize_level = Some(level);
         }
@@ -205,11 +215,13 @@ impl ConfigManager {
                     .map_err(|e| KslError::type_error(
                         format!("Invalid port: {}", e),
                         pos,
+                        "E1012".to_string(),
                     ))?;
                 if port < 1024 || port > 65535 {
                     return Err(KslError::type_error(
                         "Port must be between 1024 and 65535".to_string(),
                         pos,
+                        "E1013".to_string(),
                     ));
                 }
                 self.config.prometheus_port = Some(port);
@@ -219,11 +231,13 @@ impl ConfigManager {
                     .map_err(|e| KslError::type_error(
                         format!("Invalid port: {}", e),
                         pos,
+                        "E1014".to_string(),
                     ))?;
                 if port < 1024 || port > 65535 {
                     return Err(KslError::type_error(
                         "Port must be between 1024 and 65535".to_string(),
                         pos,
+                        "E1015".to_string(),
                     ));
                 }
                 self.config.docserver_port = Some(port);
@@ -235,6 +249,7 @@ impl ConfigManager {
                         .map_err(|e| KslError::type_error(
                             format!("Failed to create output directory {}: {}", path.display(), e),
                             pos,
+                            "E1016".to_string(),
                         ))?;
                 }
                 self.config.output_dir = Some(value.to_string());
@@ -244,11 +259,13 @@ impl ConfigManager {
                     .map_err(|e| KslError::type_error(
                         format!("Invalid optimize level: {}", e),
                         pos,
+                        "E1017".to_string(),
                     ))?;
                 if level > 3 {
                     return Err(KslError::type_error(
                         "Optimize level must be between 0 and 3".to_string(),
                         pos,
+                        "E1018".to_string(),
                     ));
                 }
                 self.config.optimize_level = Some(level);
@@ -264,6 +281,7 @@ impl ConfigManager {
                     .map_err(|e| KslError::type_error(
                         format!("Invalid memory limit: {}", e),
                         pos,
+                        "E1019".to_string(),
                     ))?;
                 self.config.vm_memory_limit = Some(memory);
             }
@@ -272,6 +290,7 @@ impl ConfigManager {
                     .map_err(|e| KslError::type_error(
                         format!("Invalid stack size: {}", e),
                         pos,
+                        "E1020".to_string(),
                     ))?;
                 self.config.vm_stack_size = Some(stack);
             }
@@ -281,6 +300,7 @@ impl ConfigManager {
             _ => return Err(KslError::type_error(
                 format!("Unknown config key: {}", key),
                 pos,
+                "E1021".to_string(),
             )),
         }
 
@@ -289,16 +309,19 @@ impl ConfigManager {
             .map_err(|e| KslError::type_error(
                 format!("Failed to serialize config: {}", e),
                 pos,
+                "E1022".to_string(),
             ))?;
         File::create(&self.config_path)
             .map_err(|e| KslError::type_error(
                 format!("Failed to create config file {}: {}", self.config_path.display(), e),
                 pos,
+                "E1023".to_string(),
             ))?
             .write_all(contents.as_bytes())
             .map_err(|e| KslError::type_error(
                 format!("Failed to write config file {}: {}", self.config_path.display(), e),
                 pos,
+                "E1024".to_string(),
             ))?;
 
         Ok(())
@@ -323,6 +346,7 @@ impl AsyncConfigManager for ConfigManager {
                 .map_err(|e| KslError::type_error(
                     format!("Invalid Prometheus port: {}", e),
                     pos,
+                    "E1025".to_string(),
                 ))?;
             self.config.prometheus_port = Some(port);
         }
@@ -331,6 +355,7 @@ impl AsyncConfigManager for ConfigManager {
                 .map_err(|e| KslError::type_error(
                     format!("Invalid docserver port: {}", e),
                     pos,
+                    "E1026".to_string(),
                 ))?;
             self.config.docserver_port = Some(port);
         }
@@ -342,6 +367,7 @@ impl AsyncConfigManager for ConfigManager {
                 .map_err(|e| KslError::type_error(
                     format!("Invalid optimize level: {}", e),
                     pos,
+                    "E1027".to_string(),
                 ))?;
             self.config.optimize_level = Some(level);
         }
@@ -371,6 +397,7 @@ impl AsyncConfigManager for ConfigManager {
             .map_err(|e| KslError::type_error(
                 format!("Failed to serialize config: {}", e),
                 pos,
+                "E1028".to_string(),
             ))?;
         
         tokio_fs::create_dir_all(self.config_path.parent().unwrap())
@@ -378,6 +405,7 @@ impl AsyncConfigManager for ConfigManager {
             .map_err(|e| KslError::type_error(
                 format!("Failed to create config directory {}: {}", self.config_path.parent().unwrap().display(), e),
                 pos,
+                "E1029".to_string(),
             ))?;
             
         let mut file = tokio_fs::File::create(&self.config_path)
@@ -385,6 +413,7 @@ impl AsyncConfigManager for ConfigManager {
             .map_err(|e| KslError::type_error(
                 format!("Failed to create config file {}: {}", self.config_path.display(), e),
                 pos,
+                "E1030".to_string(),
             ))?;
             
         file.write_all(contents.as_bytes())
@@ -392,6 +421,7 @@ impl AsyncConfigManager for ConfigManager {
             .map_err(|e| KslError::type_error(
                 format!("Failed to write config file {}: {}", self.config_path.display(), e),
                 pos,
+                "E1031".to_string(),
             ))?;
 
         Ok(())

@@ -208,7 +208,7 @@ impl ReplServer {
         let command = input[1..].trim();
         let sessions = sessions.read().await;
         let session = sessions.get(session_id)
-            .ok_or_else(|| KslError::type_error("Session not found".to_string(), SourcePosition::new(1, 1)))?;
+            .ok_or_else(|| KslError::type_error("Session not found".to_string(), SourcePosition::new(1, 1), "E401".to_string()))?;
 
         match command.split_whitespace().next().unwrap_or("") {
             "break" => {
@@ -249,7 +249,7 @@ impl ReplServer {
         let pos = SourcePosition::new(1, 1);
         let sessions = sessions.read().await;
         let session = sessions.get(session_id)
-            .ok_or_else(|| KslError::type_error("Session not found".to_string(), pos))?;
+            .ok_or_else(|| KslError::type_error("Session not found".to_string(), pos, "E401".to_string()))?;
 
         let mut repl = session.repl.write().await;
         match repl.eval_async(code, network, runtime).await {

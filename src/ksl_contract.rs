@@ -75,6 +75,7 @@ use crate::ksl_errors::{KslError, SourcePosition};
 use serde::{Serialize, Deserialize};
 use chrono::{Utc, DateTime};
 use bincode;
+use bincode::{serialize, deserialize};
 
 /// Enhanced contract compilation configuration
 #[derive(Debug)]
@@ -389,7 +390,7 @@ impl ContractCompiler {
                 // Write output
         let file_stem = file.file_stem()
             .and_then(|s| s.to_str())
-            .ok_or_else(|| KslError::type_error("Invalid file name".to_string(), pos))?;
+            .ok_or_else(|| KslError::type_error("Invalid file name".to_string(), pos, "E901".to_string()))?;
                 
                 let output_path = if target.contains("wasm32") {
                     self.config.output_dir.join(format!("{}.wasm", file_stem))

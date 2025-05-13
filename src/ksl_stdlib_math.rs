@@ -4,8 +4,10 @@
 use crate::ksl_types::{Type, TypeError};
 use crate::ksl_bytecode::{KapraOpCode, Operand, KapraInstruction};
 use crate::ksl_errors::{KslError, SourcePosition};
+use crate::ksl_value::Value;
 use std::f64::consts::PI;
 use nalgebra::{DMatrix, DVector};
+use std::collections::HashMap;
 
 /// Mathematical function signature
 /// @struct MathStdLibFunction
@@ -185,7 +187,7 @@ impl MathStdLib {
                 }
                 let x = match &args[0] {
                     Value::F64(x) => *x,
-                    _ => return Err(KslError::type_error("math.sin: argument must be f64".to_string(), pos)),
+                    _ => return Err(KslError::type_error("math.sin: argument must be f64".to_string(), pos, "E601".to_string())),
                 };
                 Ok(Value::F64(x.sin()))
             }
@@ -198,7 +200,7 @@ impl MathStdLib {
                 }
                 let x = match &args[0] {
                     Value::F64(x) => *x,
-                    _ => return Err(KslError::type_error("math.cos: argument must be f64".to_string(), pos)),
+                    _ => return Err(KslError::type_error("math.cos: argument must be f64".to_string(), pos, "E602".to_string())),
                 };
                 Ok(Value::F64(x.cos()))
             }
@@ -211,10 +213,10 @@ impl MathStdLib {
                 }
                 let x = match &args[0] {
                     Value::F64(x) => *x,
-                    _ => return Err(KslError::type_error("math.sqrt: argument must be f64".to_string(), pos)),
+                    _ => return Err(KslError::type_error("math.sqrt: argument must be f64".to_string(), pos, "E603".to_string())),
                 };
                 if x < 0.0 {
-                    return Err(KslError::type_error("math.sqrt: argument must be non-negative".to_string(), pos));
+                    return Err(KslError::type_error("math.sqrt: argument must be non-negative".to_string(), pos, "E604".to_string()));
                 }
                 Ok(Value::F64(x.sqrt()))
             }
@@ -231,7 +233,7 @@ impl MathStdLib {
                         let b_mat = self.array_to_matrix(b_data)?;
                         (a_mat, b_mat)
                     }
-                    _ => return Err(KslError::type_error("matrix.mul: arguments must be matrices".to_string(), pos)),
+                    _ => return Err(KslError::type_error("matrix.mul: arguments must be matrices".to_string(), pos, "E605".to_string())),
                 };
                 if a.ncols() != b.nrows() {
                     return Err(KslError::type_error(

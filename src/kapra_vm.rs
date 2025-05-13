@@ -4,6 +4,18 @@
 use crate::ksl_bytecode::{KapraBytecode, KapraInstruction, KapraOpCode, Operand};
 use crate::ksl_types::Type;
 use crate::ksl_kapra_crypto::{KapraCrypto, FixedArray};
+// Add these imports based on error messages
+use crate::ksl_value::Value; 
+use crate::ksl_errors::{KslError, SourcePosition}; 
+use crate::ksl_smart_account::SmartAccount;
+use crate::ksl_metrics::MetricsCollector;
+use crate::ksl_hot_reload::HotReloadableVM;
+use crate::ksl_coverage::CoverageVM;
+use crate::ksl_metrics::MetricsVM;
+use crate::ksl_simulator::{SimVM, Simulator};
+use crate::ksl_stdlib_net::NetworkingState;
+use crate::ksl_async::AsyncState;
+// End of added imports
 use crate::ksl_hot_reload::HotReloadState;
 use crate::ksl_coverage::CoverageData;
 use crate::ksl_metrics::MetricsData;

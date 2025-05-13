@@ -1,4 +1,4 @@
-use crate::kapra_vm::{KapraVM, RuntimeError, FixedArray, ContractMetadata};
+use crate::kapra_vm::{KapraVM, RuntimeError, ContractMetadata};
 use crate::ksl_kapra_crypto::FixedArray;
 use crate::ksl_bytecode::{KapraInstruction, KapraOpCode, Operand};
 use crate::ksl_types::Type;
@@ -9,6 +9,7 @@ use crate::ksl_value::Value;
 use std::collections::HashMap;
 use crate::ksl_types::{BlockHeader, Transaction, ValidatorInfo};
 use crate::ksl_errors::KslError;
+use crate::ksl_stdlib_crypto::CryptoStdLib;
 
 /// Syscall for delegating authentication
 /// @param delegatee The address to delegate authority to

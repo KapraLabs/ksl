@@ -353,7 +353,7 @@ fn ast_to_source(ast: &[AstNode]) -> String {
                 let param_strings: Vec<String> = params.iter()
                     .map(|(name, typ)| format!("{}: {}", name, format_type(typ)))
                     .collect();
-                source.push_str(¶m_strings.join(", "));
+                source.push_str(param_strings.join(", "));
                 source.push_str(&format!("): {} {{\n", format_type(return_type)));
                 source.push_str(&ast_to_source(body));
                 source.push_str("}\n\n");
@@ -371,7 +371,7 @@ fn ast_to_source(ast: &[AstNode]) -> String {
 }
 
 /// Formats a type annotation as a string
-fn format_type(typ: &TypeAnnotation) -> String {
+pub fn format_type(typ: &TypeAnnotation) -> String {
     match typ {
         TypeAnnotation::Simple(name) => name.clone(),
         TypeAnnotation::Array { element, size } => format!("array<{}, {}>", element, size),

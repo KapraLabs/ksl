@@ -17,7 +17,7 @@ use flate2::write::ZlibEncoder;
 use flate2::Compression;
 use std::fs::{self, File};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use toml;
@@ -81,30 +81,33 @@ impl Bundler {
         let pos = SourcePosition::new(1, 1);
         let start_time = std::time::Instant::now();
 
-        // Resolve dependencies asynchronously
-        let project_dir = self.config.input_file.parent().unwrap_or_else(|| PathBuf::from("."));
+        // Resolve dependencies
+        let project_dir = self.config.input_file.parent().unwrap_or_else(|| Path::new("."));
         let package_system = self.package_system.read().await;
-        package_system.resolve_dependencies_async(project_dir).await
-            .map_err(|e| KslError::type_error(format!("Dependency resolution failed: {}", e), pos))?;
+        let resolved_deps = package_system.resolve_dependencies_async(project_dir).await
+            .map_err(|e| KslError::type_error(format!("Dependency resolution failed: {}", e), pos, "E0001".to_string()))?;
 
-        // Compile main file to bytecode
+        // Read main source file
         let source = fs::read_to_string(&self.config.input_file)
             .map_err(|e| KslError::type_error(
                 format!("Failed to read file {}: {}", self.config.input_file.display(), e),
                 pos,
+                "E0002".to_string()
             ))?;
         let ast = parse(&source)
             .map_err(|e| KslError::type_error(
                 format!("Parse error at position {}: {}", e.position, e.message),
                 pos,
+                "E0003".to_string()
             ))?;
-        check(&ast)
+        check(&ast[..])
             .map_err(|errors| KslError::type_error(
                 errors.into_iter()
                     .map(|e| format!("Type error at position {}: {}", e.position, e.message))
                     .collect::<Vec<_>>()
                     .join("\n"),
                 pos,
+                "E0004".to_string()
             ))?;
         let mut bytecode = compile(&ast)
             .map_err(|errors| KslError::type_error(
@@ -113,11 +116,12 @@ impl Bundler {
                     .collect::<Vec<_>>()
                     .join("\n"),
                 pos,
+                "E0005".to_string()
             ))?;
 
         // Optimize bytecode
-        optimize(&mut bytecode, 3) // Use highest optimization level
-            .map_err(|e| KslError::type_error(format!("Bytecode optimization failed: {}", e), pos))?;
+        optimize(&mut bytecode)
+            .map_err(|e| KslError::type_error(format!("Bytecode optimization failed: {:?}", e), pos, "E0006".to_string()))?;
 
         // Generate target binary
         let binary_data = match self.config.target.as_str() {
@@ -129,25 +133,28 @@ impl Bundler {
                             .collect::<Vec<_>>()
                             .join("\n"),
                         pos,
+                        "E0007".to_string()
                     ))?
             }
             "native" => {
                 let temp_file = self.config.output_file.with_extension("o");
                 aot_compile(&self.config.input_file, &temp_file, "x86_64")
-                    .map_err(|e| KslError::type_error(format!("AOT compilation failed: {}", e), pos))?;
+                    .map_err(|e| KslError::type_error(format!("AOT compilation failed: {}", e), pos, "E0008".to_string()))?;
                 fs::read(&temp_file)
                     .map_err(|e| KslError::type_error(
                         format!("Failed to read AOT binary {}: {}", temp_file.display(), e),
                         pos,
+                        "E0009".to_string()
                     ))?
             }
             _ => return Err(KslError::type_error(
                 format!("Unsupported target: {}", self.config.target),
                 pos,
+                "E0010".to_string()
             )),
         };
 
-        // Collect dependency source code asynchronously
+        // Collect dependency source code
         let mut dep_sources = Vec::new();
         let metadata_file = project_dir.join("ksl_package.toml");
         if metadata_file.exists() {
@@ -155,36 +162,26 @@ impl Bundler {
                 .map_err(|e| KslError::type_error(
                     format!("Failed to read metadata {}: {}", metadata_file.display(), e),
                     pos,
+                    "E0011".to_string()
                 ))?;
             let metadata: PackageMetadata = toml::from_str(&metadata_content)
                 .map_err(|e| KslError::type_error(
                     format!("Failed to parse metadata: {}", e),
                     pos,
+                    "E0012".to_string()
                 ))?;
 
-            let mut tasks = Vec::new();
             for (dep_name, dep_version) in metadata.dependencies {
                 let dep_dir = package_system.repository.join(&dep_name).join(&dep_version).join("src");
                 if dep_dir.exists() {
-                    let task = self.async_runtime.spawn(async move {
-                        let mut sources = Vec::new();
-                        for entry in fs::read_dir(&dep_dir)? {
-                            let entry = entry?;
-                            if entry.path().extension().map(|ext| ext == "ksl").unwrap_or(false) {
-                                let dep_source = fs::read_to_string(&entry.path())?;
-                                sources.push((dep_name.clone(), dep_version.clone(), dep_source));
-                            }
-                        }
-                        Ok::<_, KslError>(sources)
-                    });
-                    tasks.push(task);
+                    let dep_source = fs::read_to_string(&dep_dir)
+                        .map_err(|e| KslError::type_error(
+                            format!("Failed to read dependency source {}: {}", dep_dir.display(), e),
+                            pos,
+                            "E0013".to_string()
+                        ))?;
+                    dep_sources.push((dep_name.clone(), dep_version.clone(), dep_source));
                 }
-            }
-
-            for task in tasks {
-                let sources = task.await
-                    .map_err(|e| KslError::type_error(format!("Async task failed: {}", e), pos))??;
-                dep_sources.extend(sources);
             }
         }
 
@@ -229,16 +226,14 @@ impl Bundler {
         state.bundle_time = start_time.elapsed();
 
         // Write bundle to output file
-        File::create(&self.config.output_file)
-            .map_err(|e| KslError::type_error(
-                format!("Failed to create output file {}: {}", self.config.output_file.display(), e),
-                pos,
-            ))?
-            .write_all(&bundle)
-            .map_err(|e| KslError::type_error(
-                format!("Failed to write output file {}: {}", self.config.output_file.display(), e),
-                pos,
-            ))?;
+        if let Some(output_file) = &self.config.output_file {
+            fs::write(output_file, &bundle)
+                .map_err(|e| KslError::type_error(
+                    format!("Failed to write output file {}: {}", output_file.display(), e),
+                    pos,
+                    "E0014".to_string()
+                ))?;
+        }
 
         Ok(())
     }

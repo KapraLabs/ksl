@@ -9,11 +9,13 @@ use crate::ksl_project::{ProjectConfig, ProjectInitializer};
 use crate::ksl_async::{AsyncContext, AsyncCommand};
 use std::fs::{self, File};
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use dirs::home_dir;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use serde_json::Value as JsonValue;
 
 /// Template configuration for custom templates with async support.
 #[derive(Debug, Deserialize, Serialize)]

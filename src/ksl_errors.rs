@@ -262,23 +262,6 @@ pub fn compute_position(input: &str, offset: usize) -> SourcePosition {
     SourcePosition::new(line, column)
 }
 
-// Assume other modules are in the same crate (for type definitions)
-mod ksl_parser {
-    pub use super::{AstNode, ExprKind};
-}
-
-mod ksl_types {
-    pub use super::Type;
-}
-
-mod ksl_bytecode {
-    pub use super::{KapraBytecode, KapraInstruction, KapraOpCode, Operand};
-}
-
-mod kapra_vm {
-    pub use super::{KapraVM, KapraRegister, KapraStack};
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -386,4 +369,10 @@ impl ErrorType {
             ErrorType::DataBlobTypeError => "Data blob type mismatch",
         }
     }
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+pub struct TypeError {
+    pub message: String,
+    pub position: usize,
 }

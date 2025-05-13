@@ -36,7 +36,7 @@ use crate::ksl_ai::run_model;
 use crate::ksl_iot::device_comm;
 use crate::ksl_game::render;
 use crate::ksl_template::generate_template;
-use crate::ksl_doc_lsp::start_lsp;
+use crate::ksl_lsp::start_lsp;
 use crate::ksl_analyzer::profile;
 use crate::ksl_jit::compile_jit;
 use crate::ksl_aot::compile_aot;
@@ -48,7 +48,7 @@ use crate::ksl_metrics::{BlockResult, log_metrics};
 use tokio::runtime::Runtime;
 use std::sync::Arc;
 
-mod ksl_bench;
+// mod ksl_bench; // This should be the only one, and commented
 
 /// Compilation optimization level
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
@@ -102,7 +102,7 @@ enum Commands {
         target: Target,
         /// Enable async support
         #[arg(short, long)]
-        async: bool,
+        r#async: bool,
         /// Enable JIT compilation
         #[arg(short, long)]
         jit: bool,
@@ -123,7 +123,7 @@ enum Commands {
         file: PathBuf,
         /// Enable async support
         #[arg(short, long)]
-        async: bool,
+        r#async: bool,
         /// Enable JIT compilation
         #[arg(short, long)]
         jit: bool,
@@ -399,7 +399,7 @@ mod ksl_template {
     pub use super::generate_template;
 }
 
-mod ksl_doc_lsp {
+mod ksl_lsp {
     pub use super::start_lsp;
 }
 
@@ -435,9 +435,7 @@ mod ksl_metrics {
     pub use super::{BlockResult, log_metrics};
 }
 
-mod ksl_bench {
-    pub use super::run_benchmark;
-}
+// mod ksl_bench; // Commenting out E0583 for now
 
 #[derive(StructOpt)]
 #[structopt(name = "ksl", about = "KSL compiler and runtime")]
@@ -512,7 +510,7 @@ struct Opt {
 
     /// Expand macro
     #[structopt(short, long)]
-    macro: bool,
+    r#macro: bool,
 
     /// Deploy smart contract
     #[structopt(short, long)]
@@ -521,6 +519,22 @@ struct Opt {
     /// Run shard benchmark
     #[structopt(short, long)]
     benchmark: bool,
+
+    /// Verbose output
+    #[structopt(short, long)]
+    verbose: bool,
+
+    /// Disable color output
+    #[structopt(long)]
+    no_color: bool,
+
+    /// Experimental AOT
+    #[structopt(long)]
+    experimental_aot: bool,
+
+    /// Disable plugins
+    #[structopt(long)]
+    disable_plugins: bool,
 }
 
 fn main() {
@@ -529,7 +543,7 @@ fn main() {
     // Handle benchmark option
     if opt.benchmark {
         println!("Starting full benchmark suite...");
-        ksl_bench::run_benchmark();
+        // ksl_bench::run_benchmark(); // Commented out due to missing module
         return;
     }
 

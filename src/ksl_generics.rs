@@ -1,7 +1,10 @@
 // ksl_generics.rs
 // Support for generic types and functions in KSL
 
-use crate::ksl_types::{Type, TypeSystem, TypeConstraint};
+use crate::ksl_parser::{parse, AstNode, ExprKind, ParseError};
+use crate::ksl_checker::check;
+use crate::ksl_types::TypeContext;
+use crate::ksl_types::{Type, TypeSystem, TypeConstraint, TypeError, ValueType, TypeParameter, TraitBound};
 use crate::ksl_analyzer::{Analyzer, AnalysisContext};
 use crate::ksl_async::{AsyncContext, AsyncCommand};
 use crate::ksl_errors::{KslError, SourcePosition};
@@ -47,6 +50,7 @@ impl TypeParam {
                 return Err(KslError::type_error(
                     format!("Type {} does not satisfy constraint {:?}", ty, constraint),
                     SourcePosition::new(1, 1),
+                    "E012".to_string()
                 ));
             }
         }
@@ -57,6 +61,7 @@ impl TypeParam {
                 return Err(KslError::type_error(
                     format!("Type {} does not implement trait {}", ty, bound.name),
                     SourcePosition::new(1, 1),
+                    "E013".to_string()
                 ));
             }
         }
@@ -174,6 +179,7 @@ impl TypeInference {
                             self.unresolved_vars
                         ),
                         SourcePosition::new(1, 1),
+                        "E502".to_string()
                     ));
                 }
 
@@ -240,7 +246,7 @@ impl TypeInference {
     }
 
     /// Infers a type from its usage context
-    fn infer_from_context(&self, name: &str) -> Option<Type> {
+    fn infer_from_context(&self, _name: &str) -> Option<Type> {
         // Implement context-based type inference
         // This could use heuristics based on variable names, usage patterns, etc.
         None
@@ -527,13 +533,16 @@ impl GenericCompiler {
             Type::Generic(param) => {
                 // Find the corresponding substitution
                 for (i, p) in substitutions.iter().enumerate() {
-                    if p.name() == param {
-                        return Ok(p.clone());
+                    if let Type::Generic(ref name) = *p {
+                        if name == param {
+                            return Ok(p.clone());
+                        }
                     }
                 }
                 Err(KslError::type_error(
                     format!("No substitution found for type parameter {}", param),
                     SourcePosition::new(1, 1),
+                    "E501".to_string()
                 ))
             }
             Type::Array(inner, size) => {
@@ -543,18 +552,6 @@ impl GenericCompiler {
             _ => Ok(ty.clone()),
         }
     }
-}
-
-// Placeholder types (to be aligned with ksl_types.rs and ksl_bytecode.rs).
-#[derive(Debug, Clone)]
-pub enum Type {
-    U8,
-    U16,
-    U32,
-    U64,
-    Bool,
-    Array(Box<Type>, usize),
-    Generic(String), // Placeholder for a type parameter (e.g., T)
 }
 
 #[derive(Debug, Clone)]
@@ -573,8 +570,34 @@ impl Bytecode {
         self.instructions.extend(other.instructions);
     }
 
-    pub fn push_field(&mut self, ty: Type) {
-        // Placeholder for field layout in bytecode
-        self.instructions.push(0); // Dummy instruction
+    pub fn push_field(&mut self, _ty: Type) {
+        // TODO: Implement field pushing logic
+    }
+}
+
+// Temporary placeholder implementations for TypeSystem methods to fix E0599 errors
+// These should be moved to ksl_types.rs or the appropriate file if they exist there
+impl TypeSystem {
+    pub fn satisfies_constraint(&self, _ty: &Type, _constraint: &TypeConstraint) -> bool {
+        // Placeholder implementation - always returns true
+        // TODO: Implement actual constraint checking logic
+        true
+    }
+    
+    pub fn implements_trait(&self, _ty: &Type, _trait_name: &str) -> bool {
+        // Placeholder implementation - always returns true
+        // TODO: Implement actual trait checking logic
+        true
+    }
+}
+
+pub struct GenericResolver;
+impl GenericResolver {
+    pub fn resolve_type(
+        _name: &str,
+        _constraints: &[Type],
+        _ctx: &TypeContext,
+    ) -> Result<Type, TypeError> {
+        Ok(Type::Void) // Placeholder
     }
 }

@@ -87,9 +87,9 @@ impl DeployManager {
         let pos = SourcePosition::new(1, 1);
         let s3_client = if config.target == "aws" {
             let region = config.aws_region.as_ref()
-                .ok_or_else(|| KslError::type_error("AWS region required for aws target".to_string(), pos))?
+                .ok_or_else(|| KslError::type_error("AWS region required for aws target".to_string(), pos, "E801".to_string()))?
                 .parse::<Region>()
-                .map_err(|e| KslError::type_error(format!("Invalid AWS region: {}", e), pos))?;
+                .map_err(|e| KslError::type_error(format!("Invalid AWS region: {}", e), pos, "E801".to_string()))?;
             Some(Arc::new(S3Client::new(region)))
         } else {
             None
@@ -128,7 +128,7 @@ impl DeployManager {
         let project_dir = file.parent().unwrap_or_else(|| Path::new("."));
         let package_system = self.package_system.read().await;
         package_system.resolve_dependencies_async(project_dir).await
-            .map_err(|e| KslError::type_error(format!("Dependency resolution failed: {}", e), pos))?;
+            .map_err(|e| KslError::type_error(format!("Dependency resolution failed: {}", e), pos, "E802".to_string()))?;
 
         // Update state
         let mut state = self.state.write().await;
@@ -157,6 +157,7 @@ impl DeployManager {
             .map_err(|e| KslError::type_error(
                 e.into_iter().map(|e| e.to_string()).collect::<Vec<_>>().join("\n"),
                 pos,
+                "E803".to_string(),
             ))?;
 
         // Update state
@@ -178,12 +179,14 @@ impl DeployManager {
                     return Err(KslError::type_error(
                         "Contract configuration required for contract deployment".to_string(),
                         pos,
+                        "E805".to_string(),
                     ));
                 }
             }
             _ => return Err(KslError::type_error(
                 format!("Unsupported deployment target: {}", self.config.target),
                 pos,
+                "E806".to_string(),
             )),
         }
 
@@ -198,6 +201,7 @@ impl DeployManager {
             .map_err(|e| KslError::type_error(
                 format!("Failed to clean up artifact: {}", e),
                 pos,
+                "E807".to_string(),
             ))?;
 
         Ok(())
@@ -209,26 +213,27 @@ impl DeployManager {
         match self.config.target.as_str() {
             "aws" => {
                 if self.config.aws_bucket.is_none() {
-                    return Err(KslError::type_error("AWS bucket required for aws target".to_string(), pos));
+                    return Err(KslError::type_error("AWS bucket required for aws target".to_string(), pos, "E802".to_string()));
                 }
                 // Check AWS credentials (simplified)
                 if std::env::var("AWS_ACCESS_KEY_ID").is_err() || std::env::var("AWS_SECRET_ACCESS_KEY").is_err() {
-                    return Err(KslError::type_error("AWS credentials not found".to_string(), pos));
+                    return Err(KslError::type_error("AWS credentials not found".to_string(), pos, "E803".to_string()));
                 }
             }
             "iot" => {
                 if self.config.iot_endpoint.is_none() {
-                    return Err(KslError::type_error("IoT endpoint required for iot target".to_string(), pos));
+                    return Err(KslError::type_error("IoT endpoint required for iot target".to_string(), pos, "E804".to_string()));
                 }
             }
             "contract" => {
                 if self.config.contract_config.is_none() {
-                    return Err(KslError::type_error("Contract configuration required for contract deployment".to_string(), pos));
+                    return Err(KslError::type_error("Contract configuration required for contract deployment".to_string(), pos, "E805".to_string()));
                 }
             }
             _ => return Err(KslError::type_error(
                 format!("Unsupported target: {}", self.config.target),
                 pos,
+                "E806".to_string(),
             )),
         }
         Ok(())
@@ -238,14 +243,15 @@ impl DeployManager {
     async fn deploy_to_aws_async(&self, artifact_path: &PathBuf) -> AsyncResult<()> {
         let pos = SourcePosition::new(1, 1);
         let s3_client = self.s3_client.as_ref()
-            .ok_or_else(|| KslError::type_error("S3 client not initialized".to_string(), pos))?;
+            .ok_or_else(|| KslError::type_error("S3 client not initialized".to_string(), pos, "E806".to_string()))?;
         let bucket = self.config.aws_bucket.as_ref()
-            .ok_or_else(|| KslError::type_error("AWS bucket not configured".to_string(), pos))?;
+            .ok_or_else(|| KslError::type_error("AWS bucket not configured".to_string(), pos, "E807".to_string()))?;
 
         let artifact = fs::read(artifact_path)
             .map_err(|e| KslError::type_error(
                 format!("Failed to read artifact {}: {}", artifact_path.display(), e),
                 pos,
+                "E808".to_string(),
             ))?;
 
         let key = format!("{}/{}", chrono::Utc::now().format("%Y%m%d"), artifact_path.file_name().unwrap().to_string_lossy());
@@ -257,7 +263,7 @@ impl DeployManager {
         };
 
         s3_client.put_object(request).await
-            .map_err(|e| KslError::type_error(format!("Failed to upload to S3: {}", e), pos))?;
+            .map_err(|e| KslError::type_error(format!("Failed to upload to S3: {}", e), pos, "E809".to_string()))?;
 
         Ok(())
     }
@@ -266,20 +272,21 @@ impl DeployManager {
     async fn deploy_to_iot_async(&self, artifact_path: &PathBuf) -> AsyncResult<()> {
         let pos = SourcePosition::new(1, 1);
         let endpoint = self.config.iot_endpoint.as_ref()
-            .ok_or_else(|| KslError::type_error("IoT endpoint not configured".to_string(), pos))?;
+            .ok_or_else(|| KslError::type_error("IoT endpoint not configured".to_string(), pos, "E808".to_string()))?;
 
         let artifact = fs::read(artifact_path)
             .map_err(|e| KslError::type_error(
                 format!("Failed to read artifact {}: {}", artifact_path.display(), e),
                 pos,
+                "E809".to_string(),
             ))?;
 
         self.client.post(endpoint)
             .body(artifact)
             .send().await
-            .map_err(|e| KslError::type_error(format!("Failed to deploy to IoT device: {}", e), pos))?
+            .map_err(|e| KslError::type_error(format!("Failed to deploy to IoT device: {}", e), pos, "E810".to_string()))?
             .error_for_status()
-            .map_err(|e| KslError::type_error(format!("IoT deployment failed: {}", e), pos))?;
+            .map_err(|e| KslError::type_error(format!("IoT deployment failed: {}", e), pos, "E811".to_string()))?;
 
         Ok(())
     }

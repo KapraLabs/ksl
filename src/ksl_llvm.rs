@@ -1,7 +1,8 @@
 // ksl_llvm.rs
 // LLVM IR generation for KSL
 
-use crate::ksl_ast::{self, AstNode, Expr, Literal, BinaryOperator, Type, Function};
+use crate::ksl_ast::{self, AstNode, Expr, Literal, BinaryOperator, Function};
+use crate::ksl_types::Type;
 use crate::ksl_errors::{KslError, SourcePosition};
 use inkwell::context::Context;
 use inkwell::module::Module;
@@ -15,6 +16,13 @@ use log::{debug, info, warn};
 use crate::ksl_abi::{ABIGenerator, ContractABI};
 use crate::ksl_version::{ContractVersion, VersionManager};
 use crate::ksl_analyzer::PerformanceMetrics;
+use inkwell::passes::PassManager;
+use inkwell::attributes::{Attribute, AttributeLoc};
+use inkwell::targets::{InitializationConfig, Target, TargetMachine, TargetTriple};
+use inkwell::types::{FunctionType, PointerType, StructType, VoidType};
+use inkwell::values::{GlobalValue, InstructionValue};
+use inkwell::module::Linkage;
+use inkwell::debug_info::{DIFile, DebugInfoBuilder, DICompileUnit, DIScope, DILocation, DIFlags, DIBasicType, DISubprogram, DILexicalBlock};
 
 /// LLVM code generator for KSL
 pub struct LLVMCodegen<'ctx> {
@@ -572,9 +580,80 @@ impl<'ctx> LLVMCodegen<'ctx> {
     }
 
     /// Apply optimizations based on performance metrics
-    fn apply_optimizations(&mut self, metrics: &PerformanceMetrics) -> Result<(), KslError> {
-        // This is a stub function that will be implemented when needed
-        // It's here to make the code compatible with ksl_jit.rs
+    fn apply_optimizations(&mut self, _metrics: &PerformanceMetrics) -> Result<(), KslError> {
+        debug!("Applying LLVM optimizations based on performance metrics");
+        
+        // Create optimization pass manager
+        let pass_manager = PassManager::create(&self.module);
+        
+        // Apply function-specific optimizations based on performance metrics
+        for function_name in &_metrics.hot_functions {
+            if let Some(function) = self.module.get_function(function_name) {
+                debug!("Applying optimizations to hot function: {}", function_name);
+                
+                // Set function attributes for hot functions
+                function.add_attribute(
+                    AttributeLoc::Function,
+                    self.context.create_enum_attribute(
+                        Attribute::get_named_enum_kind_id("hot"),
+                        0,
+                    ),
+                );
+            }
+        }
+        
+        // Apply inlining optimizations to candidate functions
+        for function_name in &_metrics.inline_candidates {
+            if let Some(function) = self.module.get_function(function_name) {
+                debug!("Marking function for inlining: {}", function_name);
+                
+                // Set always_inline attribute
+                function.add_attribute(
+                    AttributeLoc::Function,
+                    self.context.create_enum_attribute(
+                        Attribute::get_named_enum_kind_id("alwaysinline"),
+                        0,
+                    ),
+                );
+            }
+        }
+        
+        // Enable vectorization for array operations
+        for function_name in &_metrics.array_operations {
+            if let Some(function) = self.module.get_function(function_name) {
+                debug!("Enabling vectorization for function with array operations: {}", function_name);
+                
+                // Add vectorization hint metadata
+                let metadata_string = "llvm.loop.vectorize.width";
+                let metadata = self.context.metadata_string(metadata_string);
+                let metadata_node = self.context.metadata_node(&[metadata]);
+                function.set_metadata(metadata_node, 0);
+            }
+        }
+        
+        // Apply standard optimization passes
+        pass_manager.add_instruction_combining_pass();
+        pass_manager.add_reassociate_pass();
+        pass_manager.add_gvn_pass(); // Global Value Numbering
+        pass_manager.add_cfg_simplification_pass(); // Control Flow Graph Simplification
+        
+        // Apply advanced optimization passes for hot functions
+        if !_metrics.hot_functions.is_empty() {
+            pass_manager.add_tail_call_elimination_pass();
+            pass_manager.add_function_inlining_pass();
+            pass_manager.add_loop_unroll_pass();
+        }
+        
+        // Apply loop unrolling for specific loops
+        if !_metrics.unroll_candidates.is_empty() {
+            debug!("Adding loop unrolling for {} candidate loops", _metrics.unroll_candidates.len());
+            pass_manager.add_loop_unroll_and_jam_pass();
+            // In a real implementation, we would identify the specific loops by ID and set unrolling factors
+        }
+        
+        // Run the pass manager
+        pass_manager.run_on(&self.module);
+        
         Ok(())
     }
 

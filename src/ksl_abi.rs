@@ -1,4 +1,5 @@
-use crate::ksl_ast::{AstNode, Function, Type};
+use crate::ksl_ast::{AstNode, Function};
+use crate::ksl_types::Type;
 use crate::ksl_errors::{KslError, SourcePosition};
 use serde::{Serialize, Deserialize};
 use std::collections::HashMap;

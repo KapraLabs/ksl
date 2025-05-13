@@ -231,6 +231,7 @@ impl DependencyResolver {
             return Err(KslError::type_error(
                 format!("Dependency cycle detected for package: {}", package.name),
                 SourcePosition::new(1, 1),
+                "E000A".to_string()
             ));
         }
 
@@ -246,6 +247,7 @@ impl DependencyResolver {
                             dep_name, constraint, resolved_pkg.version
                         ),
                         SourcePosition::new(1, 1),
+                        "E000B".to_string()
                     ));
                 }
                 continue;
@@ -255,6 +257,7 @@ impl DependencyResolver {
                 .ok_or_else(|| KslError::type_error(
                     format!("No compatible version found for '{}': {}", dep_name, constraint),
                     SourcePosition::new(1, 1),
+                    "E000C".to_string()
                 ))?;
 
             self.resolve_async(&dep_pkg).await?;
@@ -274,7 +277,7 @@ impl DependencyResolver {
 /// CLI integration for version management
 pub async fn run_package_version_async(package_name: &str, constraint: &str) -> AsyncResult<String> {
     let version_constraint = VersionConstraint::parse(constraint)
-        .map_err(|e| KslError::type_error(e, SourcePosition::new(1, 1)))?;
+        .map_err(|e| KslError::type_error(e, SourcePosition::new(1, 1), "E000D".to_string()))?;
 
     let mut registry = PackageRegistry::new();
     let mut resolver = DependencyResolver::new(registry.clone());

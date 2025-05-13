@@ -1,10 +1,11 @@
 // ksl_project.rs
 // Project initialization tool for KSL with templates and scaffolding
 
-use crate::ksl_package::{PackageMetadata, Dependency, License};
+use crate::ksl_package::{PackageMetadata, Dependency};
 use crate::ksl_config::{ProjectConfig, ConfigManager};
 use crate::ksl_async::{AsyncContext, AsyncCommand};
 use crate::ksl_errors::{KslError, ErrorType};
+use crate::ksl_dep_audit::AuditIssue;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
@@ -49,7 +50,7 @@ impl TemplateRegistry {
             PackageMetadata {
                 name: "{name}".to_string(),
                 version: "0.1.0".to_string(),
-                license: License::MIT,
+                license: AuditIssue::License("MIT".to_string()),
                 dependencies: vec![
                     Dependency::new("blockchain-lib", "^1.0.0"),
                 ],
@@ -88,7 +89,7 @@ fn main() {
             PackageMetadata {
                 name: "{name}".to_string(),
                 version: "0.1.0".to_string(),
-                license: License::Apache2,
+                license: AuditIssue::License("Apache-2.0".to_string()),
                 dependencies: vec![
                     Dependency::new("ai-model", "^2.0.0"),
                     Dependency::new("math-lib", "^1.0.0"),
@@ -128,7 +129,7 @@ fn main() {
             PackageMetadata {
                 name: "{name}".to_string(),
                 version: "0.1.0".to_string(),
-                license: License::BSD3,
+                license: AuditIssue::License("BSD-3-Clause".to_string()),
                 dependencies: vec![
                     Dependency::new("game-physics", "^1.0.0"),
                     Dependency::new("math-lib", "^1.0.0"),
@@ -218,7 +219,10 @@ impl ProjectInitializer {
             name: name.to_string(),
             template: template_name.to_string(),
             version: template.package_metadata.version.clone(),
-            license: template.package_metadata.license.clone(),
+            license: match template.package_metadata.license {
+                AuditIssue::License(s) => s,
+                _ => "Unknown".to_string(),
+            },
         };
         config.save_project_config(&project_config)
             .await

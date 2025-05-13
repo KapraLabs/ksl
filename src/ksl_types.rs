@@ -7,6 +7,8 @@ use crate::ksl_errors::KslError;
 use crate::ksl_kapra_zkp::{ZkScheme, ZkProof as RuntimeZkProof};
 use serde::{Serialize, Deserialize};
 
+pub type TypeAnnotation = String; // Added TypeAnnotation as a type alias for String
+
 // Assume ksl_generics.rs provides GenericResolver
 mod ksl_generics {
     use super::{Type, TypeContext, TypeError};
@@ -28,7 +30,7 @@ mod ksl_typegen {
     pub struct TypeGenerator;
     impl TypeGenerator {
         pub fn validate_schema(_schema: &str) -> Result<(), TypeError> {
-            let schema_string = _schema.to_string();
+            let _schema_string = _schema.to_string();
             Ok(()) // Placeholder
         }
     }
@@ -146,7 +148,14 @@ pub struct TypeError {
     pub position: usize,
 }
 
+impl std::fmt::Display for TypeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "TypeError: {:?}", self)
+    }
+}
+
 /// Type utilities for parsing and inference.
+#[derive(Debug)]
 pub struct TypeSystem;
 
 impl TypeSystem {
@@ -565,72 +574,140 @@ impl Type {
     pub fn size_in_bytes(&self) -> Option<usize> {
         match self {
             Type::U8 => Some(1),
+            Type::U16 => Some(2),
             Type::U32 => Some(4),
             Type::U64 => Some(8),
+            Type::I8 => Some(1),
+            Type::I16 => Some(2),
+            Type::I32 => Some(4),
+            Type::I64 => Some(8),
+            Type::F32 => Some(4),
+            Type::F64 => Some(8),
             Type::Bool => Some(1),
-            Type::Array(inner, len) => inner.size_in_bytes().map(|s| s * len),
-            Type::ZkProof(proof_type) => Some(match proof_type {
-                ZkProofType::Bls => 96,
-                ZkProofType::Dilithium => 2420,
-                ZkProofType::Generic => 0, // Size determined at runtime
-            }),
-            Type::Signature(sig_type) => Some(match sig_type {
-                SignatureType::Ed25519 => 64,
-                SignatureType::Bls => 96,
-                SignatureType::Dilithium => 2420,
-            }),
-            Type::DataBlob { element_type, size, .. } => {
-                element_type.size_in_bytes().map(|s| s * size)
+            Type::String => None, // Dynamic size
+            Type::Array(_, size) => Some(size as usize),
+            Type::Struct { fields, .. } => {
+                let mut total = 0;
+                for (_, field_type) in fields {
+                    if let Some(size) = field_type.size_in_bytes() {
+                        total += size;
+                    } else {
+                        return None;
+                    }
+                }
+                Some(total)
             }
-            _ => None, // Dynamic size for strings, tuples, etc.
+            Type::Enum { .. } => None, // Size depends on largest variant
+            Type::Option(inner) => {
+                if let Some(size) = inner.size_in_bytes() {
+                    Some(size + 1) // +1 for discriminant
+                } else {
+                    None
+                }
+            }
+            Type::Result { ok, err } => {
+                let ok_size = ok.size_in_bytes()?;
+                let err_size = err.size_in_bytes()?;
+                Some(std::cmp::max(ok_size, err_size) + 1) // +1 for discriminant
+            }
+            Type::Tuple(types) => {
+                let mut total = 0;
+                for ty in types {
+                    if let Some(size) = ty.size_in_bytes() {
+                        total += size;
+                    } else {
+                        return None;
+                    }
+                }
+                Some(total)
+            }
+            Type::Void => Some(0),
+            Type::Generic { .. } => None,
+            Type::Generated { .. } => None,
+            Type::Function { .. } => None,
+            Type::Error => None,
+            Type::Socket => None,
+            Type::HttpRequest => None,
+            Type::HttpResponse => None,
+            Type::ZkProof(proof_type) => match proof_type {
+                ZkProofType::Bls => Some(96),
+                ZkProofType::Dilithium => Some(2420),
+                ZkProofType::Generic => None,
+            },
+            Type::Signature(sig_type) => match sig_type {
+                SignatureType::Ed25519 => Some(64),
+                SignatureType::Bls => Some(96),
+                SignatureType::Dilithium => Some(2420),
+            },
+            Type::DataBlob { size, .. } => Some(*size),
+            Type::Blockchain(blockchain_type) => match blockchain_type {
+                BlockchainType::BlockHeader => Some(32 + 8 + 8 + 32 + 2 + 64), // parent + nonce + timestamp + miner + shard + signature
+                BlockchainType::Transaction => Some(32 + 32 + 8 + 8 + 64 + 32), // sender + recipient + amount + nonce + signature + data
+                BlockchainType::ValidatorInfo => Some(32 + 8 + 2 + 1), // public_key + stake + shard + status
+                BlockchainType::Hash => Some(32),
+                BlockchainType::Signature => Some(64),
+                BlockchainType::MerkleProof => None, // Variable size
+            },
         }
     }
 
     /// Check if a type can be converted to another type
     pub fn can_convert_to(&self, target: &Type) -> bool {
         match (self, target) {
-            // Allow conversion between proof types if sizes match
-            (Type::ZkProof(a), Type::ZkProof(b)) => {
-                // Check specific conversions first
-                (a == b) || // Same types always convert
-                matches!((a, b),
-                    (ZkProofType::Bls, ZkProofType::Generic) |
-                    (ZkProofType::Dilithium, ZkProofType::Generic) |
-                    (ZkProofType::Generic, ZkProofType::Bls) |
-                    (ZkProofType::Generic, ZkProofType::Dilithium)
-                )
-            },
-            // Allow conversion between signature types if sizes match
-            (Type::Signature(a), Type::Signature(b)) => {
-                a.size_in_bytes() == b.size_in_bytes()
-            },
-            // Allow array to proof/signature conversion if sizes match
-            (Type::Array(inner, len), Type::ZkProof(proof_type)) => {
-                if let Type::U8 = **inner {
-                    let proof_size = match proof_type {
-                        ZkProofType::Bls => 96,
-                        ZkProofType::Dilithium => 2420,
-                        ZkProofType::Generic => 0,
-                    };
-                    *len == proof_size
-                } else {
-                    false
-                }
-            },
-            (Type::Array(inner, len), Type::Signature(sig_type)) => {
-                if let Type::U8 = **inner {
-                    let sig_size = match sig_type {
-                        SignatureType::Ed25519 => 64,
-                        SignatureType::Bls => 96,
-                        SignatureType::Dilithium => 2420,
-                    };
-                    *len == sig_size
-                } else {
-                    false
-                }
-            },
-            // ... existing conversion rules ...
-            _ => self == target,
+            (Type::U8, Type::U16) | (Type::U8, Type::U32) | (Type::U8, Type::U64) |
+            (Type::U16, Type::U32) | (Type::U16, Type::U64) |
+            (Type::U32, Type::U64) |
+            (Type::I8, Type::I16) | (Type::I8, Type::I32) | (Type::I8, Type::I64) |
+            (Type::I16, Type::I32) | (Type::I16, Type::I64) |
+            (Type::I32, Type::I64) |
+            (Type::F32, Type::F64) => true,
+            (Type::Array(inner1, size1), Type::Array(inner2, size2)) => {
+                size1 == size2 && inner1.can_convert_to(inner2)
+            }
+            (Type::Struct { name: name1, fields: fields1 }, Type::Struct { name: name2, fields: fields2 }) => {
+                name1 == name2 && fields1.len() == fields2.len() &&
+                fields1.iter().zip(fields2.iter()).all(|((name1, type1), (name2, type2))| {
+                    name1 == name2 && type1.can_convert_to(type2)
+                })
+            }
+            (Type::Enum { name: name1, variants: variants1 }, Type::Enum { name: name2, variants: variants2 }) => {
+                name1 == name2 && variants1.len() == variants2.len() &&
+                variants1.iter().zip(variants2.iter()).all(|((name1, type1), (name2, type2))| {
+                    name1 == name2 && match (type1, type2) {
+                        (Some(t1), Some(t2)) => t1.can_convert_to(t2),
+                        (None, None) => true,
+                        _ => false,
+                    }
+                })
+            }
+            (Type::Option(inner1), Type::Option(inner2)) => inner1.can_convert_to(inner2),
+            (Type::Result { ok: ok1, err: err1 }, Type::Result { ok: ok2, err: err2 }) => {
+                ok1.can_convert_to(ok2) && err1.can_convert_to(err2)
+            }
+            (Type::Tuple(types1), Type::Tuple(types2)) => {
+                types1.len() == types2.len() &&
+                types1.iter().zip(types2.iter()).all(|(t1, t2)| t1.can_convert_to(t2))
+            }
+            (Type::Generic { name: name1, constraints: constraints1 }, Type::Generic { name: name2, constraints: constraints2 }) => {
+                name1 == name2 && constraints1.len() == constraints2.len() &&
+                constraints1.iter().zip(constraints2.iter()).all(|(c1, c2)| c1.can_convert_to(c2))
+            }
+            (Type::Generated { schema: schema1 }, Type::Generated { schema: schema2 }) => {
+                schema1 == schema2
+            }
+            (Type::Function { params: params1, return_type: ret1 }, Type::Function { params: params2, return_type: ret2 }) => {
+                params1.len() == params2.len() &&
+                params1.iter().zip(params2.iter()).all(|(p1, p2)| p1.can_convert_to(p2)) &&
+                ret1.can_convert_to(ret2)
+            }
+            (Type::ZkProof(proof1), Type::ZkProof(proof2)) => proof1 == proof2,
+            (Type::Signature(sig1), Type::Signature(sig2)) => sig1 == sig2,
+            (Type::DataBlob { element_type: type1, size: size1, alignment: align1 },
+             Type::DataBlob { element_type: type2, size: size2, alignment: align2 }) => {
+                type1.can_convert_to(type2) && size1 == size2 && align1 == align2
+            }
+            (Type::Blockchain(block1), Type::Blockchain(block2)) => block1 == block2,
+            _ => false,
         }
     }
 
@@ -639,23 +716,26 @@ impl Type {
     }
 
     pub fn data_blob_size(&self) -> Option<usize> {
-        match self {
-            Type::DataBlob { size, .. } => Some(*size),
-            _ => None
+        if let Type::DataBlob { size, .. } = self {
+            Some(*size)
+        } else {
+            None
         }
     }
 
     pub fn data_blob_alignment(&self) -> Option<usize> {
-        match self {
-            Type::DataBlob { alignment, .. } => Some(*alignment),
-            _ => None
+        if let Type::DataBlob { alignment, .. } = self {
+            Some(*alignment)
+        } else {
+            None
         }
     }
 
     pub fn data_blob_element_type(&self) -> Option<&Type> {
-        match self {
-            Type::DataBlob { element_type, .. } => Some(element_type),
-            _ => None
+        if let Type::DataBlob { element_type, .. } = self {
+            Some(element_type)
+        } else {
+            None
         }
     }
 }
@@ -663,21 +743,89 @@ impl Type {
 impl fmt::Display for Type {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Type::ZkProof(proof_type) => match proof_type {
-                ZkProofType::Bls => write!(f, "zkproof<bls>"),
-                ZkProofType::Dilithium => write!(f, "zkproof<dilithium>"),
-                ZkProofType::Generic => write!(f, "zkproof"),
-            },
-            Type::Signature(sig_type) => match sig_type {
-                SignatureType::Ed25519 => write!(f, "signature<ed25519>"),
-                SignatureType::Bls => write!(f, "signature<bls>"),
-                SignatureType::Dilithium => write!(f, "signature<dilithium>"),
-            },
-            Type::DataBlob { element_type, size, .. } => {
-                write!(f, "data_blob<{}, {}>", element_type, size)
+            Type::U8 => write!(f, "u8"),
+            Type::U16 => write!(f, "u16"),
+            Type::U32 => write!(f, "u32"),
+            Type::U64 => write!(f, "u64"),
+            Type::I8 => write!(f, "i8"),
+            Type::I16 => write!(f, "i16"),
+            Type::I32 => write!(f, "i32"),
+            Type::I64 => write!(f, "i64"),
+            Type::F32 => write!(f, "f32"),
+            Type::F64 => write!(f, "f64"),
+            Type::String => write!(f, "string"),
+            Type::Bool => write!(f, "bool"),
+            Type::Array(inner, size) => write!(f, "array<{}, {}>", inner, size),
+            Type::Struct { name, fields } => {
+                write!(f, "struct {} {{ ", name)?;
+                for (i, (field_name, field_type)) in fields.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}: {}", field_name, field_type)?;
+                }
+                write!(f, " }}")
             }
-            // ... existing display implementations ...
-            _ => write!(f, "{:?}", self),
+            Type::Enum { name, variants } => {
+                write!(f, "enum {} {{ ", name)?;
+                for (i, (variant_name, variant_type)) in variants.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", variant_name)?;
+                    if let Some(ty) = variant_type {
+                        write!(f, "({})", ty)?;
+                    }
+                }
+                write!(f, " }}")
+            }
+            Type::Option(inner) => write!(f, "option<{}>", inner),
+            Type::Result { ok, err } => write!(f, "result<{}, {}>", ok, err),
+            Type::Tuple(types) => {
+                write!(f, "(")?;
+                for (i, ty) in types.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", ty)?;
+                }
+                write!(f, ")")
+            }
+            Type::Void => write!(f, "void"),
+            Type::Generic { name, constraints } => {
+                write!(f, "{}", name)?;
+                if !constraints.is_empty() {
+                    write!(f, ": ")?;
+                    for (i, constraint) in constraints.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, " | ")?;
+                        }
+                        write!(f, "{}", constraint)?;
+                    }
+                }
+                Ok(())
+            }
+            Type::Generated { schema } => write!(f, "generated<{}>", schema),
+            Type::Function { params, return_type } => {
+                write!(f, "function<")?;
+                for (i, param) in params.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", param)?;
+                }
+                write!(f, "> -> {}", return_type)
+            }
+            Type::Error => write!(f, "error"),
+            Type::Socket => write!(f, "socket"),
+            Type::HttpRequest => write!(f, "http_request"),
+            Type::HttpResponse => write!(f, "http_response"),
+            Type::ZkProof(proof_type) => write!(f, "zkproof<{:?}>", proof_type),
+            Type::Signature(sig_type) => write!(f, "signature<{:?}>", sig_type),
+            Type::DataBlob { element_type, size, alignment } => {
+                write!(f, "datablob<{}, {}, {}>", element_type, size, alignment)
+            }
+            Type::Blockchain(blockchain_type) => write!(f, "blockchain<{:?}>", blockchain_type),
         }
     }
 }

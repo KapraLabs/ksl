@@ -6,17 +6,18 @@
 use crate::ksl_parser::{parse, ParseError};
 use crate::ksl_checker::check;
 use crate::ksl_compiler::compile;
-use crate::kapra_vm::{KapraVM, KapraBytecode, RuntimeError, Value};
+use crate::kapra_vm::{KapraVM, RuntimeError, Value};
+use crate::ksl_bytecode::KapraBytecode;
 use crate::ksl_simulator::run_simulation;
 use crate::ksl_logger::{init_logger, log_with_trace, Level};
 use crate::ksl_errors::{KslError, SourcePosition};
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use std::fs::{self, File};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::{Duration, SystemTime};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, VecDeque, HashSet};
 use libloading::{Library, Symbol};
 use std::hash::{Hash, Hasher, SipHasher};
 use serde_json;
@@ -26,6 +27,7 @@ use ed25519_dalek::{Keypair, PublicKey, Signature, Verifier};
 use seccompiler::{SeccompFilter, SeccompAction};
 use serde::{Serialize, Deserialize};
 use std::io::Write;
+use wasmer::is_wasm;
 
 /// Configuration for hot reloading
 #[derive(Debug)]
@@ -624,6 +626,7 @@ impl HotReloadManager {
             .map_err(|e| KslError::type_error(
                 format!("Failed to read file {}: {}", file_path.display(), e),
                 pos,
+                "E701".to_string(),
             ))?;
 
         // Parse the source code
@@ -632,7 +635,7 @@ impl HotReloadManager {
 
         // Type check the AST
         check(&ast)
-            .map_err(|e| KslError::type_error(e, pos))?;
+            .map_err(|e| KslError::type_error(e, pos, "E701".to_string()))?;
 
         // Compile to bytecode
         compile(&ast)
@@ -1019,8 +1022,14 @@ impl HotReloadableVM for KapraVM {
 }
 
 // Hot reload state for KapraVM
-struct HotReloadState {
-    globals: HashMap<String, Value>, // Preserved global variables
+#[derive(Clone)]
+pub struct HotReloadState {
+    pub globals: HashMap<String, Value>,
+    pub networking_state: NetworkingState,
+    pub async_state: AsyncState,
+    pub preserved_registers: HashMap<usize, Vec<u8>>,
+    pub preserved_stack: Vec<Value>,
+    pub preserved_heap: HashMap<usize, Value>,
 }
 
 /// Public API function to start hot reloading
@@ -1055,7 +1064,7 @@ mod ksl_compiler {
 }
 
 mod kapra_vm {
-    pub use super::{KapraVM, KapraBytecode, RuntimeError, Value};
+    pub use super::{KapraVM, RuntimeError, Value};
 }
 
 mod ksl_simulator {
@@ -1794,7 +1803,6 @@ mod tests {
                 url: "http://example.com".to_string(),
                 headers: HashMap::new(),
                 state: ConnectionState::Connected,
-                module: "test".to_string(),
             },
         );
         manager.update_networking_state(networking_state);
@@ -1881,7 +1889,7 @@ mod tests {
         ).unwrap();
 
         // Verify type error is caught
-        let result = manager.handle_file_change(&manager.state, &input_file);
+        let result = manager.handle_file_change();
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Invalid type for global variable x"));
     }
@@ -1944,3 +1952,6 @@ fn create_modified_wasm_module() -> Vec<u8> {
             (export "test_function" (func $test_function)))
     "#).unwrap()
 }
+
+unsafe impl Send for VersionEntry {}
+unsafe impl Sync for VersionEntry {}

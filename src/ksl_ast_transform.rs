@@ -7,6 +7,7 @@ use crate::ksl_parser::{parse, AstNode, ExprKind, ParseError};
 use crate::ksl_checker::check;
 use crate::ksl_plugin::{PluginSystem, KslPlugin};
 use crate::ksl_errors::{KslError, SourcePosition};
+use crate::ksl_types::Type;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::PathBuf;

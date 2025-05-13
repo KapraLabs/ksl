@@ -22,9 +22,9 @@ use crate::ksl_errors::{KslError, SourcePosition};
 use blst::{min_pk::*, BLST_ERROR};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use ed25519_dalek::{Keypair, PublicKey, SecretKey, Signature, Signer, Verifier};
-use tss_esapi::{Context, TctiNameConf};
-use sgx_types::*;
-use sgx_urts::SgxEnclave;
+// use tss_esapi::{Context, TctiNameConf};
+// use sgx_types::*;
+// use sgx_urts::SgxEnclave;
 
 /// Validator key store
 pub struct KeyStore {
@@ -133,55 +133,55 @@ pub enum KeyType {
 }
 
 /// Key rotation schedule
-#[derive(Debug)]
-struct KeyRotationSchedule {
+#[derive(Debug, Serialize, Deserialize)]
+pub struct KeyRotationSchedule {
     /// Next rotation time
-    next_rotation: Instant,
+    pub next_rotation: Instant,
     /// Rotation interval
-    rotation_interval: std::time::Duration,
+    pub rotation_interval: std::time::Duration,
     /// Keys to rotate
-    keys_to_rotate: Vec<KeyId>,
+    pub keys_to_rotate: Vec<KeyId>,
 }
 
 /// Key metrics
-#[derive(Debug, Default)]
-struct KeyMetrics {
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct KeyMetrics {
     /// Total keys generated
-    total_generated: u64,
+    pub total_generated: u64,
     /// Total rotations
-    total_rotations: u64,
+    pub total_rotations: u64,
     /// Failed operations
-    failed_operations: u64,
+    pub failed_operations: u64,
 }
 
 /// Key export for audit/snapshot
 #[derive(Debug, Serialize, Deserialize)]
 pub struct KeyExport {
     /// Export timestamp
-    timestamp: DateTime<Utc>,
+    pub timestamp: DateTime<Utc>,
     /// Exported keys
-    keys: Vec<KeyExportEntry>,
+    pub keys: Vec<KeyExportEntry>,
 }
 
 /// Key export entry
 #[derive(Debug, Serialize, Deserialize)]
 pub struct KeyExportEntry {
     /// Key ID
-    id: KeyId,
+    pub id: KeyId,
     /// BLS public key
-    bls_public_key: Option<Vec<u8>>,
+    pub bls_public_key: Option<Vec<u8>>,
     /// BLS private key
-    bls_private_key: Option<Vec<u8>>,
+    pub bls_private_key: Option<Vec<u8>>,
     /// Dilithium public key
-    dilithium_public_key: Option<Vec<u8>>,
+    pub dilithium_public_key: Option<Vec<u8>>,
     /// Dilithium private key
-    dilithium_private_key: Option<Vec<u8>>,
+    pub dilithium_private_key: Option<Vec<u8>>,
     /// Key type
-    key_type: KeyType,
+    pub key_type: KeyType,
     /// Creation timestamp
-    created_at: u64,
+    pub created_at: u64,
     /// Last rotation timestamp
-    last_rotation: u64,
+    pub last_rotation: u64,
 }
 
 /// Domain separation tag for BLS signatures
@@ -267,14 +267,18 @@ impl KeyStore {
     /// Initializes hardware security module if available
     fn initialize_hsm() -> Option<Box<dyn HardwareSecurityModule>> {
         // Check for TPM
+        /*
         if let Ok(tpm) = TpmModule::new() {
             return Some(Box::new(tpm));
         }
+        */
 
         // Check for SGX
+        /*
         if let Ok(sgx) = SgxModule::new() {
             return Some(Box::new(sgx));
         }
+        */
 
         None
     }
@@ -581,7 +585,7 @@ impl KeyStore {
     /// Generates a new key ID using FIPS-compliant RNG
     fn generate_key_id(&self) -> KeyId {
         let mut rng = self.fips_rng.write().unwrap();
-        rng.gen()
+        rng.r#gen()
     }
 
     /// Generates a new validator key pair
@@ -746,7 +750,7 @@ impl ValidatorKeyPair {
     pub fn generate() -> Self {
         let mut rng = rand::thread_rng();
         ValidatorKeyPair {
-            id: rng.gen(),
+            id: rng.r#gen(),
             public_key: vec![],
             encrypted_private_key: vec![],
             key_type: KeyType::Dilithium,

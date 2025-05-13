@@ -14,6 +14,8 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use crate::ksl_checker::check;
+use crate::ksl_types::Type;
 
 /// Supported transpilation targets
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -359,6 +361,14 @@ mod ksl_async {
 
 mod ksl_errors {
     pub use super::{KslError, SourcePosition};
+}
+
+mod ksl_checker {
+    pub use super::check;
+}
+
+mod ksl_types {
+    pub use super::Type;
 }
 
 #[cfg(test)]

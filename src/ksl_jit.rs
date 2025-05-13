@@ -1,7 +1,8 @@
 // ksl_jit.rs
 // JIT compiler with speculative optimizations and profile-guided recompilation
 
-use crate::ksl_ast::{AstNode, Expr, Function, Type, Stmt};
+use crate::ksl_ast::{AstNode, Expr, Function, Stmt};
+use crate::ksl_types::Type;
 use crate::ksl_errors::{KslError, SourcePosition};
 use crate::ksl_llvm::LLVMCodegen;
 use crate::ksl_analyzer::PerformanceMetrics;

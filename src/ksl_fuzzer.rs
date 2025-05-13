@@ -355,6 +355,8 @@ impl Fuzzer {
 
     /// Fuzz contract domain
     async fn fuzz_contract(&mut self, abi: &ContractAbi, storage: bool, modifiers: bool) -> Result<(), String> {
+        let mut failures = 0; // Initialize failures
+        let mut high_risk = 0; // Initialize high_risk
         let mut runner = TestRunner::new(ProptestConfig::default());
         
         for function in &abi.functions {
@@ -395,6 +397,8 @@ impl Fuzzer {
 
     /// Fuzz validator domain
     async fn fuzz_validator(&mut self, keys: &ValidatorKeys, segments: bool) -> Result<(), String> {
+        let mut failures = 0; // Initialize failures
+        let mut high_risk = 0; // Initialize high_risk
         let mut runner = TestRunner::new(ProptestConfig::default());
         
         // Generate malformed signatures
@@ -428,6 +432,8 @@ impl Fuzzer {
 
     /// Fuzz sharding domain
     async fn fuzz_sharding(&mut self, cross_shard: bool, timing: bool) -> Result<(), String> {
+        let mut failures = 0; // Initialize failures
+        let mut high_risk = 0; // Initialize high_risk
         let mut runner = TestRunner::new(ProptestConfig::default());
         
         // Generate cross-shard messages
@@ -461,6 +467,8 @@ impl Fuzzer {
 
     /// Fuzz consensus domain
     async fn fuzz_consensus(&mut self, forks: bool, votes: bool) -> Result<(), String> {
+        let mut failures = 0; // Initialize failures
+        let mut high_risk = 0; // Initialize high_risk
         let mut runner = TestRunner::new(ProptestConfig::default());
         
         // Generate consensus scenarios

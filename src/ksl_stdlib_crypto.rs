@@ -428,7 +428,7 @@ pub mod validation {
     /// @param signature The signature to verify
     /// @param public_key The public key to verify against
     /// @returns bool indicating if the signature is valid
-    pub fn bls_verify(message: &[u8], signature: &[u8], public_key: &[u8]) -> bool {
+    pub fn bls_verify(_message: &[u8], _signature: &[u8], _public_key: &[u8]) -> bool {
         // TODO: Implement actual BLS verification
         // This is a placeholder that should be replaced with actual BLS implementation
         false
@@ -439,7 +439,7 @@ pub mod validation {
     /// @param signature The signature to verify
     /// @param public_key The public key to verify against
     /// @returns bool indicating if the signature is valid
-    pub fn ed25519_verify(message: &[u8], signature: &[u8], public_key: &[u8]) -> bool {
+    pub fn ed25519_verify(_message: &[u8], _signature: &[u8], _public_key: &[u8]) -> bool {
         // TODO: Implement actual Ed25519 verification
         // This is a placeholder that should be replaced with actual Ed25519 implementation
         false
@@ -735,19 +735,6 @@ pub mod validation {
 
         current_hash == shard_root
     }
-}
-
-// Assume ksl_types.rs, ksl_bytecode.rs, and ksl_errors.rs are in the same crate
-mod ksl_types {
-    pub use super::{Type, TypeError};
-}
-
-mod ksl_bytecode {
-    pub use super::{KapraOpCode, Operand, KapraInstruction};
-}
-
-mod ksl_errors {
-    pub use super::{KslError, SourcePosition};
 }
 
 #[cfg(test)]

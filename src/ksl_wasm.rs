@@ -4,16 +4,18 @@
 use crate::ksl_bytecode::{KapraBytecode, KapraInstruction, KapraOpCode, Operand};
 use crate::ksl_types::Type;
 use crate::ksl_async::{AsyncRuntime, AsyncVM};
-use crate::ksl_compiler::{Compiler, CompileConfig};
-use wasm_encoder::{
-    CodeSection, ExportSection, Function, FunctionSection, ImportSection, Instruction, MemorySection,
-    MemoryType, Module, TypeSection, ValType,
-};
-use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::RwLock;
+use crate::ksl_compiler::compile;
+use crate::CompileConfig;
 use crate::ksl_abi::{ABIGenerator, ContractABI};
 use crate::ksl_version::{ContractVersion, VersionManager};
+use wasm_encoder::{
+    Module, Function, Instruction, ValType, TypeSection, ImportSection, FunctionSection,
+    ExportSection, CodeSection, MemArg, MemoryType, Limits, ExportKind, BlockType
+};
+use std::collections::HashMap;
+use std::convert::TryInto;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 use serde_json;
 
 /// WASM generation error with async support
@@ -176,7 +178,7 @@ impl WasmGenerator {
             KapraOpCode::Sha3 => 30,
             KapraOpCode::Sha3_512 => 60,
             KapraOpCode::BlsVerify => 100,
-            KapraOpCode::DilVerify => 120,
+            KapraOpCode::DilithiumVerify => 120,
             KapraOpCode::MerkleVerify => 50,
             _ => 1,
         };
@@ -203,13 +205,9 @@ impl WasmGenerator {
                         function.instruction(&Instruction::LocalSet(dst));
                     }
                     OperandValue::Immediate(data) => {
-                        let value = u32::from_le_bytes(
-                            data.try_into().map_err(|_| WasmError::new(
-                                "Invalid immediate value".to_string(),
-                                instr_index,
-                                self.is_async,
-                            ))?,
-                        );
+                        let value = u32::from_le_bytes(data.as_slice().try_into().map_err(|_| {
+                            WasmError::new("Invalid immediate value".to_string(), instr_index, self.is_async)
+                        })?);
                         function.instruction(&Instruction::I32Const(value as i32));
                         function.instruction(&Instruction::LocalSet(dst));
                     }
@@ -274,7 +272,7 @@ impl WasmGenerator {
                 function.instruction(&Instruction::Call(2)); // Imported sha3
                 // Load result from memory
                 function.instruction(&Instruction::I32Const(offset as i32));
-                function.instruction(&Instruction::I32Load(0, 0));
+                function.instruction(&Instruction::I32Load(MemArg { offset: 0, align: 4, memory_index: 0 }));
                 function.instruction(&Instruction::LocalSet(dst));
             }
             KapraOpCode::Sha3_512 => {
@@ -289,7 +287,7 @@ impl WasmGenerator {
                 function.instruction(&Instruction::Call(2)); // Imported sha3_512
                 // Load result from memory
                 function.instruction(&Instruction::I32Const(offset as i32));
-                function.instruction(&Instruction::I32Load(0, 0));
+                function.instruction(&Instruction::I32Load(MemArg { offset: 0, align: 4, memory_index: 0 }));
                 function.instruction(&Instruction::LocalSet(dst));
             }
             KapraOpCode::Kaprekar => {
@@ -378,7 +376,7 @@ impl WasmGenerator {
                 // Store result (i32 boolean)
                 function.instruction(&Instruction::LocalSet(dst));
             }
-            KapraOpCode::AsyncHttpGet => {
+            KapraOpCode::HttpGet => {
                 if !self.is_async {
                     return Err(WasmError::new(
                         "Async operation in non-async context".to_string(),
@@ -398,7 +396,7 @@ impl WasmGenerator {
                 // Store promise handle
                 function.instruction(&Instruction::LocalSet(dst));
             }
-            KapraOpCode::AsyncHttpPost => {
+            KapraOpCode::HttpPost => {
                 if !self.is_async {
                     return Err(WasmError::new(
                         "Async operation in non-async context".to_string(),
@@ -471,7 +469,7 @@ impl WasmGenerator {
     fn get_u32(&self, operand: &Operand, instr_index: usize) -> Result<u32, WasmError> {
         match operand {
             Operand::Immediate(data) => {
-                Ok(u32::from_le_bytes(data.try_into().map_err(|_| {
+                Ok(u32::from_le_bytes(data.as_slice().try_into().map_err(|_| {
                     WasmError::new("Invalid immediate value".to_string(), instr_index, self.is_async)
                 })?))
             }
@@ -520,23 +518,6 @@ pub async fn compile_to_wasm(source: &str, config: CompileConfig) -> Result<Vec<
     let mut compiler = Compiler::new(config);
     let bytecode = compiler.compile(&source_string)?;
     generate_wasm_async(bytecode).await
-}
-
-// Assume ksl_bytecode.rs, ksl_types.rs, ksl_async.rs, and ksl_compiler.rs are in the same crate
-mod ksl_bytecode {
-    pub use super::{KapraBytecode, KapraInstruction, KapraOpCode, Operand};
-}
-
-mod ksl_types {
-    pub use super::Type;
-}
-
-mod ksl_async {
-    pub use super::{AsyncRuntime, AsyncVM};
-}
-
-mod ksl_compiler {
-    pub use super::{Compiler, CompileConfig};
 }
 
 #[cfg(test)]
@@ -603,7 +584,7 @@ mod tests {
         ));
         // response = await http.get(url)
         bytecode.add_instruction(KapraInstruction::new(
-            KapraOpCode::AsyncHttpGet,
+            KapraOpCode::HttpGet,
             vec![
                 Operand::Register(1),
                 Operand::Register(0),

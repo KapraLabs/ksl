@@ -6,7 +6,8 @@ use crate::ksl_parser::{parse, AstNode, ParseError};
 use crate::ksl_errors::{KslError, SourcePosition};
 use crate::ksl_bytecode::{KapraBytecode, CompileTarget};
 use crate::ksl_module::ModuleSystem;
-use crate::ksl_ast::{PluginOp, PluginHandler, Type as KSLType};
+use crate::ksl_ast::{PluginOp, PluginHandler};
+use crate::ksl_types::Type as KSLType;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -83,11 +84,11 @@ impl PluginRegistry {
             // Find the first WASM handler
             let wasm_op = wasm_ops[0];
             let wasm_path = Path::new(&wasm_op.handler.name);
-            let full_path = path.join(wasm_path);
-            self.load_wasm_plugin(&spec, &full_path)?;
+                    let full_path = path.join(wasm_path);
+                    self.load_wasm_plugin(&spec, &full_path)?;
         } else {
-            // Native plugin
-            self.load_native_plugin(&spec, path)?;
+                // Native plugin
+                self.load_native_plugin(&spec, path)?;
         }
 
         // Register plugin
@@ -129,23 +130,23 @@ impl PluginRegistry {
                 PluginHandler { kind, name } => {
                     match kind.as_str() {
                         "native" => {
-                            // Native handlers are validated at runtime
+                    // Native handlers are validated at runtime
                         },
                         "wasm" => {
                             let path = Path::new(name);
-                            if !path.exists() {
-                                return Err(KslError::type_error(
-                                    format!("WASM module not found: {}", path.display()),
-                                    pos,
-                                ));
-                            }
+                    if !path.exists() {
+                        return Err(KslError::type_error(
+                            format!("WASM module not found: {}", path.display()),
+                            pos,
+                        ));
+                    }
                         },
                         "syscall" => {
-                            if name.is_empty() {
-                                return Err(KslError::type_error(
-                                    "Syscall name cannot be empty".to_string(),
-                                    pos,
-                                ));
+                    if name.is_empty() {
+                        return Err(KslError::type_error(
+                            "Syscall name cannot be empty".to_string(),
+                            pos,
+                        ));
                             }
                         },
                         _ => {

@@ -23,6 +23,10 @@ use crate::ksl_analyzer::{Analyzer, GasStats};
 use crate::ksl_package::{PackageLoader, PackageConfig};
 use sha2::{Sha256, Digest};
 use chrono::{DateTime, Utc};
+use std::collections::HashMap;
+use std::path::Path;
+use tar::Header;
+use flate2::Compress;
 
 /// Package publish configuration
 #[derive(Debug, Clone)]
@@ -224,7 +228,7 @@ impl PackagePublisher {
                 .map_err(|e| KslError::io_error(
                     format!("Failed to compress archive: {}", e),
                     SourcePosition::new(1, 1),
-            ))?;
+                ))?;
             compressed.extend_from_slice(&out[..n]);
         }
 

@@ -9,11 +9,12 @@ use crate::ksl_bytecode::{KapraBytecode, KapraInstruction, KapraOpCode};
 use crate::kapra_vm::{KapraVM, RuntimeError};
 use crate::ksl_module::ModuleSystem;
 use crate::ksl_errors::{KslError, SourcePosition};
-use crate::ksl_ast_transform::AstNode;
+use crate::ksl_macros::AstNode;
 use std::fs;
 use std::path::PathBuf;
 use std::time::{Instant, Duration};
 use std::collections::{HashMap, HashSet};
+use serde::{Serialize, Deserialize};
 
 /// Profiling data for a single instruction
 #[derive(Debug)]
@@ -31,6 +32,7 @@ struct FunctionProfile {
     instructions: HashMap<u32, InstructionProfile>,
     is_async: bool,
     async_operations: Vec<String>,
+    branch_data: HashMap<u32, BranchProfile>,
 }
 
 /// Analysis rules for async code
@@ -86,14 +88,16 @@ struct ThroughputStats {
 }
 
 /// Gas usage statistics
-#[derive(Debug)]
-struct GasStats {
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct GasStats {
     /// Average gas per transaction
-    avg_gas: u64,
+    pub avg_gas: u64,
     /// Total gas used
-    total_gas: u64,
+    pub total_gas: u64,
     /// Gas limit utilization
-    gas_utilization: f64,
+    pub gas_utilization: f64,
+    /// Gas by operation
+    pub gas_by_operation: HashMap<String, u64>,
 }
 
 /// Shard operation metrics
@@ -195,6 +199,7 @@ impl Analyzer {
                         errors.push(KslError::type_error(
                             "await used outside async context".to_string(),
                             SourcePosition::new(1, 1),
+                            "E105".to_string()
                         ));
                     }
                 }
@@ -220,18 +225,18 @@ impl Analyzer {
         for (timestamp, event) in vm.execution_log.iter() {
             match event {
                 ExecutionEvent::Transaction { latency, gas, is_cross_shard } => {
-                    latencies.push(*latency);
-                    gas_usage.push(*gas);
-                    if *is_cross_shard {
+                    latencies.push(latency);
+                    gas_usage.push(gas);
+                    if is_cross_shard {
                         cross_shard_txs += 1;
                     }
                 }
                 ExecutionEvent::Block { tx_count, time } => {
-                    let tps = *tx_count as f64 / time.as_secs_f64();
+                    let tps = tx_count as f64 / time.as_secs_f64();
                     tps_samples.push(tps);
                 }
                 ExecutionEvent::ShardSync { latency } => {
-                    shard_sync_times.push(*latency);
+                    shard_sync_times.push(latency);
                 }
             }
         }
@@ -257,7 +262,7 @@ impl Analyzer {
         } else {
             0.0
         };
-        let peak_tps = tps_samples.iter().fold(0.0, |max, &x| max.max(x));
+        let peak_tps = tps_samples.iter().fold(0.0f64, |max, &x| max.max(x));
         let avg_block_time = Duration::from_secs_f64(
             vm.execution_log.iter()
                 .filter_map(|(_, event)| {
@@ -306,6 +311,7 @@ impl Analyzer {
                 avg_gas,
                 total_gas,
                 gas_utilization,
+                gas_by_operation: HashMap::new(),
             },
             shard_metrics: ShardMetrics {
                 cross_shard_tx_count: cross_shard_txs,
@@ -344,7 +350,7 @@ impl Analyzer {
             }
 
             // Identify inlining candidates
-            if profile.calls > 0 && profile.total_time.as_micros() / profile.calls < 100 {
+            if profile.calls > 0 && profile.total_time.as_micros() / (profile.calls as u128) < 100 {
                 pgo_data.inline_candidates.insert(profile.name.clone());
             }
         }
@@ -371,17 +377,19 @@ impl Analyzer {
             .ok_or_else(|| vec![KslError::type_error(
                 "Invalid main file name".to_string(),
                 SourcePosition::new(1, 1),
+                "E101".to_string()
             )])?;
 
         // Read source file
         let source = fs::read_to_string(file)
-            .map_err(|e| vec![KslError::type_error(e.to_string(), SourcePosition::new(1, 1))])?;
+            .map_err(|e| vec![KslError::type_error(e.to_string(), SourcePosition::new(1, 1), "E102".to_string())])?;
 
         // Parse
         let ast = parse(&source)
             .map_err(|e| vec![KslError::type_error(
                 format!("Parse error at position {}: {}", e.position, e.message),
                 SourcePosition::new(1, 1),
+                "E103".to_string()
             )])?;
 
         // Analyze async patterns
@@ -389,11 +397,18 @@ impl Analyzer {
 
         // Type-check
         check(&ast)
-            .map_err(|errors| errors)?;
+            .map_err(|errors| errors.into_iter().map(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1), "E105".to_string())).collect::<Vec<KslError>>())?;
 
         // Compile
-        let bytecode = compile(&ast)
-            .map_err(|errors| errors.into_iter().map(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1))).collect())?;
+        let bytecode = compile(
+            &ast,
+            "main_module",
+            CompileTarget::Bytecode,
+            "output.bc",
+            &PerformanceMetrics::new(),
+            false,
+            None
+        ).map_err(|errors| errors.into_iter().map(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1), "E104".to_string())).collect())?;
 
         // Run with profiling
         let mut vm = KapraVM::new_with_profiling(bytecode.clone());
@@ -402,6 +417,7 @@ impl Analyzer {
             .map_err(|e| vec![KslError::type_error(
                 format!("Runtime error at instruction {}: {}", e.pc, e.message),
                 SourcePosition::new(1, 1),
+                "E401".to_string()
             )])?;
         let total_duration = start.elapsed();
 
@@ -436,6 +452,7 @@ impl Analyzer {
                 instructions: profile.instructions,
                 is_async,
                 async_operations: Vec::new(),
+                branch_data: HashMap::new(),
             });
         }
 
@@ -471,7 +488,7 @@ impl Analyzer {
             let mut instrs: Vec<_> = profile.instructions.iter().collect();
             instrs.sort_by(|a, b| b.1.total_time.cmp(&a.1.total_time));
             for (index, instr) in instrs.iter().take(3) {
-                let op = bytecode.instructions[*index as usize].opcode;
+                let op = bytecode.instructions[**index as usize].opcode;
                 println!(
                     "    0x{:04x}: {:?} ({} calls, {:.2?})",
                     index, op, instr.count, instr.total_time
@@ -524,33 +541,31 @@ pub fn analyze(file: &PathBuf) -> Result<(), Vec<KslError>> {
     analyzer.analyze_file(file)
 }
 
-// Assume ksl_parser.rs, ksl_checker.rs, ksl_compiler.rs, ksl_bytecode.rs, kapra_vm.rs, ksl_module.rs, and ksl_errors.rs are in the same crate
-mod ksl_parser {
-    pub use super::parse;
-}
-
-mod ksl_checker {
-    pub use super::check;
-}
-
-mod ksl_compiler {
-    pub use super::compile;
-}
-
-mod ksl_bytecode {
-    pub use super::{KapraBytecode, KapraInstruction, KapraOpCode};
-}
-
-mod kapra_vm {
-    pub use super::{KapraVM, RuntimeError};
-}
-
-mod ksl_module {
-    pub use super::ModuleSystem;
-}
-
-mod ksl_errors {
-    pub use super::{KslError, SourcePosition};
+// Add the missing ExecutionEvent type
+/// Events during execution for performance analysis
+#[derive(Debug)]
+pub enum ExecutionEvent {
+    /// Transaction execution event
+    Transaction {
+        /// Transaction processing latency
+        latency: Duration,
+        /// Gas used during execution
+        gas: u64,
+        /// Whether the transaction spans multiple shards
+        is_cross_shard: bool,
+    },
+    /// Block production event
+    Block {
+        /// Number of transactions in the block
+        tx_count: u64,
+        /// Time taken to process the block
+        time: Duration,
+    },
+    /// Shard synchronization event
+    ShardSync {
+        /// Shard sync latency
+        latency: Duration,
+    },
 }
 
 #[cfg(test)]
@@ -595,5 +610,293 @@ mod tests {
 
         let result = analyze(&temp_file.path().to_path_buf());
         assert!(result.is_ok()); // Empty file is valid but no profiles
+    }
+}
+
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+pub enum Type {
+    // Primitive types
+    U8,
+    U16,
+    U32,
+    U64,
+    I8,
+    I16,
+    I32,
+    I64,
+    F32,
+    F64,
+    // Complex types
+    String,
+    Array(Box<Type>, u32), // e.g., array<u8, 32>
+    Struct {
+        name: String,
+        fields: Vec<(String, Type)>, // (field_name, type)
+    },
+    Enum {
+        name: String,
+        variants: Vec<(String, Option<Type>)>, // (variant_name, optional payload type)
+    },
+    Option(Box<Type>), // e.g., option<u32>
+    Result {
+        ok: Box<Type>,
+        err: Box<Type>,
+    }, // e.g., result<string, error>
+    Tuple(Vec<Type>), // e.g., (u32, f32)
+    Void, // For functions with no return value
+    Generic {
+        name: String,
+        constraints: Vec<Type>, // e.g., T: U32 | F32
+    },
+    Generated {
+        schema: String, // e.g., schema name for JSON/Protobuf
+    },
+    // Networking types
+    Function {
+        params: Vec<Type>,
+        return_type: Box<Type>,
+    }, // e.g., function<u32, string>
+    Error, // For error handling
+    Socket, // For network sockets
+    HttpRequest, // For HTTP requests
+    HttpResponse, // For HTTP responses
+    Bool,
+    ZkProof(ZkProofType),
+    Signature(SignatureType),
+    // Data blob type
+    DataBlob {
+        element_type: Box<Type>,
+        size: usize,
+        alignment: usize,
+    },
+    Blockchain(BlockchainType),
+}
+
+impl std::fmt::Display for Type {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Type::U8 => write!(f, "u8"),
+            Type::U16 => write!(f, "u16"),
+            Type::U32 => write!(f, "u32"),
+            Type::U64 => write!(f, "u64"),
+            Type::I8 => write!(f, "i8"),
+            Type::I16 => write!(f, "i16"),
+            Type::I32 => write!(f, "i32"),
+            Type::I64 => write!(f, "i64"),
+            Type::F32 => write!(f, "f32"),
+            Type::F64 => write!(f, "f64"),
+            Type::String => write!(f, "string"),
+            Type::Array(t, s) => write!(f, "array<{}, {}>", t, s),
+            Type::Struct { name, fields } => {
+                write!(f, "struct {} {{ ", name)?;
+                for (i, (field_name, field_type)) in fields.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}: {}", field_name, field_type)?;
+                }
+                write!(f, " }}")
+            }
+            Type::Enum { name, variants } => {
+                write!(f, "enum {} {{ ", name)?;
+                for (i, (variant_name, payload_type)) in variants.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", variant_name)?;
+                    if let Some(t) = payload_type {
+                        write!(f, "({})", t)?;
+                    }
+                }
+                write!(f, " }}")
+            }
+            Type::Option(t) => write!(f, "option<{}>", t),
+            Type::Result { ok, err } => write!(f, "result<{}, {}>", ok, err),
+            Type::Tuple(types) => {
+                write!(f, "(")?;
+                for (i, t) in types.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", t)?;
+                }
+                write!(f, ")")
+            }
+            Type::Void => write!(f, "void"),
+            Type::Generic { name, constraints } => {
+                write!(f, "{}", name)?;
+                if !constraints.is_empty() {
+                    write!(f, ": ")?;
+                    for (i, c) in constraints.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, " | ")?;
+                        }
+                        write!(f, "{}", c)?;
+                    }
+                }
+                Ok(())
+            }
+            Type::Generated { schema } => write!(f, "generated<{}>", schema),
+            Type::Function { params, return_type } => {
+                write!(f, "function<")?;
+                for (i, p) in params.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", p)?;
+                }
+                write!(f, "> -> {}", return_type)
+            }
+            Type::Error => write!(f, "error"),
+            Type::Socket => write!(f, "socket"),
+            Type::HttpRequest => write!(f, "http_request"),
+            Type::HttpResponse => write!(f, "http_response"),
+            Type::Bool => write!(f, "bool"),
+            Type::ZkProof(t) => write!(f, "zk_proof<{}>", t),
+            Type::Signature(t) => write!(f, "signature<{}>", t),
+            Type::DataBlob { element_type, size, alignment } => {
+                write!(f, "data_blob<{}, {}, {}>", element_type, size, alignment)
+            }
+            Type::Blockchain(t) => write!(f, "blockchain<{}>", t),
+        }
+    }
+}
+
+impl Type {
+    pub fn satisfies_constraint(&self, constraint: &Type) -> bool {
+        match (self, constraint) {
+            (Type::U8, Type::U16) | (Type::U8, Type::U32) | (Type::U8, Type::U64) |
+            (Type::U16, Type::U32) | (Type::U16, Type::U64) |
+            (Type::U32, Type::U64) |
+            (Type::I8, Type::I16) | (Type::I8, Type::I32) | (Type::I8, Type::I64) |
+            (Type::I16, Type::I32) | (Type::I16, Type::I64) |
+            (Type::I32, Type::I64) |
+            (Type::F32, Type::F64) => true,
+            (Type::Array(inner1, size1), Type::Array(inner2, size2)) => {
+                size1 == size2 && inner1.satisfies_constraint(inner2)
+            }
+            (Type::Struct { name: name1, fields: fields1 }, Type::Struct { name: name2, fields: fields2 }) => {
+                name1 == name2 && fields1.len() == fields2.len() &&
+                fields1.iter().zip(fields2.iter()).all(|((name1, type1), (name2, type2))| {
+                    name1 == name2 && type1.satisfies_constraint(type2)
+                })
+            }
+            (Type::Enum { name: name1, variants: variants1 }, Type::Enum { name: name2, variants: variants2 }) => {
+                name1 == name2 && variants1.len() == variants2.len() &&
+                variants1.iter().zip(variants2.iter()).all(|((name1, type1), (name2, type2))| {
+                    name1 == name2 && match (type1, type2) {
+                        (Some(t1), Some(t2)) => t1.satisfies_constraint(t2),
+                        (None, None) => true,
+                        _ => false,
+                    }
+                })
+            }
+            (Type::Option(inner1), Type::Option(inner2)) => inner1.satisfies_constraint(inner2),
+            (Type::Result { ok: ok1, err: err1 }, Type::Result { ok: ok2, err: err2 }) => {
+                ok1.satisfies_constraint(ok2) && err1.satisfies_constraint(err2)
+            }
+            (Type::Tuple(types1), Type::Tuple(types2)) => {
+                types1.len() == types2.len() &&
+                types1.iter().zip(types2.iter()).all(|(t1, t2)| t1.satisfies_constraint(t2))
+            }
+            (Type::Generic { name: name1, constraints: constraints1 }, Type::Generic { name: name2, constraints: constraints2 }) => {
+                name1 == name2 && constraints1.len() == constraints2.len() &&
+                constraints1.iter().zip(constraints2.iter()).all(|(c1, c2)| c1.satisfies_constraint(c2))
+            }
+            (Type::Generated { schema: schema1 }, Type::Generated { schema: schema2 }) => {
+                schema1 == schema2
+            }
+            (Type::Function { params: params1, return_type: ret1 }, Type::Function { params: params2, return_type: ret2 }) => {
+                params1.len() == params2.len() &&
+                params1.iter().zip(params2.iter()).all(|(p1, p2)| p1.satisfies_constraint(p2)) &&
+                ret1.satisfies_constraint(ret2)
+            }
+            (Type::ZkProof(proof1), Type::ZkProof(proof2)) => proof1 == proof2,
+            (Type::Signature(sig1), Type::Signature(sig2)) => sig1 == sig2,
+            (Type::DataBlob { element_type: type1, size: size1, alignment: align1 },
+             Type::DataBlob { element_type: type2, size: size2, alignment: align2 }) => {
+                type1.satisfies_constraint(type2) && size1 == size2 && align1 == align2
+            }
+            (Type::Blockchain(block1), Type::Blockchain(block2)) => block1 == block2,
+            _ => false,
+        }
+    }
+
+    pub fn implements_trait(&self, trait_name: &str) -> bool {
+        match self {
+            Type::U8 | Type::U16 | Type::U32 | Type::U64 |
+            Type::I8 | Type::I16 | Type::I32 | Type::I64 |
+            Type::F32 | Type::F64 => trait_name == "Numeric",
+            Type::String => trait_name == "String",
+            Type::Array(_, _) => trait_name == "Collection",
+            Type::Struct { .. } => trait_name == "Struct",
+            Type::Enum { .. } => trait_name == "Enum",
+            Type::Option(_) => trait_name == "Option",
+            Type::Result { .. } => trait_name == "Result",
+            Type::Tuple(_) => trait_name == "Tuple",
+            Type::Void => trait_name == "Void",
+            Type::Generic { .. } => trait_name == "Generic",
+            Type::Generated { .. } => trait_name == "Generated",
+            Type::Function { .. } => trait_name == "Function",
+            Type::Error => trait_name == "Error",
+            Type::Socket => trait_name == "Socket",
+            Type::HttpRequest => trait_name == "HttpRequest",
+            Type::HttpResponse => trait_name == "HttpResponse",
+            Type::Bool => trait_name == "Bool",
+            Type::ZkProof(_) => trait_name == "ZkProof",
+            Type::Signature(_) => trait_name == "Signature",
+            Type::DataBlob { .. } => trait_name == "DataBlob",
+            Type::Blockchain(_) => trait_name == "Blockchain",
+        }
+    }
+}
+
+pub struct TypeSystem;
+
+impl TypeSystem {
+    pub fn satisfies_constraint(ty: &Type, constraint: &Type) -> bool {
+        ty.satisfies_constraint(constraint)
+    }
+
+    pub fn implements_trait(ty: &Type, trait_name: &str) -> bool {
+        ty.implements_trait(trait_name)
+    }
+}
+
+impl PartialEq for Type {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Type::U8, Type::U8) => true,
+            (Type::U16, Type::U16) => true,
+            (Type::U32, Type::U32) => true,
+            (Type::U64, Type::U64) => true,
+            (Type::I8, Type::I8) => true,
+            (Type::I16, Type::I16) => true,
+            (Type::I32, Type::I32) => true,
+            (Type::I64, Type::I64) => true,
+            (Type::F32, Type::F32) => true,
+            (Type::F64, Type::F64) => true,
+            (Type::String, Type::String) => true,
+            (Type::Array(t1, s1), Type::Array(t2, s2)) => t1 == t2 && s1 == s2,
+            (Type::Struct { name: n1, fields: f1 }, Type::Struct { name: n2, fields: f2 }) => n1 == n2 && f1 == f2,
+            (Type::Enum { name: n1, variants: v1 }, Type::Enum { name: n2, variants: v2 }) => n1 == n2 && v1 == v2,
+            (Type::Option(t1), Type::Option(t2)) => t1 == t2,
+            (Type::Result { ok: o1, err: e1 }, Type::Result { ok: o2, err: e2 }) => o1 == o2 && e1 == e2,
+            (Type::Tuple(t1), Type::Tuple(t2)) => t1 == t2,
+            (Type::Void, Type::Void) => true,
+            (Type::Generic { name: n1, constraints: c1 }, Type::Generic { name: n2, constraints: c2 }) => n1 == n2 && c1 == c2,
+            (Type::Generated { schema: s1 }, Type::Generated { schema: s2 }) => s1 == s2,
+            (Type::Function { params: p1, return_type: r1 }, Type::Function { params: p2, return_type: r2 }) => p1 == p2 && r1 == r2,
+            (Type::Error, Type::Error) => true,
+            (Type::Socket, Type::Socket) => true,
+            (Type::HttpRequest, Type::HttpRequest) => true,
+            (Type::HttpResponse, Type::HttpResponse) => true,
+            (Type::Bool, Type::Bool) => true,
+            (Type::ZkProof(t1), Type::ZkProof(t2)) => t1 == t2,
+            (Type::Signature(t1), Type::Signature(t2)) => t1 == t2,
+            (Type::DataBlob { element_type: t1, size: s1, alignment: a1 }, Type::DataBlob { element_type: t2, size: s2, alignment: a2 }) => t1 == t2 && s1 == s2 && a1 == a2,
+            (Type::Blockchain(t1), Type::Blockchain(t2)) => t1 == t2,
+            _ => false,
+        }
     }
 }
