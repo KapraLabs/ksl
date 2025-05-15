@@ -69,14 +69,14 @@ pub enum PluginError {
 impl From<PluginError> for KslError {
     fn from(err: PluginError) -> KslError {
         match err {
-            PluginError::LoadError(msg, pos) => KslError::type_error(msg, pos),
-            PluginError::SymbolError(msg, pos) => KslError::type_error(msg, pos),
-            PluginError::ExecutionError(msg, pos) => KslError::type_error(msg, pos),
-            PluginError::InvalidMetadata(msg, pos) => KslError::type_error(msg, pos),
-            PluginError::SandboxViolation(msg, pos) => KslError::type_error(msg, pos),
-            PluginError::ParseError(e) => KslError::type_error(e.message, SourcePosition::new(e.position, e.position)),
-            PluginError::AsyncError(msg, pos) => KslError::type_error(msg, pos),
-            PluginError::SecurityError(msg, pos) => KslError::type_error(msg, pos),
+            PluginError::LoadError(msg, pos) => KslError::type_error(msg, pos, "PLUGIN_LOAD_ERROR".to_string()),
+            PluginError::SymbolError(msg, pos) => KslError::type_error(msg, pos, "PLUGIN_SYMBOL_ERROR".to_string()),
+            PluginError::ExecutionError(msg, pos) => KslError::type_error(msg, pos, "PLUGIN_EXECUTION_ERROR".to_string()),
+            PluginError::InvalidMetadata(msg, pos) => KslError::type_error(msg, pos, "PLUGIN_METADATA_ERROR".to_string()),
+            PluginError::SandboxViolation(msg, pos) => KslError::type_error(msg, pos, "PLUGIN_SANDBOX_ERROR".to_string()),
+            PluginError::ParseError(e) => KslError::type_error(e.message, SourcePosition::new(e.position, e.position), "PLUGIN_PARSE_ERROR".to_string()),
+            PluginError::AsyncError(msg, pos) => KslError::type_error(msg, pos, "PLUGIN_ASYNC_ERROR".to_string()),
+            PluginError::SecurityError(msg, pos) => KslError::type_error(msg, pos, "PLUGIN_SECURITY_ERROR".to_string()),
         }
     }
 }

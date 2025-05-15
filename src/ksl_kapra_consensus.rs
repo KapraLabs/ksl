@@ -204,9 +204,10 @@ impl ConsensusRuntime {
         
         let state = self.state.read().await;
         let shard_state = state.shard_states.get(&shard_id).ok_or_else(|| {
-            KslError::runtime_error(
-                "Shard not found".to_string(), 
-                Some(SourcePosition::new(1, 1))
+            KslError::runtime(
+                "Failed to execute transaction with WASM runtime".to_string(),
+                0, // No specific instruction position for consensus operations
+                "KVE001".to_string()
             )
         })?;
 

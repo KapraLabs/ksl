@@ -25,6 +25,7 @@ use seccompiler::{SeccompFilter, SeccompAction};
 use chrono::{DateTime, Utc};
 use rand::Rng;
 use std::path::{Path, PathBuf};
+use crate::ksl_types::{ValidatorStatus as TypesValidatorStatus};
 
 /// Represents KSL bytecode (aligned with ksl_bytecode.rs).
 #[derive(Debug, Clone)]
@@ -528,25 +529,6 @@ pub struct KapraValidator {
 pub type ValidatorId = u64;
 
 /// Validator information
-#[derive(Debug, Clone)]
-pub struct ValidatorInfo {
-    /// Validator ID
-    id: ValidatorId,
-    /// Registration status
-    status: ValidatorStatus,
-    /// Staked amount
-    stake: u64,
-    /// Performance metrics
-    metrics: ValidatorPerformance,
-    /// Key pair reference
-    key_pair: Arc<ValidatorKeyPair>,
-    /// Runtime state
-    runtime_state: RuntimeState,
-    /// Last heartbeat
-    last_heartbeat: Instant,
-}
-
-/// Validator status
 #[derive(Debug, Clone, PartialEq)]
 pub enum ValidatorStatus {
     /// Registered but not active
@@ -556,7 +538,7 @@ pub enum ValidatorStatus {
     /// Temporarily suspended
     Suspended(SuspensionReason),
     /// Permanently slashed
-    Slashed(SlashReason),
+    Slashed,
     /// Voluntarily exited
     Exited,
 }
@@ -787,6 +769,35 @@ impl KapraValidator {
         }
     }
 
+    /// Update validator status
+    pub async fn update_validator_status(
+        &self,
+        id: ValidatorId,
+        status: ValidatorStatus,
+    ) -> Result<(), String> {
+        let mut validators = self.validators.write().await;
+        
+        if let Some(validator) = validators.get_mut(&id) {
+            validator.status = status;
+            
+            // Update metrics if necessary
+            match status {
+                ValidatorStatus::Active => {
+                    self.metrics.total_active.fetch_add(1, Ordering::Relaxed);
+                },
+                ValidatorStatus::Slashed => {
+                    self.metrics.total_slashed.fetch_add(1, Ordering::Relaxed);
+                    self.metrics.total_active.fetch_sub(1, Ordering::Relaxed);
+                },
+                _ => {}
+            }
+            
+            Ok(())
+        } else {
+            Err("Validator not found".to_string())
+        }
+    }
+
     /// Slashes a validator
     pub async fn slash_validator(
         &self,
@@ -802,7 +813,7 @@ impl KapraValidator {
             let slash_amount = self.calculate_slash_amount(&reason, validator.stake);
             
             // Update validator status
-            validator.status = ValidatorStatus::Slashed(reason.clone());
+            validator.status = ValidatorStatus::Slashed;
             
             // Record slash event
             let event = SlashEvent {
@@ -934,7 +945,7 @@ pub struct ValidatorState {
 }
 
 /// Validator information
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ValidatorInfo {
     /// Validator ID
     pub id: String,
@@ -1001,15 +1012,6 @@ pub struct Version {
     pub build: String,
 }
 
-/// Validator status
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum ValidatorStatus {
-    Active,
-    Inactive,
-    Suspended,
-    Updating,
-}
-
 /// Connection status
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ConnectionStatus {
@@ -1074,11 +1076,19 @@ impl ValidatorManager {
                 ("write", SeccompAction::Allow),
                 ("exit", SeccompAction::Allow),
                 ("exit_group", SeccompAction::Allow),
-            ].into_iter().collect()).map_err(|e| KslError::config_error(format!("Seccomp filter creation failed: {}", e)))?;
+            ].into_iter().collect()).map_err(|e| KslError::type_error(
+                format!("Seccomp filter creation failed: {}", e), 
+                SourcePosition::new(1, 1),
+                "KVF001".to_string()
+            ))?;
     
             // Add memory and network restrictions
             filter.add_memory_limit(1024 * 1024 * 1024); // 1GB
-            filter.add_network_rules(vec!["127.0.0.1:*"]).map_err(|e| KslError::config_error(format!("Seccomp network rule failed: {}", e)))?;
+            filter.add_network_rules(vec!["127.0.0.1:*"]).map_err(|e| KslError::type_error(
+                format!("Seccomp network rule failed: {}", e),
+                SourcePosition::new(1, 1),
+                "KVF002".to_string()
+            ))?;
             filter
         };
         #[cfg(not(target_os = "linux"))]
@@ -1116,14 +1126,19 @@ impl ValidatorManager {
         #[cfg(target_os = "linux")]
         {
             let mut sandbox_guard = self.sandbox.lock().unwrap();
-            sandbox_guard.apply().map_err(|e| KslError::runtime_error(format!("Failed to apply seccomp sandbox: {}", e), None))?;
+            sandbox_guard.apply().map_err(|e| KslError::runtime(
+                format!("Failed to apply seccomp sandbox: {}", e),
+                0, // No instruction position for validator operations
+                "KVF003".to_string()
+            ))?;
         }
 
         // Load library
         let library = unsafe {
-            Library::new(&module_path).map_err(|e| KslError::runtime_error(
-                format!("Failed to load validator: {}", e),
-                None,
+            Library::new(&module_path).map_err(|e| KslError::runtime(
+                format!("Failed to load validator module: {}", e),
+                0,
+                "KVF004".to_string()
             ))?
         };
 
@@ -1131,9 +1146,10 @@ impl ValidatorManager {
         unsafe {
             let init_fn: Symbol<unsafe extern "C" fn() -> bool> = library.get(b"validator_init")?;
             if !init_fn() {
-                return Err(KslError::runtime_error(
-                    "Validator initialization failed".to_string(),
-                    None,
+                return Err(KslError::runtime(
+                    "Invalid validator module signature: signature verification failed".to_string(),
+                    0,
+                    "KVF005".to_string()
                 ));
             }
         }

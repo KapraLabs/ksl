@@ -51,22 +51,26 @@ impl SemVer {
     pub fn parse(version: &str) -> Result<Self, KslError> {
         let parts: Vec<&str> = version.split('.').collect();
         if parts.len() != 3 {
-            return Err(KslError::parse_error(
-                format!("Invalid version format: '{}', expected 'major.minor.patch'", version),
+            return Err(KslError::parse(
+                format!("Invalid semantic version: {}", version),
                 SourcePosition::new(1, 1),
+                "DEP001".to_string()
             ));
         }
-        let major = parts[0].parse::<u32>().map_err(|e| KslError::parse_error(
+        let major = parts[0].parse::<u32>().map_err(|e| KslError::parse(
             format!("Invalid major version: {}", e),
             SourcePosition::new(1, 1),
+            "DEP002".to_string()
         ))?;
-        let minor = parts[1].parse::<u32>().map_err(|e| KslError::parse_error(
+        let minor = parts[1].parse::<u32>().map_err(|e| KslError::parse(
             format!("Invalid minor version: {}", e),
             SourcePosition::new(1, 1),
+            "DEP003".to_string()
         ))?;
-        let patch = parts[2].parse::<u32>().map_err(|e| KslError::parse_error(
+        let patch = parts[2].parse::<u32>().map_err(|e| KslError::parse(
             format!("Invalid patch version: {}", e),
             SourcePosition::new(1, 1),
+            "DEP004".to_string()
         ))?;
         Ok(SemVer { major, minor, patch })
     }

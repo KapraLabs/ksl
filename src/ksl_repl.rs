@@ -498,13 +498,13 @@ impl Repl {
         let ast = parse(&source)
             .map_err(|e| format!("Failed to parse module: {}", e))?;
         
-        check(&ast)
+        check(ast.as_slice())
             .map_err(|errors| errors.into_iter()
                 .map(|e| e.to_string())
                 .collect::<Vec<_>>()
                 .join("\n"))?;
         
-        compile(&ast)
+        compile(ast.as_slice())
             .map_err(|errors| errors.into_iter()
                 .map(|e| e.to_string())
                 .collect::<Vec<_>>()
@@ -525,7 +525,7 @@ impl Repl {
             .map_err(|e| format!("Parse error at position {}: {}", e.position, e.message))?;
 
         // Type-check
-        check(&ast)
+        check(ast.as_slice())
             .map_err(|errors| errors.into_iter().map(|e| e.to_string()).collect::<Vec<_>>().join("\n"))?;
 
         // Handle async functions
@@ -540,7 +540,7 @@ impl Repl {
         }
 
         // Compile
-        let new_bytecode = compile(&ast)
+        let new_bytecode = compile(ast.as_slice())
             .map_err(|errors| errors.into_iter().map(|e| e.to_string()).collect::<Vec<_>>().join("\n"))?;
 
         // Update state

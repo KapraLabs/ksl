@@ -183,7 +183,7 @@ fn compile_file(
 
     // Parse
     let ast = parse(&source)
-        .map_err(|e| KslError::parse_error(e.message, e.position))?;
+        .map_err(|e| KslError::parse(e.message, e.position, "CLI001".to_string()))?;
 
     // Type-check
     check(&ast)
@@ -217,7 +217,7 @@ fn compile_file(
 
     // Compile with options
     let mut bytecode = compile(&ast, &options)
-        .map_err(|errors| KslError::compile_errors(errors))?;
+        .map_err(|errors| KslError::compile(errors.to_string(), SourcePosition::new(1, 1), "CLI002".to_string()))?;
 
     // Apply optimizations based on level
     bytecode = match opt_level {
@@ -268,7 +268,7 @@ fn run_file(file: &PathBuf, async_support: bool, jit: bool, debug: bool) -> Resu
 
     // Parse
     let ast = parse(&source)
-        .map_err(|e| KslError::parse_error(e.message, e.position))?;
+        .map_err(|e| KslError::parse(e.message, e.position, "CLI001".to_string()))?;
 
     // Type-check
     check(&ast)
@@ -276,7 +276,7 @@ fn run_file(file: &PathBuf, async_support: bool, jit: bool, debug: bool) -> Resu
 
     // Compile
     let bytecode = compile(&ast)
-        .map_err(|errors| KslError::compile_errors(errors))?;
+        .map_err(|errors| KslError::compile(errors.to_string(), SourcePosition::new(1, 1), "CLI002".to_string()))?;
 
     // Run with options
     if jit {

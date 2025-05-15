@@ -113,7 +113,7 @@ impl ModuleSystem {
                     SourcePosition::new(1, 1),
                 ))?;
             parse(&source)
-                .map_err(|e| KslError::parse_error(e.message, e.position))?
+                .map_err(|e| KslError::parse(e.message, e.position, "E201".to_string()))?
         } else {
             vec![]
         };

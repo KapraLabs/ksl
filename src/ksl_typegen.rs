@@ -62,6 +62,7 @@ impl TypeGen {
             .map_err(|e| KslError::type_error(
                 format!("Failed to read schema file {}: {}", self.config.schema_file.display(), e),
                 pos,
+                "TYPEGEN_READ_ERROR".to_string()
             ))?;
 
         // Generate types based on source type
@@ -70,10 +71,12 @@ impl TypeGen {
             "protobuf" => return Err(KslError::type_error(
                 "Protobuf support not implemented".to_string(),
                 pos,
+                "TYPEGEN_PROTO_UNSUPPORTED".to_string()
             )),
             _ => return Err(KslError::type_error(
                 format!("Unsupported source type: {}", self.config.source_type),
                 pos,
+                "TYPEGEN_SOURCE_TYPE_ERROR".to_string()
             )),
         };
 
@@ -82,6 +85,7 @@ impl TypeGen {
             .map_err(|e| KslError::type_error(
                 format!("Generated code parse error at position {}: {}", e.position, e.message),
                 pos,
+                "TYPEGEN_PARSE_ERROR".to_string()
             ))?;
         check(&ast)
             .map_err(|errors| KslError::type_error(
@@ -90,6 +94,7 @@ impl TypeGen {
                     .collect::<Vec<_>>()
                     .join("\n"),
                 pos,
+                "TYPEGEN_CHECK_ERROR".to_string()
             ))?;
 
         // Write generated code
@@ -97,17 +102,19 @@ impl TypeGen {
             .map_err(|e| KslError::type_error(
                 format!("Failed to create output file {}: {}", self.config.output_file.display(), e),
                 pos,
+                "TYPEGEN_FILE_CREATE_ERROR".to_string()
             ))?
             .write_all(ksl_code.as_bytes())
             .map_err(|e| KslError::type_error(
                 format!("Failed to write output file {}: {}", self.config.output_file.display(), e),
                 pos,
+                "TYPEGEN_FILE_WRITE_ERROR".to_string()
             ))?;
 
         // Generate documentation for the types
         let doc_dir = self.config.output_file.parent().unwrap_or_else(|| PathBuf::from("."));
         generate_docgen("generated_types", "markdown", doc_dir.to_path_buf())
-            .map_err(|e| KslError::type_error(format!("Documentation generation failed: {}", e), pos))?;
+            .map_err(|e| KslError::type_error(format!("Documentation generation failed: {}", e), pos, "TYPEGEN_DOC_ERROR".to_string()))?;
 
         Ok(())
     }
@@ -120,6 +127,7 @@ impl TypeGen {
             .map_err(|e| KslError::type_error(
                 format!("Failed to parse JSON schema: {}", e),
                 pos,
+                "TYPEGEN_JSON_PARSE_ERROR".to_string()
             ))?;
 
         let mut ksl_code = String::new();
@@ -150,6 +158,7 @@ impl TypeGen {
                     .ok_or_else(|| KslError::type_error(
                         "Schema must have properties for object type".to_string(),
                         pos,
+                        "TYPEGEN_MISSING_PROPERTIES".to_string()
                     ))?;
                 let required = obj.get("required")
                     .and_then(|r| r.as_array())
@@ -179,12 +188,14 @@ impl TypeGen {
                 return Err(KslError::type_error(
                     "Schema root must be an object type".to_string(),
                     pos,
+                    "TYPEGEN_ROOT_TYPE_ERROR".to_string()
                 ));
             }
         } else {
             return Err(KslError::type_error(
                 "Schema must be a JSON object".to_string(),
                 pos,
+                "TYPEGEN_SCHEMA_TYPE_ERROR".to_string()
             ));
         }
 
@@ -199,6 +210,7 @@ impl TypeGen {
             .ok_or_else(|| KslError::type_error(
                 "Schema property must have a type".to_string(),
                 pos,
+                "TYPEGEN_PROPERTY_TYPE_ERROR".to_string()
             ))?;
 
         match schema_type {
@@ -211,6 +223,7 @@ impl TypeGen {
                     .ok_or_else(|| KslError::type_error(
                         "Array schema must have items".to_string(),
                         pos,
+                        "TYPEGEN_ARRAY_ITEMS_ERROR".to_string()
                     ))?;
                 let (item_type, is_optional) = self.json_type_to_ksl(items)?;
                 let size = schema.get("maxItems")
@@ -241,6 +254,7 @@ impl TypeGen {
                     .ok_or_else(|| KslError::type_error(
                         "Object schema must have properties".to_string(),
                         pos,
+                        "TYPEGEN_OBJECT_PROPERTIES_ERROR".to_string()
                     ))?;
                 let required = schema.get("required")
                     .and_then(|r| r.as_array())
@@ -272,6 +286,7 @@ impl TypeGen {
             _ => Err(KslError::type_error(
                 format!("Unsupported schema type: {}", schema_type),
                 pos,
+                "TYPEGEN_UNSUPPORTED_TYPE".to_string()
             )),
         }
     }
@@ -290,6 +305,7 @@ pub fn typegen(
         return Err(KslError::type_error(
             format!("Unsupported source type: {}. Use 'json' or 'protobuf'", source_type),
             pos,
+            "TYPEGEN_INVALID_SOURCE_TYPE".to_string()
         ));
     }
 

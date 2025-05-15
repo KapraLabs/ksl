@@ -994,9 +994,18 @@ pub struct ValidatorInfo {
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum ValidatorStatus {
+    /// Registered but not active
+    Registered,
+    /// Active and validating
     Active,
-    Inactive,
+    /// Temporarily suspended
+    Suspended,
+    /// Permanently slashed
     Slashed,
+    /// Voluntarily exited
+    Exited,
+    /// Legacy inactive state (for backward compatibility)
+    Inactive,
 }
 
 #[cfg(test)]

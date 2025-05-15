@@ -144,33 +144,37 @@ impl BenchmarkTool {
             .map_err(|e| KslError::type_error(
                 format!("Failed to read file {}: {}", self.config.input_file.display(), e),
                 pos,
+                "BENCHMARK_READ_ERROR".to_string()
             ))?;
         let ast = parse(&source)
             .map_err(|e| KslError::type_error(
                 format!("Parse error at position {}: {}", e.position, e.message),
                 pos,
+                "BENCHMARK_PARSE_ERROR".to_string()
             ))?;
-        check(&ast)
+        check(ast.as_slice())
             .map_err(|errors| KslError::type_error(
                 errors.into_iter()
                     .map(|e| format!("Type error at position {}: {}", e.position, e.message))
                     .collect::<Vec<_>>()
                     .join("\n"),
                 pos,
+                "BENCHMARK_CHECK_ERROR".to_string()
             ))?;
-        let mut bytecode = compile(&ast)
+        let mut bytecode = compile(ast.as_slice())
             .map_err(|errors| KslError::type_error(
                 errors.into_iter()
                     .map(|e| format!("Compile error at position {}: {}", e.position, e.message))
                     .collect::<Vec<_>>()
                     .join("\n"),
                 pos,
+                "BENCHMARK_COMPILE_ERROR".to_string()
             ))?;
 
         // Optimize if specified
         if self.config.optimize {
             optimize(&mut bytecode, 3) // Use highest optimization level
-                .map_err(|e| KslError::type_error(format!("Bytecode optimization failed: {}", e), pos))?;
+                .map_err(|e| KslError::type_error(format!("Bytecode optimization failed: {}", e), pos, "BENCHMARK_OPTIMIZE_ERROR".to_string()))?;
         }
 
         // Initialize metrics
@@ -210,16 +214,16 @@ impl BenchmarkTool {
 
             // Run with metrics collection
             if let Some(collector) = &self.metrics_collector {
-                collector.start_collection();
+                collector.expect("Failed to initialize metrics collector").start_collection();
             }
 
             let iter_start = Instant::now();
             if self.config.enable_async {
                 vm.run_async().await
-                    .map_err(|e| KslError::type_error(format!("Async execution error: {}", e), pos))?;
+                    .map_err(|e| KslError::type_error(format!("Async execution error: {}", e), pos, "BENCHMARK_ASYNC_EXEC_ERROR".to_string()))?;
             } else {
                 vm.run()
-                    .map_err(|e| KslError::type_error(format!("Execution error: {}", e), pos))?;
+                    .map_err(|e| KslError::type_error(format!("Execution error: {}", e), pos, "BENCHMARK_EXEC_ERROR".to_string()))?;
             }
             let iter_duration = iter_start.elapsed();
 
@@ -302,11 +306,13 @@ impl BenchmarkTool {
                         .map_err(|e| KslError::type_error(
                             format!("Failed to create output file {}: {}", output_path.display(), e),
                             pos,
+                            "BENCHMARK_OUTPUT_FILE_ERROR".to_string()
                         ))?
                         .write_all(content.as_bytes())
                         .map_err(|e| KslError::type_error(
                             format!("Failed to write output file {}: {}", output_path.display(), e),
                             pos,
+                            "BENCHMARK_OUTPUT_FILE_WRITE_ERROR".to_string()
                         ))?;
                 }
                 "json" => {
@@ -342,16 +348,19 @@ impl BenchmarkTool {
                         .map_err(|e| KslError::type_error(
                             format!("Failed to create output file {}: {}", output_path.display(), e),
                             pos,
+                            "BENCHMARK_OUTPUT_FILE_ERROR".to_string()
                         ))?
                         .write_all(serde_json::to_string_pretty(&json_data)?.as_bytes())
                         .map_err(|e| KslError::type_error(
                             format!("Failed to write output file {}: {}", output_path.display(), e),
                             pos,
+                            "BENCHMARK_OUTPUT_FILE_WRITE_ERROR".to_string()
                         ))?;
                 }
                 _ => return Err(KslError::type_error(
                     format!("Unsupported output format: {}", self.config.output_format),
                     pos,
+                    "BENCHMARK_FORMAT_ERROR".to_string()
                 )),
             }
         } else {
@@ -416,6 +425,7 @@ pub async fn benchmark(
         return Err(KslError::type_error(
             format!("Invalid output format: {}. Use 'csv' or 'json'", output_format),
             pos,
+            "BENCHMARK_FORMAT_ERROR".to_string()
         ));
     }
 

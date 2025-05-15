@@ -228,32 +228,37 @@ impl MetricsCollector {
             .map_err(|e| KslError::type_error(
                 format!("Failed to read file {}: {}", file.display(), e),
                 pos,
+                "METRICS_FILE_READ_ERROR".to_string()
             ))?;
         let ast = parse(&source)
             .map_err(|e| KslError::type_error(
                 format!("Parse error at position {}: {}", e.position, e.message),
                 pos,
+                "METRICS_PARSE_ERROR".to_string()
             ))?;
-        check(&ast)
+        check(ast.as_slice())
             .map_err(|errors| KslError::type_error(
                 errors.into_iter()
                     .map(|e| format!("Type error at position {}: {}", e.position, e.message))
                     .collect::<Vec<_>>()
                     .join("\n"),
                 pos,
+                "METRICS_TYPE_ERROR".to_string()
             ))?;
-        let bytecode = compile(&ast)
+        let bytecode = compile(ast.as_slice())
             .map_err(|errors| KslError::type_error(
                 errors.into_iter()
                     .map(|e| format!("Compile error at position {}: {}", e.position, e.message))
                     .collect::<Vec<_>>()
                     .join("\n"),
                 pos,
+                "METRICS_COMPILE_ERROR".to_string()
             ))?;
 
         // Run program with metrics
         let trace_id = if self.config.trace_enabled {
-            Some(format!("trace-{}", rand::thread_rng().gen::<u64>()))
+            let mut rng = rand::thread_rng();
+            Some(format!("trace-{}", rng.next_u64()))
         } else {
             None
         };
@@ -262,7 +267,7 @@ impl MetricsCollector {
         if let Err(e) = vm.run() {
             self.data.lock().unwrap().error_count.add(1, &[]);
             self.log_error(&format!("Runtime error: {}", e), trace_id.as_deref());
-            return Err(KslError::type_error(format!("Execution error: {}", e), pos));
+            return Err(KslError::type_error(format!("Execution error: {}", e), pos, "METRICS_EXECUTION_ERROR".to_string()));
         }
         let duration = start.elapsed();
 
@@ -305,6 +310,7 @@ impl MetricsCollector {
                 .map_err(|e| KslError::type_error(
                     format!("Failed to write logs to {}: {}", log_path.display(), e),
                     pos,
+                    "METRICS_LOG_WRITE_ERROR".to_string()
                 ))?;
         }
 
@@ -543,6 +549,7 @@ pub fn collect_metrics(file: &PathBuf, otel_endpoint: Option<String>, log_path: 
         trace_enabled,
     };
     let collector = MetricsCollector::new(config)?;
+    collector.start_collection();
     collector.collect(file)
 }
 
@@ -648,7 +655,7 @@ pub fn export_metrics_to_csv(tps: usize, duration: Duration, result: &BlockResul
     // Write metrics
     writeln!(
         file,
-        "{},{},{},{},{},{},{},{},{:.2}",
+        "{},{},{},{},{},{},{},{}",
         timestamp,
         tps,
         duration.as_millis(),

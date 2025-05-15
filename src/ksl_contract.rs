@@ -533,7 +533,7 @@ impl ContractRegistry {
         // Check for version conflicts
         if let Some(existing) = self.modules.get(&id) {
             if existing.version == version {
-                return Err(KslError::runtime_error(
+                return Err(KslError::runtime(
                     format!("Contract version {} already registered", version.major),
                     None,
                 ));
@@ -560,7 +560,11 @@ impl ContractRegistry {
     /// Migrates a contract to a new version
     pub fn migrate_contract(&mut self, id: &ContractId, target_version: &ContractVersion) -> Result<(), KslError> {
         let module = self.modules.get(id).ok_or_else(|| 
-            KslError::runtime_error("Contract not found".to_string(), None)
+            KslError::runtime(
+                format!("Contract '{}' not found", id.to_vec().iter().map(|b| format!("{:02x}", b)).collect::<String>()),
+                0, // No instruction position for contract operations
+                "CONT002".to_string()
+            )
         )?;
 
         // Create new module with target version

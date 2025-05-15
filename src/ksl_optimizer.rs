@@ -451,6 +451,7 @@ impl Optimizer {
                     self.errors.push(KslError::type_error(
                         "Incomplete LOOP instruction".to_string(),
                         SourcePosition::new(1, 1),
+                        "OPTIMIZER_INCOMPLETE_LOOP".to_string()
                     ));
                     return bytecode;
                 }

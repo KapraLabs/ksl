@@ -27,6 +27,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use tar::Header;
 use flate2::Compress;
+use reqwest::StatusCode;
 
 /// Package publish configuration
 #[derive(Debug, Clone)]
@@ -272,15 +273,17 @@ impl PackagePublisher {
             .body(compressed)
             .send()
             .await
-            .map_err(|e| KslError::network_error(
-                format!("Failed to upload package: {}", e),
+            .map_err(|e| KslError::network(
+                format!("Failed to publish package: {}", e),
                 SourcePosition::new(1, 1),
+                "E305".to_string()
             ))?;
 
-        if !response.status().is_success() {
-            return Err(KslError::network_error(
-                format!("Failed to upload package: {}", response.status()),
+        if response.status() != StatusCode::OK {
+            return Err(KslError::network(
+                format!("Failed to publish package: HTTP {}", response.status()),
                 SourcePosition::new(1, 1),
+                "E306".to_string()
             ));
         }
 
@@ -375,15 +378,17 @@ impl PackagePublisher {
             .header("Authorization", format!("Bearer {}", token))
             .send()
             .await
-            .map_err(|e| KslError::network_error(
+            .map_err(|e| KslError::network(
                 format!("Failed to yank package: {}", e),
                 SourcePosition::new(1, 1),
+                "E309".to_string()
             ))?;
         
-        if !response.status().is_success() {
-            return Err(KslError::network_error(
-                format!("Failed to yank package: {}", response.status()),
+        if response.status() != StatusCode::OK {
+            return Err(KslError::network(
+                format!("Failed to yank package: HTTP {}", response.status()),
                 SourcePosition::new(1, 1),
+                "E310".to_string()
             ));
         }
 
@@ -404,15 +409,17 @@ impl PackagePublisher {
             .json(&json!({ "reason": reason }))
                     .send()
                     .await
-            .map_err(|e| KslError::network_error(
+            .map_err(|e| KslError::network(
                 format!("Failed to deprecate package: {}", e),
                 SourcePosition::new(1, 1),
+                "E311".to_string()
             ))?;
 
-        if !response.status().is_success() {
-            return Err(KslError::network_error(
-                format!("Failed to deprecate package: {}", response.status()),
+        if response.status() != StatusCode::OK {
+            return Err(KslError::network(
+                format!("Failed to deprecate package: HTTP {}", response.status()),
                 SourcePosition::new(1, 1),
+                "E312".to_string()
             ));
         }
 
@@ -432,15 +439,17 @@ impl PackagePublisher {
             .header("Authorization", format!("Bearer {}", token))
             .send()
             .await
-            .map_err(|e| KslError::network_error(
+            .map_err(|e| KslError::network(
                 format!("Failed to rollback package: {}", e),
                 SourcePosition::new(1, 1),
+                "E313".to_string()
             ))?;
 
-        if !response.status().is_success() {
-            return Err(KslError::network_error(
-                format!("Failed to rollback package: {}", response.status()),
+        if response.status() != StatusCode::OK {
+            return Err(KslError::network(
+                format!("Failed to rollback package: HTTP {}", response.status()),
                 SourcePosition::new(1, 1),
+                "E314".to_string()
             ));
         }
 

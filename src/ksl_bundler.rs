@@ -109,7 +109,7 @@ impl Bundler {
                 pos,
                 "E0004".to_string()
             ))?;
-        let mut bytecode = compile(&ast)
+        let mut bytecode = compile(ast.as_slice())
             .map_err(|errors| KslError::type_error(
                 errors.into_iter()
                     .map(|e| format!("Compile error at position {}: {}", e.position, e.message))

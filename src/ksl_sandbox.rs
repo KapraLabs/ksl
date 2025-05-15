@@ -309,11 +309,11 @@ impl Sandbox {
         }
 
         // Type-check
-        check(&ast)
+        check(ast.as_slice())
             .map_err(|errors| errors)?;
 
         // Compile
-        let bytecode = compile(&ast)
+        let bytecode = compile(ast.as_slice())
             .map_err(|errors| errors.into_iter().map(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1))).collect())?;
 
         // Apply containerization if enabled
@@ -532,7 +532,7 @@ impl SandboxManager {
             if let Some(profile_path) = &config.seccomp_profile {
                 if profile_path.exists() {
                     let profile_content = fs::read_to_string(profile_path)
-                        .map_err(|e| KslError::config_error(format!("Failed to read seccomp profile: {}", e)))?;
+                        .map_err(|e| KslError::type_error(format!("Failed to read seccomp profile: {}", e), SourcePosition::new(1, 1), "E901".to_string()))?;
                     
                     // Determine format (JSON or TOML) and compile
                     let filter = if profile_path.extension().map_or(false, |ext| ext == "json") {
@@ -540,10 +540,10 @@ impl SandboxManager {
                     } else if profile_path.extension().map_or(false, |ext| ext == "toml") {
                         seccomp_compile::compile_from_toml(&profile_content, None, None, None)
                     } else {
-                        return Err(KslError::config_error("Unsupported seccomp profile format".to_string()));
+                        return Err(KslError::type_error("Unsupported seccomp profile format".to_string(), SourcePosition::new(1, 1), "E902".to_string()));
                     };
 
-                    seccomp_filters.insert("default".to_string(), filter.map_err(|e| KslError::config_error(format!("Failed to compile seccomp profile: {}",e)))?);
+                    seccomp_filters.insert("default".to_string(), filter.map_err(|e| KslError::type_error(format!("Failed to compile seccomp profile: {}", e), SourcePosition::new(1, 1), "E903".to_string()))?);
                 }
             }
         }
@@ -567,7 +567,7 @@ impl SandboxManager {
         #[cfg(target_os = "linux")]
         {
             if let Some(filter) = self.seccomp_filters.get("default") { // Or contract_id specific
-                filter.apply().map_err(|e| KslError::runtime_error(format!("Failed to apply seccomp filter: {}", e), None))?;
+                filter.apply().map_err(|e| KslError::runtime(format!("Failed to apply seccomp filter: {}", e), 0, "E904".to_string()))?;
             }
         }
         // ... rest of the function

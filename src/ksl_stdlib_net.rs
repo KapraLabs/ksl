@@ -388,6 +388,7 @@ impl NetStdLib {
         let func = self.get_function(name).ok_or_else(|| KslError::type_error(
             format!("Undefined networking function: {}", name),
             position,
+            "NET_UNDEFINED_FUNCTION".to_string()
         ))?;
         if arg_types.len() != func.params.len() {
             return Err(KslError::type_error(
@@ -397,6 +398,7 @@ impl NetStdLib {
                     arg_types.len()
                 ),
                 position,
+                "NET_ARGUMENT_COUNT_ERROR".to_string()
             ));
         }
         for (expected, actual) in func.params.iter().zip(arg_types) {
@@ -404,6 +406,7 @@ impl NetStdLib {
                 return Err(KslError::type_error(
                     format!("Argument type mismatch: expected {:?}, got {:?}", expected, actual),
                     position,
+                    "NET_TYPE_MISMATCH_ERROR".to_string()
                 ));
             }
         }
@@ -428,6 +431,7 @@ impl NetStdLib {
         let func = self.get_function(name).ok_or_else(|| KslError::type_error(
             format!("Undefined networking function: {}", name),
             SourcePosition::new(1, 1),
+            "NET_UNDEFINED_FUNCTION".to_string()
         ))?;
         if arg_regs.len() != func.params.len() {
             return Err(KslError::type_error(
@@ -437,6 +441,7 @@ impl NetStdLib {
                     arg_regs.len()
                 ),
                 SourcePosition::new(1, 1),
+                "NET_ARGUMENT_COUNT_ERROR".to_string()
             ));
         }
 
@@ -453,6 +458,7 @@ impl NetStdLib {
             None => Err(KslError::type_error(
                 format!("No implementation for {}", name),
                 SourcePosition::new(1, 1),
+                "NET_IMPLEMENTATION_ERROR".to_string()
             )),
         }
     }
@@ -469,6 +475,7 @@ impl NetStdLib {
                     return Err(KslError::type_error(
                         format!("tcp.connect expects 2 arguments, got {}", args.len()),
                         pos,
+                        "NET_ARGUMENT_COUNT_ERROR".to_string()
                     ));
                 }
                 let host = match &args[0] {
@@ -485,6 +492,7 @@ impl NetStdLib {
                     .map_err(|e| KslError::type_error(
                         format!("tcp.connect failed: {}", e),
                         pos,
+                        "NET_TCP_CONNECT_ERROR".to_string()
                     ))?;
                 Ok(Value::U32(stream.local_addr().unwrap().port() as u32))
             }
@@ -493,6 +501,7 @@ impl NetStdLib {
                     return Err(KslError::type_error(
                         format!("udp.send expects 3 arguments, got {}", args.len()),
                         pos,
+                        "NET_ARGUMENT_COUNT_ERROR".to_string()
                     ));
                 }
                 let host = match &args[0] {
@@ -510,13 +519,14 @@ impl NetStdLib {
                             _ => Err(KslError::type_error("udp.send: data must be an array of u8".to_string(), pos, "E505".to_string())),
                         }).collect::<Result<Vec<u8>, KslError>>()?
                     }
-                    _ => return Err(KslError::type_error("udp.send: data must be an array<u8, 1024>".to_string(), pos)),
+                    _ => return Err(KslError::type_error("udp.send: data must be an array<u8, 1024>".to_string(), pos, "E515".to_string())),
                 };
                 let socket = UdpSocket::bind("0.0.0.0:0")
                     .await
                     .map_err(|e| KslError::type_error(
                         format!("udp.send failed to bind: {}", e),
                         pos,
+                        "NET_UDP_BIND_ERROR".to_string()
                     ))?;
                 let address = format!("{}:{}", host, port);
                 let bytes_sent = socket.send_to(&data, &address)
@@ -524,6 +534,7 @@ impl NetStdLib {
                     .map_err(|e| KslError::type_error(
                         format!("udp.send failed: {}", e),
                         pos,
+                        "NET_UDP_SEND_ERROR".to_string()
                     ))?;
                 Ok(Value::U32(bytes_sent as u32))
             }
@@ -532,6 +543,7 @@ impl NetStdLib {
                     return Err(KslError::type_error(
                         format!("http.get expects 1 argument, got {}", args.len()),
                         pos,
+                        "NET_ARGUMENT_COUNT_ERROR".to_string()
                     ));
                 }
                 let url = match &args[0] {
@@ -543,6 +555,7 @@ impl NetStdLib {
                     .map_err(|e| KslError::type_error(
                         format!("http.get failed: {}", e),
                         pos,
+                        "NET_HTTP_GET_ERROR".to_string()
                     ))?;
                 Ok(Value::String(response))
             }
@@ -551,6 +564,7 @@ impl NetStdLib {
                     return Err(KslError::type_error(
                         format!("http.post expects 2 arguments, got {}", args.len()),
                         pos,
+                        "NET_ARGUMENT_COUNT_ERROR".to_string()
                     ));
                 }
                 let url = match &args[0] {
@@ -566,6 +580,7 @@ impl NetStdLib {
                     .map_err(|e| KslError::type_error(
                         format!("http.post failed: {}", e),
                         pos,
+                        "NET_HTTP_POST_ERROR".to_string()
                     ))?;
                 Ok(Value::String(response))
             }
@@ -574,6 +589,7 @@ impl NetStdLib {
                     return Err(KslError::type_error(
                         format!("rdma.connect expects 2 arguments, got {}", args.len()),
                         pos,
+                        "NET_ARGUMENT_COUNT_ERROR".to_string()
                     ));
                 }
                 let host = match &args[0] {
@@ -590,6 +606,7 @@ impl NetStdLib {
                     let conn_id = rdma.connect(host, port).await.map_err(|e| KslError::type_error(
                         format!("rdma.connect failed: {}", e),
                         pos,
+                        "NET_RDMA_CONNECT_ERROR".to_string()
                     ))?;
                     Ok(Value::U64(conn_id))
                 } else {
@@ -601,6 +618,7 @@ impl NetStdLib {
                     return Err(KslError::type_error(
                         format!("rdma.send expects 2 arguments, got {}", args.len()),
                         pos,
+                        "NET_ARGUMENT_COUNT_ERROR".to_string()
                     ));
                 }
                 let conn_id = match &args[0] {
@@ -614,7 +632,7 @@ impl NetStdLib {
                             _ => Err(KslError::type_error("rdma.send: data must be an array of u8".to_string(), pos, "E513".to_string())),
                         }).collect::<Result<Vec<u8>, KslError>>()?
                     }
-                    _ => return Err(KslError::type_error("rdma.send: data must be an array<u8, 1024>".to_string(), pos)),
+                    _ => return Err(KslError::type_error("rdma.send: data must be an array<u8, 1024>".to_string(), pos, "E516".to_string())),
                 };
 
                 if let Some(rdma) = &self.rdma_context {
@@ -622,6 +640,7 @@ impl NetStdLib {
                     let bytes_sent = rdma.send(conn_id, &data).await.map_err(|e| KslError::type_error(
                         format!("rdma.send failed: {}", e),
                         pos,
+                        "NET_RDMA_SEND_ERROR".to_string()
                     ))?;
                     Ok(Value::U32(bytes_sent as u32))
                 } else {
@@ -633,6 +652,7 @@ impl NetStdLib {
                     return Err(KslError::type_error(
                         format!("p2p.connect expects 1 argument, got {}", args.len()),
                         pos,
+                        "NET_ARGUMENT_COUNT_ERROR".to_string()
                     ));
                 }
                 let peer_id = match &args[0] {
@@ -644,12 +664,14 @@ impl NetStdLib {
                 let success = p2p.connect(peer_id).await.map_err(|e| KslError::type_error(
                     format!("p2p.connect failed: {}", e),
                     pos,
+                    "NET_P2P_CONNECT_ERROR".to_string()
                 ))?;
                 Ok(Value::Bool(success))
             }
             _ => Err(KslError::type_error(
                 format!("Undefined networking function: {}", name),
                 pos,
+                "NET_UNDEFINED_FUNCTION".to_string()
             )),
         }
     }

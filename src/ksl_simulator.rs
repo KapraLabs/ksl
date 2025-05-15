@@ -184,6 +184,7 @@ impl Simulator {
             .map_err(|e| KslError::type_error(
                 e.into_iter().map(|e| e.to_string()).collect::<Vec<_>>().join("\n"),
                 pos,
+                "SIMULATOR_SANDBOX_ERROR".to_string()
             ))?;
 
         // Simulate execution
@@ -194,6 +195,7 @@ impl Simulator {
             _ => Err(KslError::type_error(
                 format!("Unsupported environment: {}", self.config.env),
                 pos,
+                "SIMULATOR_ENV_ERROR".to_string()
             )),
         }?;
 
@@ -203,6 +205,7 @@ impl Simulator {
                 .map_err(|e| KslError::type_error(
                     format!("Failed to write logs to {}: {}", log_path.display(), e),
                     pos,
+                    "SIMULATOR_LOG_ERROR".to_string()
                 ))?;
         }
 
@@ -232,6 +235,7 @@ impl Simulator {
             .map_err(|e| KslError::type_error(
                 format!("Blockchain simulation error: {}", e),
                 pos,
+                "SIMULATOR_BLOCKCHAIN_ERROR".to_string()
             ))?;
 
         Ok(())
@@ -256,6 +260,7 @@ impl Simulator {
             .map_err(|e| KslError::type_error(
                 format!("IoT simulation error: {}", e),
                 pos,
+                "SIMULATOR_IOT_ERROR".to_string()
             ))?;
 
         Ok(())
@@ -314,6 +319,7 @@ impl Simulator {
             .map_err(|e| KslError::type_error(
                 format!("Network simulation error: {}", e),
                 pos,
+                "SIMULATOR_NETWORK_ERROR".to_string()
             ))?;
 
         Ok(())
@@ -385,27 +391,31 @@ pub fn simulate(file: &PathBuf, env: &str, blockchain_latency: Option<Duration>,
         .map_err(|e| KslError::type_error(
             format!("Failed to read file {}: {}", file.display(), e),
             pos,
+            "SIMULATOR_FILE_READ_ERROR".to_string()
         ))?;
     let ast = parse(&source)
         .map_err(|e| KslError::type_error(
             format!("Parse error at position {}: {}", e.position, e.message),
             pos,
+            "SIMULATOR_PARSE_ERROR".to_string()
         ))?;
-    check(&ast)
+    check(ast.as_slice())
         .map_err(|errors| KslError::type_error(
             errors.into_iter()
                 .map(|e| format!("Type error at position {}: {}", e.position, e.message))
                 .collect::<Vec<_>>()
                 .join("\n"),
             pos,
+            "SIMULATOR_TYPE_ERROR".to_string()
         ))?;
-    let bytecode = compile(&ast)
+    let bytecode = compile(ast.as_slice())
         .map_err(|errors| KslError::type_error(
             errors.into_iter()
                 .map(|e| format!("Compile error at position {}: {}", e.position, e.message))
                 .collect::<Vec<_>>()
                 .join("\n"),
             pos,
+            "SIMULATOR_COMPILE_ERROR".to_string()
         ))?;
 
     let config = SimConfig {

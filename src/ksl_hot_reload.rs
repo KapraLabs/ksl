@@ -209,9 +209,10 @@ impl ReloadableModule {
 
 /// Calculates checksum for a file
 pub fn calculate_checksum(path: &str) -> Result<u64, KslError> {
-    let bytes = fs::read(path).map_err(|e| KslError::runtime_error(
+    let bytes = fs::read(path).map_err(|e| KslError::runtime(
         format!("Failed to read file for checksum: {}", e),
-        None,
+        0, // No instruction position for file operations
+        "HR101".to_string()
     ))?;
     let mut hasher = SipHasher::new();
     hasher.write(&bytes);
@@ -336,18 +337,19 @@ impl HotReloadManager {
 
         // Create state directory
         let state_dir = PathBuf::from("./state");
-        fs::create_dir_all(&state_dir).map_err(|e| KslError::runtime_error(
+        fs::create_dir_all(&state_dir).map_err(|e| KslError::runtime(
             format!("Failed to create state directory: {}", e),
             pos,
+            "HR102".to_string()
         ))?;
 
         // Load public keys for signature verification
         let keys_file = PathBuf::from("./keys/module_keys.json");
         let public_keys = if keys_file.exists() {
             let keys_str = fs::read_to_string(&keys_file)
-                .map_err(|e| KslError::runtime_error(format!("Failed to read keys file: {}", e), pos))?;
+                .map_err(|e| KslError::runtime(format!("Failed to read keys file: {}", e), pos, "HR103".to_string()))?;
             serde_json::from_str(&keys_str)
-                .map_err(|e| KslError::runtime_error(format!("Failed to parse keys file: {}", e), pos))?
+                .map_err(|e| KslError::runtime(format!("Failed to parse keys file: {}", e), pos, "HR104".to_string()))?
         } else {
             HashMap::new()
         };
@@ -368,11 +370,11 @@ impl HotReloadManager {
     /// Roll back a module to a specific version
     pub fn rollback_module(&mut self, module_name: &str, version: u64) -> Result<(), KslError> {
         let history = self.version_history.get_mut(module_name)
-            .ok_or_else(|| KslError::runtime_error(format!("No version history for module {}", module_name), None))?;
+            .ok_or_else(|| KslError::runtime(format!("No version history for module {}", module_name), None, "HR105".to_string()))?;
 
         // Find the version entry
         let entry = history.rollback_to(version)
-            .ok_or_else(|| KslError::runtime_error(format!("Version {} not found for module {}", version, module_name), None))?;
+            .ok_or_else(|| KslError::runtime(format!("Version {} not found for module {}", version, module_name), None, "HR106".to_string()))?;
 
         // Save current state
         if let Some(module) = self.modules.get(module_name) {
@@ -414,14 +416,14 @@ impl HotReloadManager {
 
         // Read module file and signature
         let module_bytes = fs::read(path)
-            .map_err(|e| KslError::runtime_error(format!("Failed to read module file: {}", e), pos))?;
+            .map_err(|e| KslError::runtime(format!("Failed to read module file: {}", e), pos, "HR107".to_string()))?;
         
         let sig_path = path.with_extension("sig");
         let signature_bytes = fs::read(&sig_path)
-            .map_err(|e| KslError::runtime_error(format!("Failed to read signature file: {}", e), pos))?;
+            .map_err(|e| KslError::runtime(format!("Failed to read signature file: {}", e), pos, "HR108".to_string()))?;
         
         let signature = Signature::from_bytes(&signature_bytes)
-            .map_err(|e| KslError::runtime_error(format!("Invalid signature: {}", e), pos))?;
+            .map_err(|e| KslError::runtime(format!("Invalid signature: {}", e), pos, "HR109".to_string()))?;
 
         // Verify signature
         match public_key.verify(&module_bytes, &signature) {
@@ -444,17 +446,17 @@ impl HotReloadManager {
             vec![],
             SeccompAction::Allow,
             SeccompAction::KillProcess,
-        ).map_err(|e| KslError::runtime_error(format!("Failed to create seccomp filter: {}", e), pos))?;
+        ).map_err(|e| KslError::runtime(format!("Failed to create seccomp filter: {}", e), pos, "HR110".to_string()))?;
 
         // Add allowed syscalls
         for syscall in &self.security_config.allowed_syscalls {
             filter.add_rule(syscall, SeccompAction::Allow)
-                .map_err(|e| KslError::runtime_error(format!("Failed to add syscall rule: {}", e), pos))?;
+                .map_err(|e| KslError::runtime(format!("Failed to add syscall rule: {}", e), pos, "HR111".to_string()))?;
         }
 
         // Add memory limits
         filter.set_memory_limit(self.security_config.memory_limit_mb * 1024 * 1024)
-            .map_err(|e| KslError::runtime_error(format!("Failed to set memory limit: {}", e), pos))?;
+            .map_err(|e| KslError::runtime(format!("Failed to set memory limit: {}", e), pos, "HR112".to_string()))?;
 
         Ok(filter)
     }
@@ -463,9 +465,10 @@ impl HotReloadManager {
     fn load_module_securely(&mut self, name: &str, path: &PathBuf) -> Result<(), KslError> {
         // Verify signature
         if !self.verify_module_signature(name, path)? {
-            return Err(KslError::runtime_error(
+            return Err(KslError::runtime(
                 format!("Module signature verification failed for {}", name),
                 None,
+                "HR113".to_string()
             ));
         }
 
@@ -623,23 +626,19 @@ impl HotReloadManager {
     fn compile_file(file_path: &PathBuf) -> Result<KapraBytecode, KslError> {
         let pos = SourcePosition::new(1, 1);
         let source = fs::read_to_string(file_path)
-            .map_err(|e| KslError::type_error(
-                format!("Failed to read file {}: {}", file_path.display(), e),
-                pos,
-                "E701".to_string(),
-            ))?;
+            .map_err(|e| KslError::parse(e, pos, "HR001".to_string()))?;
 
         // Parse the source code
         let ast = parse(&source)
-            .map_err(|e| KslError::parse_error(e, pos))?;
+            .map_err(|e| KslError::parse(e, pos, "HR001".to_string()))?;
 
         // Type check the AST
         check(&ast)
-            .map_err(|e| KslError::type_error(e, pos, "E701".to_string()))?;
+            .map_err(|e| KslError::compile(e, pos, "HR002".to_string()))?;
 
         // Compile to bytecode
         compile(&ast)
-            .map_err(|e| KslError::compile_error(e, pos))
+            .map_err(|e| KslError::compile(e, pos, "HR002".to_string()))
     }
 
     /// Get the current networking state
@@ -676,9 +675,10 @@ impl HotReloadManager {
             module.update_metadata(key, value);
             Ok(())
         } else {
-            Err(KslError::runtime_error(
+            Err(KslError::runtime(
                 format!("Module not found: {}", name),
                 None,
+                "HR114".to_string()
             ))
         }
     }
@@ -688,9 +688,10 @@ impl HotReloadManager {
         if let Some(module) = self.modules.get(name) {
             Ok(module.to_json())
         } else {
-            Err(KslError::runtime_error(
+            Err(KslError::runtime(
                 format!("Module not found: {}", name),
                 None,
+                "HR115".to_string()
             ))
         }
     }
@@ -726,9 +727,10 @@ impl HotReloadManager {
             result: &mut Vec<String>,
         ) -> Result<(), KslError> {
             if temp.contains(node) {
-                return Err(KslError::runtime_error(
+                return Err(KslError::runtime(
                     format!("Circular dependency detected: {}", node),
                     None,
+                    "HR116".to_string()
                 ));
             }
             if visited.contains(node) {
@@ -1195,9 +1197,10 @@ impl ModuleRegistry {
     fn load_native_module(&self, name: &str, path: &Path) -> Result<LoadedModule, KslError> {
         // Load the library
         let library = unsafe {
-            Library::new(path).map_err(|e| KslError::runtime_error(
+            Library::new(path).map_err(|e| KslError::runtime(
                 format!("Failed to load module '{}': {}", name, e),
                 None,
+                "HR107".to_string()
             ))?
         };
 
@@ -1213,9 +1216,10 @@ impl ModuleRegistry {
         unsafe {
             if let Ok(init_fn) = library.get::<InitFn>(b"ksl_module_init") {
                 if !init_fn() {
-                    return Err(KslError::runtime_error(
+                    return Err(KslError::runtime(
                         format!("Module '{}' initialization failed", name),
                         None,
+                        "HR108".to_string()
                     ));
                 }
             }
@@ -1237,14 +1241,16 @@ impl ModuleRegistry {
         let wasm_bytes = std::fs::read(path)?;
 
         // Create store and module
-        let store = self.wasm_runtime.as_ref().ok_or_else(|| KslError::runtime_error(
+        let store = self.wasm_runtime.as_ref().ok_or_else(|| KslError::runtime(
             "WASM runtime not initialized".to_string(),
             None,
+            "HR109".to_string()
         ))?;
 
-        let module = Module::new(&store, wasm_bytes).map_err(|e| KslError::runtime_error(
+        let module = Module::new(&store, wasm_bytes).map_err(|e| KslError::runtime(
             format!("Failed to create WASM module '{}': {}", name, e),
             None,
+            "HR110".to_string()
         ))?;
 
         // Create import object with required host functions
@@ -1265,9 +1271,10 @@ impl ModuleRegistry {
         };
 
         // Instantiate the module
-        let instance = Instance::new(&module, &import_object).map_err(|e| KslError::runtime_error(
+        let instance = Instance::new(&module, &import_object).map_err(|e| KslError::runtime(
             format!("Failed to instantiate WASM module '{}': {}", name, e),
             None,
+            "HR111".to_string()
         ))?;
 
         // Get exported functions
@@ -1303,22 +1310,25 @@ impl ModuleRegistry {
 
     /// Get a symbol from a module
     pub fn get_symbol<T>(&self, name: &str, symbol: &str) -> Result<Symbol<T>, KslError> {
-        let module = self.modules.get(name).ok_or_else(|| KslError::runtime_error(
-            format!("Module '{}' not found", name),
+        let module = self.modules.get(name).ok_or_else(|| KslError::runtime(
+            format!("Module '{}' not found"),
             None,
+            "HR112".to_string()
         ))?;
 
         if !module.active {
-            return Err(KslError::runtime_error(
-                format!("Module '{}' is not active", name),
+            return Err(KslError::runtime(
+                format!("Module '{}' is not active"),
                 None,
+                "HR113".to_string()
             ));
         }
 
         unsafe {
-            module.library.get(symbol.as_bytes()).map_err(|e| KslError::runtime_error(
+            module.library.get(symbol.as_bytes()).map_err(|e| KslError::runtime(
                 format!("Symbol '{}' not found in module '{}': {}", symbol, name, e),
                 None,
+                "HR114".to_string()
             ))
         }
     }
@@ -1444,14 +1454,16 @@ impl LoadedModule {
     /// Get a WASM export
     pub fn get_wasm_export(&self, name: &str) -> Result<wasmer::Function, KslError> {
         if let Some(wasm) = &self.wasm {
-            wasm.instance.exports.get_function(name).map_err(|e| KslError::runtime_error(
+            wasm.instance.exports.get_function(name).map_err(|e| KslError::runtime(
                 format!("Failed to get WASM export '{}': {}", name, e),
                 None,
+                "HR115".to_string()
             ))
         } else {
-            Err(KslError::runtime_error(
+            Err(KslError::runtime(
                 format!("Module is not a WASM module"),
                 None,
+                "HR116".to_string()
             ))
         }
     }
@@ -1459,9 +1471,10 @@ impl LoadedModule {
     /// Call a WASM export
     pub fn call_wasm_export(&self, name: &str, args: &[wasmer::Value]) -> Result<Box<[wasmer::Value]>, KslError> {
         let func = self.get_wasm_export(name)?;
-        func.call(args).map_err(|e| KslError::runtime_error(
+        func.call(args).map_err(|e| KslError::runtime(
             format!("Failed to call WASM export '{}': {}", name, e),
             None,
+            "HR117".to_string()
         ))
     }
 }

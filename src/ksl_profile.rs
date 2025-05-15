@@ -218,22 +218,25 @@ impl Profiler {
             .map_err(|e| KslError::type_error(
                 format!("Parse error at position {}: {}", e.position, e.message),
                 pos,
+                "PROFILE_PARSE_ERROR".to_string()
             ))?;
-        check(&ast)
+        check(ast.as_slice())
             .map_err(|errors| KslError::type_error(
                 errors.into_iter()
                     .map(|e| format!("Type error at position {}: {}", e.position, e.message))
                     .collect::<Vec<_>>()
                     .join("\n"),
                 pos,
+                "PROFILE_TYPE_ERROR".to_string()
             ))?;
-        let bytecode = compile(&ast)
+        let bytecode = compile(ast.as_slice())
             .map_err(|errors| KslError::type_error(
                 errors.into_iter()
                     .map(|e| format!("Compile error at position {}: {}", e.position, e.message))
                     .collect::<Vec<_>>()
                     .join("\n"),
                 pos,
+                "PROFILE_COMPILE_ERROR".to_string()
             ))?;
 
         let line_map = build_line_map(&ast, &bytecode);
@@ -318,7 +321,7 @@ impl Profiler {
             ))?;
 
         // Start metrics collection
-        self.metrics_collector.start_collection();
+        self.metrics_collector.expect("Failed to initialize metrics collector").start_collection();
 
         // Run program with async support
         vm.run_async().await

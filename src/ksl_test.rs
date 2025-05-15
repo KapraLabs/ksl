@@ -226,7 +226,7 @@ impl TestRunner {
             .map_err(|e| format!("Parse error at position {}: {}", e.position, e.message))?;
 
         // Type-check
-        check(&ast)
+        check(ast.as_slice())
             .map_err(|errors| {
                 errors
                     .into_iter()
@@ -333,7 +333,7 @@ impl TestRunner {
         for target in &[CompileTarget::VM, CompileTarget::WASM, CompileTarget::LLVM] {
             if *target == self.config.target {
                 // Compile for target
-                let bytecode = compile(ast)
+                let bytecode = compile(ast.as_slice())
                     .map_err(|errors| {
                         errors
                             .into_iter()

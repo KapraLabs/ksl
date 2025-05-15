@@ -824,13 +824,17 @@ impl ValidatorKeyManager {
     /// Signs a message with BLS
     pub fn sign_bls(&self, message: &[u8]) -> Result<Vec<u8>, KslError> {
         let keys = self.keys.as_ref().ok_or_else(|| {
-            KslError::runtime_error("No validator keys loaded".to_string(), None)
+            KslError::runtime(
+                "No validator keys loaded".to_string(),
+                0, // No instruction position for key operations
+                "VK001".to_string()
+            )
         })?;
 
         let sk = SecretKey::from_bytes(&keys.bls_secret)
-            .map_err(|_| KslError::runtime_error("Invalid BLS secret key".to_string(), None))?;
+            .map_err(|_| KslError::runtime("Invalid BLS secret key".to_string(), 0, "VK002".to_string()))?;
         let pk = PublicKey::from_bytes(&keys.bls_public)
-            .map_err(|_| KslError::runtime_error("Invalid BLS public key".to_string(), None))?;
+            .map_err(|_| KslError::runtime("Invalid BLS public key".to_string(), 0, "VK003".to_string()))?;
 
         let sig = sk.sign(message, &[], &pk, BLS_DST);
         Ok(sig.to_bytes().to_vec())
@@ -839,7 +843,11 @@ impl ValidatorKeyManager {
     /// Signs a message with Dilithium
     pub fn sign_dilithium(&self, message: &[u8]) -> Result<Vec<u8>, KslError> {
         let keys = self.keys.as_ref().ok_or_else(|| {
-            KslError::runtime_error("No validator keys loaded".to_string(), None)
+            KslError::runtime(
+                "No validator keys loaded".to_string(),
+                0, // No instruction position for key operations
+                "VK001".to_string()
+            )
         })?;
 
         // Sign using Dilithium
@@ -850,13 +858,17 @@ impl ValidatorKeyManager {
     /// Verifies a BLS signature
     pub fn verify_bls(&self, message: &[u8], signature: &[u8]) -> Result<bool, KslError> {
         let keys = self.keys.as_ref().ok_or_else(|| {
-            KslError::runtime_error("No validator keys loaded".to_string(), None)
+            KslError::runtime(
+                "No validator keys loaded".to_string(),
+                0, // No instruction position for key operations
+                "VK001".to_string()
+            )
         })?;
 
         let pk = PublicKey::from_bytes(&keys.bls_public)
-            .map_err(|_| KslError::runtime_error("Invalid BLS public key".to_string(), None))?;
+            .map_err(|_| KslError::runtime("Invalid BLS public key".to_string(), 0, "VK003".to_string()))?;
         let sig = Signature::from_bytes(signature)
-            .map_err(|_| KslError::runtime_error("Invalid BLS signature".to_string(), None))?;
+            .map_err(|_| KslError::runtime("Invalid BLS signature".to_string(), 0, "VK004".to_string()))?;
 
         Ok(sig.verify(true, message, &[], &pk, BLS_DST) == BLST_ERROR::BLST_SUCCESS)
     }
@@ -864,7 +876,11 @@ impl ValidatorKeyManager {
     /// Verifies a Dilithium signature
     pub fn verify_dilithium(&self, message: &[u8], signature: &[u8]) -> Result<bool, KslError> {
         let keys = self.keys.as_ref().ok_or_else(|| {
-            KslError::runtime_error("No validator keys loaded".to_string(), None)
+            KslError::runtime(
+                "No validator keys loaded".to_string(),
+                0, // No instruction position for key operations
+                "VK001".to_string()
+            )
         })?;
 
         // Verify using Dilithium
@@ -905,9 +921,10 @@ impl ValidatorKeyManager {
                 if let Some(keystore) = &self.keystore {
                     keystore.store_keys(keypair)?;
                 } else {
-                    return Err(KslError::runtime_error(
+                    return Err(KslError::runtime(
                         "Android Keystore not initialized".to_string(),
-                        None,
+                        0, // No instruction position for key operations
+                        "VK005".to_string()
                     ));
                 }
             }
@@ -916,9 +933,10 @@ impl ValidatorKeyManager {
                 if let Some(keychain) = &self.keychain {
                     keychain.store_keys(keypair)?;
                 } else {
-                    return Err(KslError::runtime_error(
+                    return Err(KslError::runtime(
                         "iOS Keychain not initialized".to_string(),
-                        None,
+                        0, // No instruction position for key operations
+                        "VK006".to_string()
                     ));
                 }
             }
@@ -927,9 +945,10 @@ impl ValidatorKeyManager {
                     let encrypted = self.encrypt_keypair(keypair)?;
                     fs::write(path, encrypted)?;
                 } else {
-                    return Err(KslError::runtime_error(
+                    return Err(KslError::runtime(
                         "No file path specified for key storage".to_string(),
-                        None,
+                        0, // No instruction position for key operations
+                        "VK007".to_string()
                     ));
                 }
             }
@@ -945,9 +964,10 @@ impl ValidatorKeyManager {
                 if let Some(keystore) = &self.keystore {
                     keystore.load_keys()?
                 } else {
-                    return Err(KslError::runtime_error(
+                    return Err(KslError::runtime(
                         "Android Keystore not initialized".to_string(),
-                        None,
+                        0, // No instruction position for key operations
+                        "VK005".to_string()
                     ));
                 }
             }
@@ -956,9 +976,10 @@ impl ValidatorKeyManager {
                 if let Some(keychain) = &self.keychain {
                     keychain.load_keys()?
                 } else {
-                    return Err(KslError::runtime_error(
+                    return Err(KslError::runtime(
                         "iOS Keychain not initialized".to_string(),
-                        None,
+                        0, // No instruction position for key operations
+                        "VK006".to_string()
                     ));
                 }
             }
@@ -967,9 +988,10 @@ impl ValidatorKeyManager {
                     let encrypted = fs::read(path)?;
                     self.decrypt_keypair(&encrypted)?
                 } else {
-                    return Err(KslError::runtime_error(
+                    return Err(KslError::runtime(
                         "No file path specified for key storage".to_string(),
-                        None,
+                        0, // No instruction position for key operations
+                        "VK007".to_string()
                     ));
                 }
             }
@@ -982,7 +1004,11 @@ impl ValidatorKeyManager {
     /// Encrypts a key pair for file storage
     fn encrypt_keypair(&self, keypair: &ValidatorKeyPair) -> Result<Vec<u8>, KslError> {
         let key = self.config.encryption_key.as_ref().ok_or_else(|| {
-            KslError::runtime_error("No encryption key provided".to_string(), None)
+            KslError::runtime(
+                "No encryption key provided".to_string(),
+                0, // No instruction position for key operations
+                "VK008".to_string()
+            )
         })?;
 
         let cipher = Aes256Gcm::new(Key::from_slice(key));
@@ -992,7 +1018,7 @@ impl ValidatorKeyManager {
         let serialized = serde_json::to_vec(keypair)?;
         let encrypted = cipher
             .encrypt(nonce, serialized.as_ref())
-            .map_err(|_| KslError::runtime_error("Encryption failed".to_string(), None))?;
+            .map_err(|_| KslError::runtime("Encryption failed".to_string(), 0, "VK009".to_string()))?;
 
         let mut result = nonce.to_vec();
         result.extend(encrypted);
@@ -1002,14 +1028,19 @@ impl ValidatorKeyManager {
     /// Decrypts a key pair from file storage
     fn decrypt_keypair(&self, encrypted: &[u8]) -> Result<ValidatorKeyPair, KslError> {
         if encrypted.len() < 12 {
-            return Err(KslError::runtime_error(
+            return Err(KslError::runtime(
                 "Invalid encrypted data format".to_string(),
-                None,
+                0, // No instruction position for key operations
+                "VK010".to_string()
             ));
         }
 
         let key = self.config.encryption_key.as_ref().ok_or_else(|| {
-            KslError::runtime_error("No encryption key provided".to_string(), None)
+            KslError::runtime(
+                "No encryption key provided".to_string(),
+                0, // No instruction position for key operations
+                "VK008".to_string()
+            )
         })?;
 
         let cipher = Aes256Gcm::new(Key::from_slice(key));
@@ -1018,7 +1049,7 @@ impl ValidatorKeyManager {
 
         let decrypted = cipher
             .decrypt(nonce, ciphertext)
-            .map_err(|_| KslError::runtime_error("Decryption failed".to_string(), None))?;
+            .map_err(|_| KslError::runtime("Decryption failed".to_string(), 0, "VK011".to_string()))?;
 
         let keypair: ValidatorKeyPair = serde_json::from_slice(&decrypted)?;
         Ok(keypair)
@@ -1048,6 +1079,12 @@ impl ValidatorKeyManager {
             rotation_path.set_extension("rotation");
             let serialized = serde_json::to_vec(&confirmation)?;
             fs::write(rotation_path, serialized)?;
+        } else {
+            return Err(KslError::runtime(
+                "No file path specified for rotation confirmation".to_string(),
+                0, // No instruction position for key operations
+                "VK012".to_string()
+            ));
         }
 
         Ok(())
@@ -1082,7 +1119,7 @@ mod android {
             // Initialize Android Keystore
             let keystore = env
                 .find_class("android/security/keystore/KeyGenParameterSpec")
-                .map_err(|_| KslError::runtime_error("Failed to find KeyGenParameterSpec".to_string(), None))?;
+                .map_err(|_| KslError::runtime("Failed to find KeyGenParameterSpec".to_string(), 0, "VK013".to_string()))?;
 
             Ok(AndroidKeystore { env, keystore })
         }

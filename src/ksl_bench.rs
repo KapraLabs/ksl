@@ -109,15 +109,16 @@ impl BenchmarkRunner {
             .map_err(|e| vec![KslError::type_error(
                 format!("Parse error at position {}: {}", e.position, e.message),
                 SourcePosition::new(1, 1),
+                "PARSE_ERROR".to_string()
             )])?;
 
         // Type-check
-        check(&ast)
+        check(ast.as_slice())
             .map_err(|errors| errors)?;
 
         // Compile
-        let bytecode = compile(&ast)
-            .map_err(|errors| errors.into_iter().map(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1))).collect())?;
+        let bytecode = compile(ast.as_slice())
+            .map_err(|errors| errors.into_iter().map(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1), "COMPILE_ERROR".to_string())).collect())?;
 
         // Find benchmark functions (functions with #[bench] attribute)
         let bench_functions: Vec<String> = ast.iter()
@@ -193,7 +194,7 @@ impl BenchmarkRunner {
 
         // Start metrics collection
         let metrics_collector = MetricsCollector::new();
-        metrics_collector.start_collection();
+        metrics_collector.expect("Failed to initialize metrics collector").start_collection();
 
         // Run benchmark with profiling
         let start = Instant::now();

@@ -103,11 +103,13 @@ impl ContractVerifier {
             .map_err(|e| KslError::type_error(
                 format!("Failed to read file {}: {}", self.config.input_file.display(), e),
                 pos,
+                "CONTRACT_READ_ERROR".to_string()
             ))?;
         let ast = parse(&source)
             .map_err(|e| KslError::type_error(
                 format!("Parse error at position {}: {}", e.position, e.message),
                 pos,
+                "CONTRACT_PARSE_ERROR".to_string()
             ))?;
 
         // Run security analysis
@@ -123,7 +125,7 @@ impl ContractVerifier {
 
         // Run basic verification
         verify(&ast)
-            .map_err(|e| KslError::type_error(format!("Basic verification failed: {}", e), pos))?;
+            .map_err(|e| KslError::type_error(format!("Basic verification failed: {}", e), pos, "CONTRACT_VERIFY_ERROR".to_string()))?;
 
         // Verify specific property
         match self.config.property.as_str() {
@@ -135,6 +137,7 @@ impl ContractVerifier {
             _ => return Err(KslError::type_error(
                 format!("Unsupported property: {}", self.config.property),
                 pos,
+                "CONTRACT_UNSUPPORTED_PROPERTY".to_string()
             )),
         }
 
@@ -145,11 +148,13 @@ impl ContractVerifier {
                 .map_err(|e| KslError::type_error(
                     format!("Failed to create report file {}: {}", report_path.display(), e),
                     pos,
+                    "CONTRACT_REPORT_ERROR".to_string()
                 ))?
                 .write_all(report_content.as_bytes())
                 .map_err(|e| KslError::type_error(
                     format!("Failed to write report file {}: {}", report_path.display(), e),
                     pos,
+                    "CONTRACT_REPORT_WRITE_ERROR".to_string()
                 ))?;
         } else {
             println!("{}", self.generate_report());
@@ -167,11 +172,13 @@ impl ContractVerifier {
             .map_err(|e| KslError::type_error(
                 format!("Failed to read file {}: {}", self.config.input_file.display(), e),
                 pos,
+                "CONTRACT_READ_ERROR".to_string()
             ))?;
         let ast = parse(&source)
             .map_err(|e| KslError::type_error(
                 format!("Parse error at position {}: {}", e.position, e.message),
                 pos,
+                "CONTRACT_PARSE_ERROR".to_string()
             ))?;
 
         // Run security analysis asynchronously
@@ -187,7 +194,7 @@ impl ContractVerifier {
 
         // Run basic verification
         verify(&ast)
-            .map_err(|e| KslError::type_error(format!("Basic verification failed: {}", e), pos))?;
+            .map_err(|e| KslError::type_error(format!("Basic verification failed: {}", e), pos, "CONTRACT_VERIFY_ERROR".to_string()))?;
 
         // Verify specific property asynchronously
         match self.config.property.as_str() {
@@ -199,6 +206,7 @@ impl ContractVerifier {
             _ => return Err(KslError::type_error(
                 format!("Unsupported property: {}", self.config.property),
                 pos,
+                "CONTRACT_UNSUPPORTED_PROPERTY".to_string()
             )),
         }
 
@@ -210,6 +218,7 @@ impl ContractVerifier {
                 .map_err(|e| KslError::type_error(
                     format!("Failed to write report file {}: {}", report_path.display(), e),
                     pos,
+                    "CONTRACT_REPORT_WRITE_ERROR".to_string()
                 ))?;
         } else {
             println!("{}", self.generate_report());

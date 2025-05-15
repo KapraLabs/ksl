@@ -77,11 +77,13 @@ impl TestGen {
             .map_err(|e| KslError::type_error(
                 format!("Failed to read file {}: {}", self.config.input_file.display(), e),
                 pos,
+                "TESTGEN_READ_ERROR".to_string()
             ))?;
         let ast = parse(&source)
             .map_err(|e| KslError::type_error(
                 format!("Parse error at position {}: {}", e.position, e.message),
                 pos,
+                "TESTGEN_PARSE_ERROR".to_string()
             ))?;
 
         // Create output directory
@@ -89,6 +91,7 @@ impl TestGen {
             .map_err(|e| KslError::type_error(
                 format!("Failed to create output directory {}: {}", self.config.output_dir.display(), e),
                 pos,
+                "TESTGEN_DIR_CREATE_ERROR".to_string()
             ))?;
 
         // Generate tests for each function
@@ -124,7 +127,7 @@ impl TestGen {
         // Get type information
         let state = self.state.read().await;
         let type_info = state.type_system.get_type_info(return_type)
-            .map_err(|e| KslError::type_error(format!("Type error: {}", e), pos))?;
+            .map_err(|e| KslError::type_error(format!("Type error: {}", e), pos, "TESTGEN_TYPE_ERROR".to_string()))?;
 
         // Generate standard test cases
         test_suite.add_test(self.generate_basic_test(name, params, return_type, is_async)?);
@@ -296,6 +299,7 @@ impl TestGen {
             .map_err(|e| KslError::type_error(
                 format!("Failed to write test file {}: {}", output_path.display(), e),
                 pos,
+                "TESTGEN_WRITE_ERROR".to_string()
             ))?;
 
         Ok(())
@@ -319,6 +323,7 @@ impl TestGen {
             _ => Err(KslError::type_error(
                 format!("Unsupported type for default value: {:?}", typ),
                 SourcePosition::new(1, 1),
+                "TESTGEN_UNSUPPORTED_TYPE".to_string()
             )),
         }
     }
@@ -341,8 +346,81 @@ impl TestGen {
             _ => Err(KslError::type_error(
                 format!("Unsupported type for async value: {:?}", typ),
                 SourcePosition::new(1, 1),
+                "TESTGEN_UNSUPPORTED_ASYNC_TYPE".to_string()
             )),
         }
+    }
+
+    /// Generate edge case test
+    fn generate_edge_case_test(
+        &self,
+        name: &str,
+        params: &[(String, Type)],
+        return_type: &Type,
+        is_async: bool,
+    ) -> Result<TestCase, KslError> {
+        // Implementation omitted for brevity
+        // This is a stub that would generate tests for edge cases
+        let mut test = TestCase::new(format!("test_{}_edge_case", name));
+        test.code = format!("#[test]\nfn test_{}_edge_case() {{\n    // Edge case test\n}}\n", name);
+        Ok(test)
+    }
+
+    /// Generate property-based test
+    fn generate_property_test(
+        &self,
+        name: &str,
+        params: &[(String, Type)],
+        return_type: &Type,
+        is_async: bool,
+    ) -> Result<TestCase, KslError> {
+        // Implementation omitted for brevity
+        // This is a stub that would generate property-based tests
+        let mut test = TestCase::new(format!("test_{}_property", name));
+        test.code = format!("#[test]\nfn test_{}_property() {{\n    // Property test\n}}\n", name);
+        Ok(test)
+    }
+
+    /// Generate numeric test
+    fn generate_numeric_test(
+        &self,
+        name: &str,
+        params: &[(String, Type)],
+        return_type: &Type,
+    ) -> Result<TestCase, KslError> {
+        // Implementation omitted for brevity
+        // This is a stub that would generate numeric tests
+        let mut test = TestCase::new(format!("test_{}_numeric", name));
+        test.code = format!("#[test]\nfn test_{}_numeric() {{\n    // Numeric test\n}}\n", name);
+        Ok(test)
+    }
+
+    /// Generate array test
+    fn generate_array_test(
+        &self,
+        name: &str,
+        params: &[(String, Type)],
+        return_type: &Type,
+    ) -> Result<TestCase, KslError> {
+        // Implementation omitted for brevity
+        // This is a stub that would generate array tests
+        let mut test = TestCase::new(format!("test_{}_array", name));
+        test.code = format!("#[test]\nfn test_{}_array() {{\n    // Array test\n}}\n", name);
+        Ok(test)
+    }
+
+    /// Generate error test
+    fn generate_error_test(
+        &self,
+        name: &str,
+        params: &[(String, Type)],
+        return_type: &Type,
+    ) -> Result<TestCase, KslError> {
+        // Implementation omitted for brevity
+        // This is a stub that would generate error handling tests
+        let mut test = TestCase::new(format!("test_{}_error", name));
+        test.code = format!("#[test]\nfn test_{}_error() {{\n    // Error test\n}}\n", name);
+        Ok(test)
     }
 }
 

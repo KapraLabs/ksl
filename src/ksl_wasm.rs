@@ -10,7 +10,7 @@ use crate::ksl_abi::{ABIGenerator, ContractABI};
 use crate::ksl_version::{ContractVersion, VersionManager};
 use wasm_encoder::{
     Module, Function, Instruction, ValType, TypeSection, ImportSection, FunctionSection,
-    ExportSection, CodeSection, MemArg, MemoryType, Limits, ExportKind, BlockType
+    ExportSection, CodeSection, MemArg, MemoryType, ExportKind, BlockType
 };
 use std::collections::HashMap;
 use std::convert::TryInto;
@@ -102,12 +102,7 @@ impl WasmGenerator {
 
         // Define memory
         let mut memory_section = MemorySection::new();
-        memory_section.memory(MemoryType {
-            minimum: 1, // 64KB
-            maximum: None,
-            memory64: false,
-            shared: false,
-        });
+        memory_section.memory(MemoryType::new(1, None)); // 1 page (64KB)
         self.module.section(&memory_section);
 
         // Define exports

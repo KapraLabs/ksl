@@ -84,38 +84,41 @@ impl RegistryClient {
             .map_err(|e| KslError::type_error(
                 format!("Failed to fetch package {}@{}: {}", name, version, e),
                 SourcePosition::new(1, 1),
+                "REGISTRY_FETCH_ERROR".to_string()
             ))?;
         if !response.status().is_success() {
             return Err(KslError::type_error(
                 format!("Package {}@{} not found in registry", name, version),
                 SourcePosition::new(1, 1),
+                "REGISTRY_NOT_FOUND_ERROR".to_string()
             ));
         }
 
         // Extract tarball
         let package_dir = self.config.cache_dir.join(name).join(version);
         fs::create_dir_all(&package_dir)
-            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1)))?;
+            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1), "REGISTRY_DIR_ERROR".to_string()))?;
         let tar_gz = response.bytes()
             .await
-            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1)))?;
+            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1), "REGISTRY_DOWNLOAD_ERROR".to_string()))?;
         let tar = flate2::read::GzDecoder::new(&tar_gz[..]);
         let mut archive = Archive::new(tar);
         archive.unpack(&package_dir)
-            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1)))?;
+            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1), "REGISTRY_EXTRACT_ERROR".to_string()))?;
 
         // Read metadata
         let metadata_file = package_dir.join("ksl_package.toml");
         let metadata_content = fs::read_to_string(&metadata_file)
-            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1)))?;
+            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1), "REGISTRY_METADATA_READ_ERROR".to_string()))?;
         let metadata: PackageMetadata = toml::from_str(&metadata_content)
-            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1)))?;
+            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1), "REGISTRY_METADATA_PARSE_ERROR".to_string()))?;
 
         // Verify metadata
         if metadata.name != name || metadata.version != version {
             return Err(KslError::type_error(
                 format!("Mismatched package metadata for {}@{}", name, version),
                 SourcePosition::new(1, 1),
+                "REGISTRY_METADATA_MISMATCH_ERROR".to_string()
             ));
         }
 
@@ -140,50 +143,51 @@ impl RegistryClient {
     pub async fn publish_package_async(&mut self, package_dir: &Path) -> AsyncResult<()> {
         let metadata_file = package_dir.join("ksl_package.toml");
         let metadata_content = fs::read_to_string(&metadata_file)
-            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1)))?;
+            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1), "REGISTRY_METADATA_READ_ERROR".to_string()))?;
         let metadata: PackageMetadata = toml::from_str(&metadata_content)
-            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1)))?;
+            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1), "REGISTRY_METADATA_PARSE_ERROR".to_string()))?;
 
         // Create tarball
         let tarball_path = package_dir.join(format!("{}-{}.tar.gz", metadata.name, metadata.version));
         let tar_gz = File::create(&tarball_path)
-            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1)))?;
+            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1), "REGISTRY_TARBALL_CREATE_ERROR".to_string()))?;
         let enc = flate2::write::GzEncoder::new(tar_gz, flate2::Compression::default());
         let mut tar = tar::Builder::new(enc);
         let src_dir = package_dir.join("src");
         for entry in fs::read_dir(&src_dir)
-            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1)))?
+            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1), "REGISTRY_SOURCE_DIR_ERROR".to_string()))?
         {
             let entry = entry?;
             let path = entry.path();
             tar.append_path_with_name(&path, path.strip_prefix(package_dir)
-                .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1)))?)
-                .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1)))?;
+                .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1), "REGISTRY_PATH_ERROR".to_string()))?)
+                .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1), "REGISTRY_TAR_ERROR".to_string()))?;
         }
         tar.append_path_with_name(&metadata_file, "ksl_package.toml")
-            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1)))?;
+            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1), "REGISTRY_TAR_META_ERROR".to_string()))?;
         tar.finish()
-            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1)))?;
+            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1), "REGISTRY_TAR_FINISH_ERROR".to_string()))?;
 
         // Upload tarball
         let url = format!("{}/{}/{}.tar.gz", self.config.url, metadata.name, metadata.version);
         let file = File::open(&tarball_path)
-            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1)))?;
+            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1), "REGISTRY_FILE_OPEN_ERROR".to_string()))?;
         let response = self.client.post(&url)
             .body(file)
             .send()
             .await
-            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1)))?;
+            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1), "REGISTRY_UPLOAD_ERROR".to_string()))?;
         if !response.status().is_success() {
             return Err(KslError::type_error(
                 format!("Failed to publish package {}@{}", metadata.name, metadata.version),
                 SourcePosition::new(1, 1),
+                "REGISTRY_PUBLISH_ERROR".to_string()
             ));
         }
 
         // Clean up tarball
         fs::remove_file(&tarball_path)
-            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1)))?;
+            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1), "REGISTRY_CLEANUP_ERROR".to_string()))?;
 
         // Update state
         let mut state = self.state.write().await;

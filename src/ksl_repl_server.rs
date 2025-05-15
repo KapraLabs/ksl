@@ -80,6 +80,7 @@ impl ReplServer {
             .map_err(|e| KslError::type_error(
                 format!("Failed to bind to port {}: {}", self.config.port, e),
                 pos,
+                "REPL_BIND_ERROR".to_string()
             ))?;
         log_with_trace(Level::Info, &format!("REPL server started on {}", addr), None);
 
@@ -96,7 +97,7 @@ impl ReplServer {
         // Accept connections
         loop {
             let (stream, addr) = listener.accept().await
-                .map_err(|e| KslError::type_error(format!("Failed to accept connection: {}", e), pos))?;
+                .map_err(|e| KslError::type_error(format!("Failed to accept connection: {}", e), pos, "REPL_ACCEPT_ERROR".to_string()))?;
             
             log_with_trace(Level::Info, &format!("New client connected: {}", addr), None);
 
@@ -104,7 +105,7 @@ impl ReplServer {
             let session_count = self.sessions.read().await.len();
             if session_count >= self.config.max_sessions {
                 stream.write_all(b"Server at capacity. Please try again later.\n").await
-                    .map_err(|e| KslError::type_error(format!("Failed to write to stream: {}", e), pos))?;
+                    .map_err(|e| KslError::type_error(format!("Failed to write to stream: {}", e), pos, "REPL_WRITE_ERROR".to_string()))?;
                 continue;
             }
 
@@ -151,12 +152,12 @@ impl ReplServer {
 
         // Send welcome message
         writer.write_all(b"Welcome to KSL REPL Server! Enter KSL code or !commands.\n> ").await
-            .map_err(|e| KslError::type_error(format!("Failed to write to stream: {}", e), pos))?;
+            .map_err(|e| KslError::type_error(format!("Failed to write to stream: {}", e), pos, "REPL_WELCOME_ERROR".to_string()))?;
 
         loop {
             buffer.clear();
             if reader.read_line(&mut buffer).await
-                .map_err(|e| KslError::type_error(format!("Failed to read from stream: {}", e), pos))? == 0 {
+                .map_err(|e| KslError::type_error(format!("Failed to read from stream: {}", e), pos, "REPL_READ_ERROR".to_string()))? == 0 {
                 break; // EOF
             }
 
@@ -167,7 +168,7 @@ impl ReplServer {
 
             if input == "exit" {
                 writer.write_all(b"Goodbye!\n").await
-                    .map_err(|e| KslError::type_error(format!("Failed to write to stream: {}", e), pos))?;
+                    .map_err(|e| KslError::type_error(format!("Failed to write to stream: {}", e), pos, "REPL_GOODBYE_ERROR".to_string()))?;
                 break;
             }
 
@@ -185,11 +186,11 @@ impl ReplServer {
 
             // Send response
             writer.write_all(response.as_bytes()).await
-                .map_err(|e| KslError::type_error(format!("Failed to write to stream: {}", e), pos))?;
+                .map_err(|e| KslError::type_error(format!("Failed to write to stream: {}", e), pos, "REPL_RESPONSE_ERROR".to_string()))?;
             writer.write_all(b"> ").await
-                .map_err(|e| KslError::type_error(format!("Failed to write to stream: {}", e), pos))?;
+                .map_err(|e| KslError::type_error(format!("Failed to write to stream: {}", e), pos, "REPL_PROMPT_ERROR".to_string()))?;
             writer.flush().await
-                .map_err(|e| KslError::type_error(format!("Failed to flush stream: {}", e), pos))?;
+                .map_err(|e| KslError::type_error(format!("Failed to flush stream: {}", e), pos, "REPL_FLUSH_ERROR".to_string()))?;
 
             log_with_trace(Level::Info, &format!("Processed command for session {}: {}", session_id, input), None);
         }

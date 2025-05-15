@@ -670,6 +670,7 @@ impl ProcMacro {
             _ => Err(KslError::type_error(
                 format!("Unknown procedural macro: {}", self.name),
                 self.position,
+                "MACRO_UNKNOWN_ERROR".to_string()
             )),
         }
     }
@@ -691,6 +692,7 @@ impl ProcMacro {
             .ok_or_else(|| KslError::type_error(
                 "Missing 'size' argument for #[shard] macro".to_string(),
                 self.position,
+                "MACRO_SHARD_ERROR".to_string()
             ))?;
 
         // Generate shard-specific code
@@ -736,6 +738,7 @@ impl ProcMacro {
             .ok_or_else(|| KslError::type_error(
                 "Missing 'stake' argument for #[validator] macro".to_string(),
                 self.position,
+                "MACRO_VALIDATOR_ERROR".to_string()
             ))?;
 
         // Generate validator-specific code
@@ -1180,7 +1183,7 @@ impl ProcMacro {
                 }
                 _ => {}
             }
-            KslError::type_error(msg, self.position)
+            KslError::type_error(msg, self.position, "MACRO_EXPANSION_ERROR".to_string())
         })
     }
 
@@ -1826,8 +1829,8 @@ impl MacroExpander {
             let macro_kind = self.macros.get(&macro_call.name)
             .ok_or_else(|| KslError::type_error(
                 format!("Macro '{}' not found", macro_call.name),
-                    pos.clone(),
-                    "E1007".to_string(),
+                pos,
+                "MACRO_NOT_FOUND_ERROR".to_string()
             ))?;
 
             // Expand based on kind
@@ -1841,10 +1844,10 @@ impl MacroExpander {
                     "Macro '{}' expects at least {} arguments, got {}",
                     macro_call.name, required_args, macro_call.args.len()
                 ),
-                            pos.clone(),
-                            "E1008".to_string(),
-                        ));
-                    }
+                pos,
+                "MACRO_ARGUMENT_COUNT_ERROR".to_string()
+            ));
+        }
 
                     // Build parameter substitution map with hygienic names
                     let mut param_map = HashMap::new();
@@ -1899,7 +1902,7 @@ impl MacroExpander {
                                 format!("Type mismatch for parameter '{}': expected {:?}, got {:?}",
                                     name, param_type, arg),
                                 pos.clone(),
-                                "E1009".to_string(),
+                                "MACRO_TYPE_MISMATCH_ERROR".to_string()
                             ));
                         }
                         arg.clone()
@@ -1926,14 +1929,14 @@ impl MacroExpander {
                                     return Err(KslError::type_error(
                                         format!("Expected identifier for parameter '{}', got {:?}", name, arg),
                                         pos.clone(),
-                                        "E1010".to_string(),
+                                        "MACRO_EXPECTED_IDENT_ERROR".to_string()
                                     ));
                                 }
                             }
                             _ => return Err(KslError::type_error(
                                 format!("Invalid parameter type for function name: {:?}", param_type),
                                 pos.clone(),
-                                "E1011".to_string(),
+                                "MACRO_INVALID_PARAM_TYPE_ERROR".to_string()
                             )),
                         }
                     } else {
@@ -1951,7 +1954,7 @@ impl MacroExpander {
                             return Err(KslError::type_error(
                                 format!("Expected identifier for parameter '{}', got {:?}", name, arg),
                                 pos.clone(),
-                                "E1010".to_string(),
+                                "MACRO_EXPECTED_IDENT_ERROR".to_string()
                             ));
                         }
                     } else {
@@ -1966,7 +1969,7 @@ impl MacroExpander {
                             return Err(KslError::type_error(
                                 format!("Expected string for parameter '{}', got {:?}", s, arg),
                                 pos.clone(),
-                                "E1012".to_string(),
+                                "MACRO_EXPECTED_STRING_ERROR".to_string()
                             ));
                         }
                     } else {
@@ -2054,24 +2057,24 @@ impl MacroExpander {
             .ok_or_else(|| KslError::type_error(
                 format!("Macro '{}' not found", macro_call.name),
                 pos,
-                "E1014".to_string(),
+                "MACRO_NOT_FOUND_ERROR".to_string()
             ))?;
 
         // Expand based on kind
         let mut expanded_body = match macro_kind {
             MacroKind::Declarative(def) => {
-        // Validate argument count
+                // Validate argument count
                 let required_args = def.params.iter().filter(|p| !p.is_optional).count();
-        if macro_call.args.len() < required_args {
-            return Err(KslError::type_error(
-                format!(
-                    "Macro '{}' expects at least {} arguments, got {}",
-                    macro_call.name, required_args, macro_call.args.len()
-                ),
-                pos,
-                "E1015".to_string(),
-            ));
-        }
+                if macro_call.args.len() < required_args {
+                    return Err(KslError::type_error(
+                        format!(
+                            "Macro '{}' expects at least {} arguments, got {}",
+                            macro_call.name, required_args, macro_call.args.len()
+                        ),
+                        pos,
+                        "MACRO_ARGUMENT_COUNT_ERROR".to_string()
+                    ));
+                }
 
                 // Build parameter substitution map
                 let mut param_map = HashMap::new();
@@ -2080,7 +2083,7 @@ impl MacroExpander {
                 }
 
                 // Substitute parameters
-                self.substitute_with_map(&def.body, &param_map)?
+                self.substitute_with_map(&def.body, &param_map, pos)?
             }
             MacroKind::Procedural(proc) => {
                 proc.expand()?
@@ -2148,15 +2151,21 @@ impl MacroExpander {
 
     /// Expand all macros in an AST node
     pub fn expand_node(&self, node: &AstNode) -> Result<Vec<AstNode>, KslError> {
+        let pos = SourcePosition::new(1, 1);
         match node {
+            AstNode::MacroDef(_) => Err(KslError::type_error(
+                "Nested macro definitions not supported".to_string(),
+                pos,
+                "MACRO_NESTED_ERROR".to_string()
+            )),
             AstNode::ProcMacro(proc_macro) => {
                 // Expand procedural macro
                 proc_macro.expand()
-            }
+            },
             AstNode::MacroCall(macro_call) => {
                 // Expand regular macro
                 self.expand(macro_call)
-            }
+            },
             AstNode::Let { name, ty, value } => {
                 // Recursively expand the value
                 let expanded_value = self.expand_node(value)?;

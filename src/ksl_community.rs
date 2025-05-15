@@ -186,9 +186,10 @@ impl ContributorGuidelines {
         let response = self.networking.http_get(request).await?;
         
         if response.status_code != 200 {
-            return Err(KslError::network_error(
-                format!("Failed to fetch guidelines: {}", response.status_code),
+            return Err(KslError::network(
+                format!("Failed to fetch guidelines: HTTP {}", response.status_code),
                 SourcePosition::new(1, 1),
+                "E401".to_string()
             ));
         }
 
@@ -208,9 +209,10 @@ impl ContributorGuidelines {
         let response = self.networking.http_get(request).await?;
 
         if response.status_code != 200 {
-            return Err(KslError::network_error(
-                format!("Failed to check compliance: {}", response.status_code),
+            return Err(KslError::network(
+                format!("Failed to check compliance: HTTP {}", response.status_code),
                 SourcePosition::new(1, 1),
+                "E401".to_string()
             ));
         }
 

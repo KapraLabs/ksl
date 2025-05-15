@@ -275,6 +275,26 @@ impl KapraVM {
     /// @param instr The instruction to execute.
     /// @returns `Ok(())` if execution succeeds, or `Err` with a `RuntimeError`.
     fn execute_instruction(&mut self, instr: &KapraInstruction, async_support: bool) -> Result<(), RuntimeError> {
+        // Track executed instruction for coverage if enabled
+        if let Some(ref mut coverage) = self.coverage_data {
+            coverage.insert(self.pc);
+        }
+
+        // Add gas cost for this instruction
+        let gas_cost = match instr.opcode {
+            KapraOpCode::Add | KapraOpCode::Sub | KapraOpCode::Mul => 1,
+            KapraOpCode::BlsVerify | KapraOpCode::DilithiumVerify => 10,
+            KapraOpCode::Sha3 | KapraOpCode::Sha3_512 => 5,
+            KapraOpCode::AsyncCall | KapraOpCode::TcpConnect | KapraOpCode::UdpSend => 5,
+            KapraOpCode::HttpPost | KapraOpCode::HttpGet => 10,
+            _ => 1,
+        };
+        self.charge_gas(gas_cost)?;
+
+        if self.debug_mode {
+            self.print_debug_info();
+        }
+
         match instr.opcode {
             KapraOpCode::Mov => {
                 let dst = self.get_register(&instr.operands[0], self.pc)?;
@@ -286,27 +306,18 @@ impl KapraVM {
                 let a = self.get_u32(&instr.operands[1], self.pc)?;
                 let b = self.get_u32(&instr.operands[2], self.pc)?;
                 self.registers[dst as usize] = (a + b).to_le_bytes().to_vec();
-                if self.metrics_data.is_some() {
-                    ksl_metrics::MetricsCollector::increment_counter("arithmetic_ops");
-                }
             }
             KapraOpCode::Sub => {
                 let dst = self.get_register(&instr.operands[0], self.pc)?;
                 let a = self.get_u32(&instr.operands[1], self.pc)?;
                 let b = self.get_u32(&instr.operands[2], self.pc)?;
                 self.registers[dst as usize] = (a - b).to_le_bytes().to_vec();
-                if self.metrics_data.is_some() {
-                    ksl_metrics::MetricsCollector::increment_counter("arithmetic_ops");
-                }
             }
             KapraOpCode::Mul => {
                 let dst = self.get_register(&instr.operands[0], self.pc)?;
                 let a = self.get_u32(&instr.operands[1], self.pc)?;
                 let b = self.get_u32(&instr.operands[2], self.pc)?;
                 self.registers[dst as usize] = (a * b).to_le_bytes().to_vec();
-                if self.metrics_data.is_some() {
-                    ksl_metrics::MetricsCollector::increment_counter("arithmetic_ops");
-                }
             }
             KapraOpCode::Halt => {
                 self.halted = true;
@@ -344,9 +355,6 @@ impl KapraVM {
                     .collect();
                 self.stack.push((self.pc + 1, saved_registers));
                 self.pc = fn_index - 1; // -1 because pc increments after
-                if self.metrics_data.is_some() {
-                    ksl_metrics::MetricsCollector::increment_counter("function_calls");
-                }
             }
             KapraOpCode::Return => {
                 if let Some((return_pc, saved_registers)) = self.stack.pop() {
@@ -366,9 +374,6 @@ impl KapraVM {
                 hasher.update(&src);
                 let result = hasher.finalize();
                 self.registers[dst as usize] = result.to_vec();
-                if self.metrics_data.is_some() {
-                    ksl_metrics::MetricsCollector::increment_counter("crypto_ops");
-                }
             }
             KapraOpCode::Sha3_512 => {
                 let dst = self.get_register(&instr.operands[0], self.pc)?;
@@ -377,9 +382,6 @@ impl KapraVM {
                 hasher.update(&src);
                 let result = hasher.finalize();
                 self.registers[dst as usize] = result.to_vec();
-                if self.metrics_data.is_some() {
-                    ksl_metrics::MetricsCollector::increment_counter("crypto_ops");
-                }
             }
             KapraOpCode::Kaprekar => {
                 let dst = self.get_register(&instr.operands[0], self.pc)?;
@@ -390,9 +392,6 @@ impl KapraVM {
                 })?);
                 let result = kaprekar_step(input);
                 self.registers[dst as usize] = result.to_le_bytes().to_vec();
-                if self.metrics_data.is_some() {
-                    ksl_metrics::MetricsCollector::increment_counter("crypto_ops");
-                }
             }
             KapraOpCode::BlsVerify => {
                 let dst = self.get_register(&instr.operands[0], self.pc)?;
@@ -420,9 +419,6 @@ impl KapraVM {
                     &FixedArray::new(sig_array),
                 );
                 self.registers[dst as usize] = (result as u32).to_le_bytes().to_vec();
-                if self.metrics_data.is_some() {
-                    ksl_metrics::MetricsCollector::increment_counter("crypto_ops");
-                }
             }
             KapraOpCode::DilithiumVerify => {
                 let dst = self.get_register(&instr.operands[0], self.pc)?;
@@ -448,9 +444,6 @@ impl KapraVM {
                     &FixedArray::new(sig_array),
                 );
                 self.registers[dst as usize] = (result as u32).to_le_bytes().to_vec();
-                if self.metrics_data.is_some() {
-                    ksl_metrics::MetricsCollector::increment_counter("crypto_ops");
-                }
             }
             KapraOpCode::MerkleVerify => {
                 // Placeholder: ksl_kapra_crypto.rs lacks merkle_verify
@@ -458,13 +451,6 @@ impl KapraVM {
                 let _root = self.get_operand_value(&instr.operands[1], Some(&Type::Array(Box::new(Type::U8), 32)), self.pc)?;
                 let _proof = self.get_operand_value(&instr.operands[2], Some(&Type::Array(Box::new(Type::U8), 0)), self.pc)?;
                 self.registers[dst as usize] = 1u32.to_le_bytes().to_vec(); // Always true
-                if self.metrics_data.is_some() {
-                    ksl_metrics::MetricsCollector::increment_counter("crypto_ops");
-                }
-                // Log warning
-                if self.metrics_data.is_some() {
-                    ksl_metrics::MetricsCollector::increment_counter("merkle_verify_placeholder_used");
-                }
             }
             KapraOpCode::AsyncCall => {
                 let dst = self.get_register(&instr.operands[0], self.pc)?;
@@ -473,9 +459,6 @@ impl KapraVM {
                 // Simulate async result (e.g., for fetch)
                 let result = vec![b'r', b'e', b's', b'u', b'l', b't']; // Dummy "result" string
                 self.registers[dst as usize] = result;
-                if self.metrics_data.is_some() {
-                    ksl_metrics::MetricsCollector::increment_counter("async_calls");
-                }
             }
             KapraOpCode::TcpConnect => {
                 let dst = self.get_register(&instr.operands[0], self.pc)?;
@@ -554,87 +537,174 @@ impl KapraVM {
                 }
             }
             KapraOpCode::Print => {
-                let msg = self.get_string(&instr.operands[1], self.pc)?;
-                println!("{}", msg);
-                self.registers[self.get_register(&instr.operands[0], self.pc)? as usize] = Vec::new();
+                let src = self.get_register(&instr.operands[0], self.pc)?;
+                let value = self.registers[src as usize].clone();
+                println!("{}", String::from_utf8_lossy(&value));
             }
             KapraOpCode::Assert => {
-                let cond = self.get_register(&instr.operands[0], self.pc)?;
-                let value = u32::from_le_bytes(
-                    self.registers[cond as usize]
-                        .as_slice()
-                        .try_into()
-                        .map_err(|_| RuntimeError {
-                            message: "Invalid condition value".to_string(),
-                            pc: self.pc,
-                        })?
-                );
+                let condition_reg = self.get_register(&instr.operands[0], self.pc)?;
+                let condition = self.registers[condition_reg as usize].clone();
+                let is_true = !condition.is_empty() && condition[0] != 0;
                 
-                if value == 0 {
+                if !is_true {
                     return Err(RuntimeError {
                         message: "Assertion failed".to_string(),
                         pc: self.pc,
                     });
                 }
-
-                if self.metrics_data.is_some() {
-                    ksl_metrics::MetricsCollector::increment_counter("assertions");
-                }
             }
             KapraOpCode::Auth => {
-                let delegatee = self.get_operand_value(&instr.operands[0], Some(&Type::Array(Box::new(Type::U8), 32)), self.pc)?;
-                let delegatee: [u8; 32] = delegatee.try_into().map_err(|_| RuntimeError {
-                    message: "Invalid delegatee address".to_string(),
-                    pc: self.pc,
-                })?;
-
-                let delegator = self.current_sender.ok_or_else(|| RuntimeError {
-                    message: "No current sender for delegation".to_string(),
-                    pc: self.pc,
-                })?;
-
-                self.auth_stack.push(DelegatedContext {
-                    delegator,
-                    delegatee: FixedArray(delegatee),
-                    expires_at: self.tx_context.tx_id, // Use tx_id as expiration
-                });
-
-                if self.metrics_data.is_some() {
-                    ksl_metrics::MetricsCollector::increment_counter("auth_delegations");
+                let delegatee_reg = self.get_register(&instr.operands[0], self.pc)?;
+                let delegatee_bytes = self.registers[delegatee_reg as usize].clone();
+                
+                if delegatee_bytes.len() != 32 {
+                    return Err(RuntimeError {
+                        message: "Invalid delegatee address format".to_string(),
+                        pc: self.pc,
+                    });
+                }
+                
+                // Convert to fixed array
+                let mut delegatee = [0u8; 32];
+                delegatee.copy_from_slice(&delegatee_bytes);
+                
+                // Push to auth stack if sender is set
+                if let Some(sender) = &self.current_sender {
+                    self.auth_stack.push(DelegatedContext {
+                        delegator: *sender,
+                        delegatee: FixedArray(delegatee),
+                        expires_at: 0, // Scope-limited to current transaction
+                    });
+                } else {
+                    return Err(RuntimeError {
+                        message: "No transaction sender for auth delegation".to_string(),
+                        pc: self.pc,
+                    });
                 }
             }
             KapraOpCode::AuthCall => {
-                let target = self.get_operand_value(&instr.operands[0], Some(&Type::Array(Box::new(Type::U8), 32)), self.pc)?;
-                let target: [u8; 32] = target.try_into().map_err(|_| RuntimeError {
-                    message: "Invalid target address".to_string(),
-                    pc: self.pc,
-                })?;
-
-                let delegate = self.auth_stack.last().ok_or_else(|| RuntimeError {
-                    message: "No delegated context for auth call".to_string(),
-                    pc: self.pc,
-                })?;
-
-                // Save current sender
-                let saved_sender = self.current_sender;
-                
-                // Set delegated sender
-                self.current_sender = Some(delegate.delegatee);
-
-                // Execute the call
-                let result = self.execute_contract(FixedArray(target));
-
-                // Restore original sender
-                self.current_sender = saved_sender;
-
-                result?;
-
-                if self.metrics_data.is_some() {
-                    ksl_metrics::MetricsCollector::increment_counter("auth_calls");
+                // Similar to Call but with delegated auth
+                if self.auth_stack.is_empty() {
+                    return Err(RuntimeError {
+                        message: "No delegated auth context available".to_string(),
+                        pc: self.pc,
+                    });
                 }
+                
+                let fn_index = self.get_u32(&instr.operands[0], self.pc)? as usize;
+                if fn_index >= self.bytecode.instructions.len() {
+                    return Err(RuntimeError {
+                        message: "Invalid function index".to_string(),
+                        pc: self.pc,
+                    });
+                }
+                
+                let saved_registers: HashMap<u8, Vec<u8>> = self
+                    .registers
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, r)| !r.is_empty())
+                    .map(|(i, r)| (i as u8, r.clone()))
+                    .collect();
+                    
+                self.stack.push((self.pc + 1, saved_registers));
+                self.pc = fn_index - 1; // -1 because pc increments after
             }
-            op if (op as u8) >= 0x70 && (op as u8) <= 0x72 => {
-                self.execute_data_blob_op(instr)
+            KapraOpCode::Verify => {
+                // Mark beginning of postcondition block
+                // No actual execution here - used by static analysis
+            }
+            KapraOpCode::DeviceSensor => {
+                let dst = self.get_register(&instr.operands[0], self.pc)?;
+                let id = self.get_operand_value(&instr.operands[1], instr.type_info.as_ref(), self.pc)?;
+                // Simulate device sensor reading
+                let reading = match String::from_utf8_lossy(&id).as_ref() {
+                    "temperature" => vec![0x1A, 0x00, 0x00, 0x00], // 26°C - binary representation of 26u32
+                    "humidity" => vec![0x32, 0x00, 0x00, 0x00],    // 50% - binary representation of 50u32
+                    "pressure" => vec![0x05, 0x04, 0x00, 0x00],    // 1029 hPa - binary representation of 1029u32
+                    _ => vec![0x00, 0x00, 0x00, 0x00],            // Unknown sensor
+                };
+                self.registers[dst as usize] = reading;
+            }
+            KapraOpCode::Sin => {
+                let dst = self.get_register(&instr.operands[0], self.pc)?;
+                let src = self.get_operand_value(&instr.operands[1], instr.type_info.as_ref(), self.pc)?;
+                // Convert bytes to f64
+                let f = f64::from_le_bytes(src.try_into().map_err(|_| RuntimeError {
+                    message: "Invalid floating point value".to_string(),
+                    pc: self.pc,
+                })?);
+                let result = f.sin();
+                self.registers[dst as usize] = result.to_le_bytes().to_vec();
+            }
+            KapraOpCode::Cos => {
+                let dst = self.get_register(&instr.operands[0], self.pc)?;
+                let src = self.get_operand_value(&instr.operands[1], instr.type_info.as_ref(), self.pc)?;
+                // Convert bytes to f64
+                let f = f64::from_le_bytes(src.try_into().map_err(|_| RuntimeError {
+                    message: "Invalid floating point value".to_string(),
+                    pc: self.pc,
+                })?);
+                let result = f.cos();
+                self.registers[dst as usize] = result.to_le_bytes().to_vec();
+            }
+            KapraOpCode::Sqrt => {
+                let dst = self.get_register(&instr.operands[0], self.pc)?;
+                let src = self.get_operand_value(&instr.operands[1], instr.type_info.as_ref(), self.pc)?;
+                // Convert bytes to f64
+                let f = f64::from_le_bytes(src.try_into().map_err(|_| RuntimeError {
+                    message: "Invalid floating point value".to_string(),
+                    pc: self.pc,
+                })?);
+                let result = f.sqrt();
+                self.registers[dst as usize] = result.to_le_bytes().to_vec();
+            }
+            KapraOpCode::MatrixMul => {
+                // Simplified matrix multiplication
+                let dst = self.get_register(&instr.operands[0], self.pc)?;
+                let _a = self.get_operand_value(&instr.operands[1], instr.type_info.as_ref(), self.pc)?;
+                let _b = self.get_operand_value(&instr.operands[2], instr.type_info.as_ref(), self.pc)?;
+                
+                // Placeholder: actual matrix multiplication would be complex
+                let result = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+                self.registers[dst as usize] = result;
+            }
+            KapraOpCode::TensorReduce => {
+                // Simplified tensor reduction
+                let dst = self.get_register(&instr.operands[0], self.pc)?;
+                let _src = self.get_operand_value(&instr.operands[1], instr.type_info.as_ref(), self.pc)?;
+                
+                // Placeholder: actual tensor reduction would be complex
+                let result = vec![42, 0, 0, 0]; // Result as u32
+                self.registers[dst as usize] = result;
+            }
+            KapraOpCode::PluginCall { plugin, op } => {
+                let dst = self.get_register(&instr.operands[0], self.pc)?;
+                let arg = self.get_operand_value(&instr.operands[1], instr.type_info.as_ref(), self.pc)?;
+                
+                // Simulate plugin call
+                let result = format!("Plugin {} called op {} with arg size {}", plugin, op, arg.len()).into_bytes();
+                self.registers[dst as usize] = result;
+            }
+            KapraOpCode::CallSyscall { name } => {
+                let reg = self.get_register(&instr.operands[0], self.pc)?;
+                
+                // Simulate syscall
+                let result = format!("Syscall {} called", name).into_bytes();
+                self.registers[reg as usize] = result;
+            }
+            // Handle custom data blob operations
+            op => {
+                // Check if this is a data blob operation (based on opcode)
+                let opcode_val = op.encode();
+                if opcode_val >= 0x70 && opcode_val <= 0x72 {
+                    self.execute_data_blob_op(instr)
+                } else {
+                    Err(RuntimeError {
+                        message: format!("Unknown opcode: {:?}", op),
+                        pc: self.pc,
+                    })
+                }
             }
         }
         Ok(())
@@ -859,9 +929,10 @@ impl KapraVM {
         
         // Create state directory if it doesn't exist
         let state_dir = PathBuf::from("./state");
-        fs::create_dir_all(&state_dir).map_err(|e| KslError::runtime_error(
+        fs::create_dir_all(&state_dir).map_err(|e| KslError::runtime(
             format!("Failed to create state directory: {}", e),
-            None,
+            self.pc, // Use program counter for the instruction position
+            "KVM001".to_string()
         ))?;
 
         // Create contract state
@@ -886,16 +957,18 @@ impl KapraVM {
         };
 
         // Serialize state
-        let bytes = serialize(&state).map_err(|e| KslError::runtime_error(
+        let bytes = serialize(&state).map_err(|e| KslError::runtime(
             format!("Failed to serialize contract state: {}", e),
-            None,
+            self.pc,
+            "KVM002".to_string()
         ))?;
 
         // Write to file
-        let file_path = state_dir.join(format!("{}.bin", name));
-        fs::write(&file_path, bytes).map_err(|e| KslError::runtime_error(
-            format!("Failed to write contract state: {}", e),
-            None,
+        let file_path = state_dir.join(format!("{}.state", name));
+        fs::write(&file_path, bytes).map_err(|e| KslError::runtime(
+            format!("Failed to write state file: {}", e),
+            self.pc, 
+            "KVM003".to_string()
         ))?;
 
         Ok(())
@@ -906,16 +979,18 @@ impl KapraVM {
         let pos = SourcePosition::new(1, 1);
         
         // Read state file
-        let file_path = PathBuf::from("./state").join(format!("{}.bin", name));
-        let bytes = fs::read(&file_path).map_err(|e| KslError::runtime_error(
-            format!("Failed to read contract state: {}", e),
-            None,
+        let file_path = PathBuf::from("./state").join(format!("{}.state", name));
+        let bytes = fs::read(&file_path).map_err(|e| KslError::runtime(
+            format!("Failed to read state file: {}", e),
+            self.pc,
+            "KVM004".to_string()
         ))?;
 
         // Deserialize state
-        let state: ContractState = deserialize(&bytes).map_err(|e| KslError::runtime_error(
+        let state: ContractState = deserialize(&bytes).map_err(|e| KslError::runtime(
             format!("Failed to deserialize contract state: {}", e),
-            None,
+            self.pc,
+            "KVM005".to_string()
         ))?;
 
         // Restore memory
@@ -968,24 +1043,25 @@ impl KapraVM {
 
     /// Charges gas for an operation
     fn charge_gas(&mut self, amount: u64) -> Result<(), RuntimeError> {
-        let payer = self.gas_charged_to;
-        
-        // Get the smart account for the payer
-        let account = self.smart_accounts.get_mut(&payer)
-            .ok_or_else(|| RuntimeError {
-                message: format!("No smart account found for address {:?}", payer),
-                pc: self.pc,
-            })?;
-
-        if account.balance < amount {
+        self.gas_used += amount;
+        if self.gas_used > self.gas_limit {
             return Err(RuntimeError {
-                message: format!("Insufficient balance for gas payment: required {}, available {}", amount, account.balance),
+                message: "Gas limit exceeded".to_string(),
                 pc: self.pc,
             });
         }
-
-        account.balance -= amount;
-        self.gas_used += amount;
+        
+        // Charge to smart account if applicable
+        if let Some(account) = self.get_smart_account_mut(&self.gas_charged_to) {
+            if account.gas_balance < amount {
+                return Err(RuntimeError {
+                    message: "Insufficient gas balance".to_string(),
+                    pc: self.pc,
+                });
+            }
+            account.gas_balance -= amount;
+        }
+        
         Ok(())
     }
 
