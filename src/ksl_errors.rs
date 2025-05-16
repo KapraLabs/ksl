@@ -55,7 +55,7 @@ impl fmt::Display for SourcePosition {
 }
 
 // Main error type for KSL
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum KslError {
     Parse {
         message: String,
@@ -108,6 +108,12 @@ pub enum KslError {
         code: String,
     },
     CLI {
+        message: String,
+        position: SourcePosition,
+        code: String,
+    },
+    InvalidProof(String),
+    Web3 {
         message: String,
         position: SourcePosition,
         code: String,
@@ -374,6 +380,22 @@ impl KslError {
                 },
                 severity: ksl_lsp::Severity::Error,
             },
+            KslError::InvalidProof(message) => ksl_lsp::Diagnostic {
+                message: format!("Invalid proof: {}", message),
+                range: ksl_lsp::Range {
+                    start: SourcePosition::new(0, 0),
+                    end: SourcePosition::new(0, 0),
+                },
+                severity: ksl_lsp::Severity::Error,
+            },
+            KslError::Web3 { message, position, code } => ksl_lsp::Diagnostic {
+                message: format!("[{}] {}", code, message),
+                range: ksl_lsp::Range {
+                    start: *position,
+                    end: *position,
+                },
+                severity: ksl_lsp::Severity::Error,
+            },
         }
     }
 
@@ -422,6 +444,15 @@ impl KslError {
             ErrorType::DataBlobTypeError => Self::type_error(message, pos, "E408".to_string()),
         }
     }
+
+    /// Creates a Web3 error
+    pub fn web3_error(message: String, position: SourcePosition, code: String) -> Self {
+        KslError::Web3 {
+            message,
+            position,
+            code,
+        }
+    }
 }
 
 impl fmt::Display for KslError {
@@ -459,6 +490,12 @@ impl fmt::Display for KslError {
             }
             KslError::CLI { message, position, code } => {
                 write!(f, "CLI error [{}] at {}: {}", code, position, message)
+            }
+            KslError::InvalidProof(message) => {
+                write!(f, "Invalid proof: {}", message)
+            }
+            KslError::Web3 { message, position, code } => {
+                write!(f, "Web3 error [{}] at {}: {}", code, position, message)
             }
         }
     }

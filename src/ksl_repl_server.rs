@@ -138,13 +138,14 @@ impl ReplServer {
         let repl_config = ReplConfig {
             history_size: 1000,
             network_enabled: true,
+            debug_mode: false,
             ..Default::default()
         };
         let session = SessionState {
             id: session_id.clone(),
             last_active: std::time::Instant::now(),
-            repl: Arc::new(RwLock::new(Repl::new(repl_config)?)),
-            debugger: Arc::new(Mutex::new(Debugger::new())),
+            repl: Arc::new(RwLock::new(Repl::new_with_config(repl_config))),
+            debugger: Arc::new(Mutex::new(Debugger::new().unwrap_or_else(|e| panic!("Failed to create debugger: {}", e)))),
         };
 
         // Store session

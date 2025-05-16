@@ -77,6 +77,62 @@ use chrono::{Utc, DateTime};
 use bincode;
 use bincode::{serialize, deserialize};
 
+/// Compilation mode for contract
+pub enum CompilationMode {
+    /// Bytecode mode - compiles to KSL bytecode
+    Bytecode,
+    /// Debug mode - includes debugging information
+    Debug,
+    /// Ahead-of-Time compilation mode
+    Aot {
+        /// Target triple
+        target: String,
+        /// Optimization level
+        opt_level: OptimizationLevel,
+    },
+    /// Just-in-Time compilation mode
+    Jit {
+        /// Optimization level
+        opt_level: OptimizationLevel,
+        /// Whether to enable speculative execution
+        speculative: bool,
+    }
+}
+
+/// Security profile for contract execution
+pub struct SecurityProfile {
+    /// Allowed system calls
+    pub allowed_syscalls: Vec<String>,
+    /// Memory limits
+    pub memory_limits: MemoryLimits,
+    /// Maximum call depth
+    pub max_call_depth: usize,
+    /// Static security checks to perform
+    pub static_checks: Vec<String>,
+}
+
+/// Memory limits for contract execution
+pub struct MemoryLimits {
+    /// Maximum memory pages
+    pub max_pages: usize,
+    /// Maximum stack size
+    pub max_stack: usize,
+    /// Maximum single allocation size
+    pub max_allocation: usize,
+}
+
+/// Optimization level for compilation
+pub enum OptimizationLevel {
+    /// No optimization
+    None,
+    /// Default optimization
+    Default,
+    /// Aggressive optimization
+    Aggressive,
+    /// Size optimization
+    Size,
+}
+
 /// Enhanced contract compilation configuration
 #[derive(Debug)]
 pub struct ContractConfig {

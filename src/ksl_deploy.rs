@@ -152,7 +152,8 @@ impl DeployManager {
         drop(state);
 
         // Run in sandbox
-        let mut sandbox = Sandbox::new(SandboxPolicy::default());
+        let mut sandbox = Sandbox::new();
+        sandbox.configure_policy(SandboxPolicy::default());
         sandbox.run_sandbox_async(file).await
             .map_err(|e| KslError::type_error(
                 e.into_iter().map(|e| e.to_string()).collect::<Vec<_>>().join("\n"),

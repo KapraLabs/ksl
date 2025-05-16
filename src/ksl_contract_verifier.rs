@@ -69,8 +69,8 @@ pub struct VerificationConfig {
     contract_state: Option<ContractState>,
 }
 
-/// Verification result
-#[derive(Debug)]
+/// Result of a contract verification check
+#[derive(Clone)]
 pub struct VerificationResult {
     property: String,
     passed: bool,
@@ -96,7 +96,7 @@ impl ContractVerifier {
     }
 
     /// Verifies the smart contract synchronously
-    pub fn verify_contract(&mut self) -> Result<Vec<VerificationResult>, KslError> {
+    pub async fn verify_contract(&mut self) -> Result<Vec<VerificationResult>, KslError> {
         let pos = SourcePosition::new(1, 1);
         // Read and parse source
         let source = fs::read_to_string(&self.config.input_file)
@@ -124,7 +124,8 @@ impl ContractVerifier {
         }
 
         // Run basic verification
-        verify(&ast)
+        verify(&ast, self.config.async_enabled)
+            .await
             .map_err(|e| KslError::type_error(format!("Basic verification failed: {}", e), pos, "CONTRACT_VERIFY_ERROR".to_string()))?;
 
         // Verify specific property
@@ -193,7 +194,8 @@ impl ContractVerifier {
         }
 
         // Run basic verification
-        verify(&ast)
+        verify(&ast, self.config.async_enabled)
+            .await
             .map_err(|e| KslError::type_error(format!("Basic verification failed: {}", e), pos, "CONTRACT_VERIFY_ERROR".to_string()))?;
 
         // Verify specific property asynchronously

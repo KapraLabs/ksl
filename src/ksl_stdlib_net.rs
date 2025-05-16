@@ -717,14 +717,14 @@ impl RDMAContext {
     /// Connects to a remote RDMA endpoint
     pub async fn connect(&mut self, host: &str, port: u32) -> Result<u64, String> {
         let port_u32: u32 = port.try_into().unwrap();
-        let mut device = self.device.lock().await;
+        let device = self.device.lock().await;
         let conn_id = device.create_connection(host, port_u32).await?;
         Ok(conn_id)
     }
 
     /// Sends data using RDMA
     pub async fn send(&mut self, conn_id: u64, data: &[u8]) -> Result<usize, String> {
-        let mut device = self.device.lock().await;
+        let device = self.device.lock().await;
         let bytes_sent = device.send(conn_id, data).await?;
         self.metrics.total_bytes.fetch_add(bytes_sent as u64, Ordering::Relaxed);
         self.metrics.total_ops.fetch_add(1, Ordering::Relaxed);
@@ -774,6 +774,19 @@ impl P2PManager {
     async fn gather_ice_candidates(&self) -> Result<Vec<IceCandidate>, String> {
         // Implement ICE candidate gathering
         Ok(vec![])
+    }
+}
+
+impl PeerConnection {
+    /// Creates a new peer connection
+    pub fn new(peer_id: u64) -> Self {
+        PeerConnection {
+            id: peer_id,
+            state: ConnectionState::Connecting,
+            local_addr: SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0),
+            remote_addr: SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0),
+            rdma: None,
+        }
     }
 }
 
@@ -883,5 +896,50 @@ mod tests {
         assert!(response.is_ok());
         let bytes_sent = response.unwrap();
         assert!(matches!(bytes_sent, Value::U32(3)));
+    }
+}
+
+// Add implementation of RDMADevice with methods that were missing
+impl RDMADevice {
+    /// Creates a new RDMA device
+    pub fn new(config: RDMAConfig) -> Self {
+        RDMADevice {
+            name: config.device_name,
+            capabilities: RDMACapabilities {
+                max_msg_size: 4096,
+                max_qp_depth: 256,
+                supported_ops: vec![RDMAOp::Send, RDMAOp::Receive],
+            },
+            connections: HashMap::new(),
+        }
+    }
+
+    /// Creates a new RDMA connection
+    pub async fn create_connection(&self, host: &str, port: u32) -> Result<u64, String> {
+        // Implementation of RDMA connection establishment
+        // In a real implementation, this would use RDMA APIs
+        let conn_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+        
+        // Note: In a real implementation, we would store the connection
+        // self.connections.insert(conn_id, RDMAConnection { ... });
+        
+        Ok(conn_id)
+    }
+
+    /// Sends data over an RDMA connection
+    pub async fn send(&self, conn_id: u64, data: &[u8]) -> Result<usize, String> {
+        // Implementation of RDMA send
+        // In a real implementation, this would use RDMA APIs
+        
+        // Check if connection exists
+        if !self.connections.contains_key(&conn_id) {
+            return Err(format!("Connection {} not found", conn_id));
+        }
+        
+        // In a real implementation, we would use the connection to send data
+        Ok(data.len())
     }
 }

@@ -55,7 +55,7 @@ pub enum CompileTarget {
 }
 
 /// Optimization feedback for detailed metrics.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct OptimizationFeedback {
     pub functions_inlined: usize,
     pub loops_unrolled: usize,

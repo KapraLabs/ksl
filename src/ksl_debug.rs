@@ -29,6 +29,7 @@ use crate::ksl_errors::{KslError, SourcePosition};
 use std::fs;
 use std::io::{self, Write};
 use std::collections::HashSet;
+use std::collections::HashMap;
 
 // Debug command enum
 #[derive(Debug, PartialEq)]
@@ -53,7 +54,24 @@ pub struct Debugger {
 }
 
 impl Debugger {
-    pub fn new(file: &std::path::PathBuf) -> Result<Self, String> {
+    pub fn new() -> Result<Self, String> {
+        // Create an empty bytecode
+        let bytecode = KapraBytecode::new();
+        
+        // Initialize VM with empty bytecode
+        let vm = KapraVM::new(bytecode.clone());
+
+        Ok(Debugger {
+            vm,
+            bytecode,
+            breakpoints: HashSet::new(),
+            function_breakpoints: HashSet::new(),
+            running: true,
+            is_jit: false,
+        })
+    }
+
+    pub fn new_with_file(file: &std::path::PathBuf) -> Result<Self, String> {
         // Read source file
         let source = fs::read_to_string(file)
             .map_err(|e| format!("Failed to read file {}: {}", file.display(), e))?;
@@ -361,11 +379,51 @@ impl Debugger {
             println!("  Pending Tasks: {}", task_state.pending_tasks.len());
         }
     }
+
+    /// Set a breakpoint at a specific line number
+    pub fn set_breakpoint(&mut self, line_num: usize) {
+        // Convert line number to instruction index (simplified)
+        let breakpoint_index = line_num as u32;
+        self.breakpoints.insert(breakpoint_index);
+    }
+
+    /// Inspect variables in the current scope
+    pub fn inspect_variables(&self) -> HashMap<String, Vec<u8>> {
+        // In a real implementation, this would extract variable names and values
+        // from the VM's state
+        let mut variables = HashMap::new();
+        
+        // Return registers as variables for simplicity
+        for i in 0..16 {
+            if !self.vm.registers[i].is_empty() {
+                variables.insert(format!("r{}", i), self.vm.registers[i].clone());
+            }
+        }
+        
+        variables
+    }
+
+    /// Clear all breakpoints
+    pub fn clear_breakpoints(&mut self) {
+        self.breakpoints.clear();
+        self.function_breakpoints.clear();
+    }
+    
+    /// Check if execution should break at the current point
+    pub fn should_break(&self) -> bool {
+        // In a real implementation, this would check if the current position
+        // matches any breakpoint
+        if self.breakpoints.contains(&(self.vm.pc as u32)) {
+            return true;
+        }
+        
+        false
+    }
 }
 
 // Public API to start debugging
 pub fn debug(file: &std::path::PathBuf) -> Result<(), String> {
-    let mut debugger = Debugger::new(file)?;
+    let mut debugger = Debugger::new_with_file(file)?;
     debugger.run()
 }
 
@@ -408,7 +466,7 @@ mod tests {
             "fn main() { let x: u32 = 42; let y: u32 = x + x; }"
         ).unwrap();
 
-        let debugger = Debugger::new(&temp_file.path().to_path_buf());
+        let debugger = Debugger::new_with_file(&temp_file.path().to_path_buf());
         assert!(debugger.is_ok());
         let debugger = debugger.unwrap();
         assert_eq!(debugger.bytecode.instructions.len(), 4); // Mov, Add, Mov, Halt
@@ -422,7 +480,7 @@ mod tests {
             "fn main() { let x: u32 = 42; let y: u32 = x + x; }"
         ).unwrap();
 
-        let mut debugger = Debugger::new(&temp_file.path().to_path_buf()).unwrap();
+        let mut debugger = Debugger::new_with_file(&temp_file.path().to_path_buf()).unwrap();
         debugger.execute_command(DebugCommand::Break(1)).unwrap();
         debugger.execute_command(DebugCommand::Step).unwrap();
         assert_eq!(debugger.vm.pc, 1);
@@ -438,7 +496,7 @@ mod tests {
             "fn main() { let x: u32 = 42; }"
         ).unwrap();
 
-        let mut debugger = Debugger::new(&temp_file.path().to_path_buf()).unwrap();
+        let mut debugger = Debugger::new_with_file(&temp_file.path().to_path_buf()).unwrap();
         debugger.execute_command(DebugCommand::Step).unwrap();
         // Capture stdout for testing print
         let mut output = Vec::new();

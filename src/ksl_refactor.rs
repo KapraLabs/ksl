@@ -34,8 +34,8 @@ pub struct RefactorConfig {
     enable_async: bool,
 }
 
-/// Represents a single change made during refactoring.
-#[derive(Debug)]
+/// Represents a single refactoring change
+#[derive(Clone)]
 struct RefactorChange {
     /// Description of the change
     description: String,
@@ -77,20 +77,23 @@ impl RefactorTool {
             .map_err(|e| KslError::type_error(
                 format!("Failed to read file {}: {}", self.config.input_file.display(), e),
                 pos,
+                "REFACTOR_READ_ERROR".to_string()
             ))?;
         
         let mut ast = parse(&source)
             .map_err(|e| KslError::type_error(
                 format!("Parse error at position {}: {}", e.position, e.message),
                 pos,
+                "REFACTOR_PARSE_ERROR".to_string()
             ))?;
 
         // Analyze code before refactoring
         let mut analyzer = self.analyzer.lock().await;
-        let analysis = analyzer.analyze(&ast)
+        let analysis = analyzer.analyze_file(&ast)
             .map_err(|e| KslError::type_error(
                 format!("Analysis failed: {}", e),
                 pos,
+                "REFACTOR_ANALYSIS_ERROR".to_string()
             ))?;
 
         // Apply refactoring
@@ -107,24 +110,27 @@ impl RefactorTool {
             _ => return Err(KslError::type_error(
                 format!("Unsupported refactoring rule: {}", self.config.rule),
                 pos,
+                "REFACTOR_UNKNOWN_RULE".to_string()
             )),
         }
 
         // Validate refactored code
-        check(&ast)
+        check(&ast[..])
             .map_err(|errors| KslError::type_error(
                 errors.into_iter()
                     .map(|e| format!("Type error at position {}: {}", e.position, e.message))
                     .collect::<Vec<_>>()
                     .join("\n"),
                 pos,
+                "REFACTOR_TYPE_ERROR".to_string()
             ))?;
 
         // Analyze code after refactoring
-        let post_analysis = analyzer.analyze(&ast)
+        let post_analysis = analyzer.analyze_file(&ast)
             .map_err(|e| KslError::type_error(
                 format!("Post-refactoring analysis failed: {}", e),
                 pos,
+                "REFACTOR_POST_ANALYSIS_ERROR".to_string()
             ))?;
 
         // Compare analysis results
@@ -139,11 +145,13 @@ impl RefactorTool {
             .map_err(|e| KslError::type_error(
                 format!("Failed to create output file {}: {}", output_path.display(), e),
                 pos,
+                "REFACTOR_OUTPUT_ERROR".to_string()
             ))?
             .write_all(transformed_source.as_bytes())
             .map_err(|e| KslError::type_error(
                 format!("Failed to write output file {}: {}", output_path.display(), e),
                 pos,
+                "REFACTOR_WRITE_ERROR".to_string()
             ))?;
 
         // Generate report
@@ -153,11 +161,13 @@ impl RefactorTool {
                 .map_err(|e| KslError::type_error(
                     format!("Failed to create report file {}: {}", report_path.display(), e),
                     pos,
+                    "REFACTOR_REPORT_CREATE_ERROR".to_string()
                 ))?
                 .write_all(report_content.as_bytes())
                 .map_err(|e| KslError::type_error(
                     format!("Failed to write report file {}: {}", report_path.display(), e),
                     pos,
+                    "REFACTOR_REPORT_WRITE_ERROR".to_string()
                 ))?;
         } else {
             println!("{}", self.generate_report());
@@ -258,7 +268,7 @@ impl RefactorTool {
         match expr {
             AstNode::Expr { kind } => match kind {
                 ExprKind::Ident(name) if name == old_name => {
-                    *name = new_name.to_string();
+                    *kind = ExprKind::Ident(new_name.to_string());
                 }
                 ExprKind::BinaryOp { left, right, .. } => {
                     self.rename_in_expr(left, old_name, new_name).await?;
@@ -268,9 +278,6 @@ impl RefactorTool {
                     for arg in args {
                         self.rename_in_expr(arg, old_name, new_name).await?;
                     }
-                }
-                ExprKind::Async { expr } => {
-                    self.rename_in_expr(expr, old_name, new_name).await?;
                 }
                 _ => {}
             },
@@ -413,6 +420,7 @@ impl RefactorTool {
             return Err(KslError::type_error(
                 "Refactoring caused performance regression".to_string(),
                 pos,
+                "REFACTOR_PERFORMANCE_REGRESSION".to_string()
             ));
         }
 
@@ -421,6 +429,7 @@ impl RefactorTool {
             return Err(KslError::type_error(
                 "Refactoring increased memory usage".to_string(),
                 pos,
+                "REFACTOR_MEMORY_USAGE_INCREASE".to_string()
             ));
         }
 
@@ -446,6 +455,73 @@ impl RefactorTool {
             }
         }
         report
+    }
+
+    /// Helper function to inline variables within a body of statements
+    fn inline_in_body(&mut self, new_body: &mut Vec<AstNode>, var_name: &str, expr: &AstNode) -> Result<(), KslError> {
+        let pos = SourcePosition::new(1, 1);
+        
+        for i in 0..new_body.len() {
+            match &mut new_body[i] {
+                AstNode::Expr { kind: ExprKind::Ident(name) } if name == var_name => {
+                    // Replace variable reference with inlined expression
+                    new_body[i] = expr.clone();
+                }
+                AstNode::Expr { kind } => {
+                    // Recursively process expressions
+                    match kind {
+                        ExprKind::BinaryOp { left, right, .. } => {
+                            self.inline_in_expr(left, var_name, expr)?;
+                            self.inline_in_expr(right, var_name, expr)?;
+                        }
+                        ExprKind::Call { args, .. } => {
+                            for arg in args {
+                                self.inline_in_expr(arg, var_name, expr)?;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                AstNode::If { condition, then_branch, else_branch } => {
+                    self.inline_in_expr(condition, var_name, expr)?;
+                    self.inline_in_body(then_branch, var_name, expr)?;
+                    if let Some(else_branch) = else_branch {
+                        self.inline_in_body(else_branch, var_name, expr)?;
+                    }
+                }
+                _ => {}
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Helper function to inline variables within an expression
+    fn inline_in_expr(&mut self, node: &mut AstNode, var_name: &str, expr: &AstNode) -> Result<(), KslError> {
+        let pos = SourcePosition::new(1, 1);
+        
+        match node {
+            AstNode::Expr { kind: ExprKind::Ident(name) } if name == var_name => {
+                *node = expr.clone();
+            }
+            AstNode::Expr { kind } => {
+                match kind {
+                    ExprKind::BinaryOp { left, right, .. } => {
+                        self.inline_in_expr(left, var_name, expr)?;
+                        self.inline_in_expr(right, var_name, expr)?;
+                    }
+                    ExprKind::Call { args, .. } => {
+                        for arg in args {
+                            self.inline_in_expr(arg, var_name, expr)?;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+        
+        Ok(())
     }
 }
 

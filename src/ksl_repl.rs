@@ -38,6 +38,10 @@ use std::fs::{self, File};
 use std::io::Write;
 use tokio::runtime::Runtime;
 use wasmtime::*;
+use std::sync::Arc;
+use crate::ksl_network::NetworkManager;
+use crate::ksl_value::Value;
+use crate::ksl_async_vm::AsyncVM;
 
 /// REPL state
 pub struct Repl {
@@ -133,6 +137,29 @@ impl Repl {
             async_runtime: AsyncRuntime::new(),
             debugger: None,
             is_debug_mode: false,
+            loaded_modules: HashMap::new(),
+            wasm_engine,
+            wasm_store,
+            wasm_instances: HashMap::new(),
+        }
+    }
+
+    /// Creates a new REPL instance with configuration
+    pub fn new_with_config(config: ReplConfig) -> Self {
+        let bytecode = KapraBytecode::new();
+        let vm = KapraVM::new(bytecode.clone());
+        let wasm_engine = Some(Engine::default());
+        let wasm_store = wasm_engine.as_ref().map(|engine| Store::new(engine));
+        
+        Repl {
+            module_system: ModuleSystem::new(),
+            vm,
+            bytecode,
+            variables: HashMap::new(),
+            functions: HashMap::new(),
+            async_runtime: AsyncRuntime::new(),
+            debugger: None,
+            is_debug_mode: config.debug_mode,
             loaded_modules: HashMap::new(),
             wasm_engine,
             wasm_store,
@@ -680,6 +707,40 @@ impl Repl {
 
         Ok(())
     }
+
+    /// Evaluate code asynchronously with network support
+    pub async fn eval_async(&mut self, code: &str, network: &Arc<NetworkManager>, runtime: &Arc<AsyncRuntime>) -> Result<Value, String> {
+        // Parse code
+        let ast = parse(code)
+            .map_err(|e| format!("Parse error at position {}: {}", e.position, e.message))?;
+        
+        // Type check
+        check(ast.as_slice())
+            .map_err(|errors| errors.into_iter().map(|e| e.to_string()).collect::<Vec<_>>().join("\n"))?;
+            
+        // Check for async code
+        let has_async = ast.iter().any(|node| matches!(node, AstNode::AsyncFnDecl { .. }));
+        
+        if has_async {
+            // Handle async code
+            let async_vm = AsyncVM::new(self.bytecode.clone(), runtime.clone());
+            let result = async_vm.execute_async(code, network).await
+                .map_err(|e| e.to_string())?;
+            return Ok(result);
+        } else {
+            // Handle synchronous code
+            let bytecode = compile(ast.as_slice())
+                .map_err(|errors| errors.into_iter().map(|e| e.to_string()).collect::<Vec<_>>().join("\n"))?;
+                
+            self.vm = KapraVM::new(bytecode.clone());
+            let result = run(self.vm.clone())
+                .map_err(|e| format!("Runtime error: {}", e.message))?;
+                
+            // Get result value
+            let value = Value::String(format!("{:?}", result));
+            Ok(value)
+        }
+    }
 }
 
 /// Public API to start the REPL
@@ -723,6 +784,18 @@ mod ksl_async {
 
 mod ksl_debug {
     pub use super::{Debugger, DebugCommand};
+}
+
+mod ksl_network {
+    pub use super::NetworkManager;
+}
+
+mod ksl_value {
+    pub use super::Value;
+}
+
+mod ksl_async_vm {
+    pub use super::AsyncVM;
 }
 
 #[cfg(test)]

@@ -56,6 +56,7 @@ impl ModuleSystem {
             .map_err(|e| KslError::io_error(
                 format!("Failed to read package manifest: {}", e),
                 SourcePosition::new(1, 1),
+                "IO001".to_string()
             ))?;
 
         // Parse package manifest (simplified)
@@ -80,6 +81,7 @@ impl ModuleSystem {
             return Err(KslError::type_error(
                 format!("Cyclic dependency detected for module: {}", module_name),
                 SourcePosition::new(1, 1),
+                "MOD001".to_string()
             ));
         }
 
@@ -111,9 +113,10 @@ impl ModuleSystem {
                 .map_err(|e| KslError::io_error(
                     format!("Failed to read module {}: {}", module_name, e),
                     SourcePosition::new(1, 1),
+                    "IO002".to_string()
                 ))?;
             parse(&source)
-                .map_err(|e| KslError::parse(e.message, e.position, "E201".to_string()))?
+                .map_err(|e| KslError::parse(e.message, SourcePosition::new(e.position, 1), "E201".to_string()))?
         } else {
             vec![]
         };
@@ -128,8 +131,14 @@ impl ModuleSystem {
         }
 
         // Type-check the module
-        check(&ast)
-            .map_err(|errors| KslError::type_errors(errors))?;
+        check(&ast[..])
+            .map_err(|errors| {
+                let message = errors.iter()
+                    .map(|e| format!("Type error: {}", e.message))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                KslError::type_error(message, SourcePosition::new(1, 1), "E202".to_string())
+            })?;
 
         // Store the module
         self.modules.insert(module_name.to_string(), Module {
@@ -154,6 +163,7 @@ impl ModuleSystem {
         let main_mod = self.modules.get(main_module).ok_or_else(|| KslError::type_error(
             format!("Main module {} not found", main_module),
             SourcePosition::new(1, 1),
+            "MOD002".to_string()
         ))?;
 
         let mut linked_ast = vec![];
@@ -184,6 +194,7 @@ impl ModuleSystem {
         let module = self.modules.get(&module_name).ok_or_else(|| KslError::type_error(
             format!("Module {} not found", module_name),
             SourcePosition::new(1, 1),
+            "MOD003".to_string()
         ))?;
 
         // Handle standard library imports
@@ -201,6 +212,7 @@ impl ModuleSystem {
             return Err(KslError::type_error(
                 format!("Standard library item {} not found", full_name),
                 SourcePosition::new(1, 1),
+                "MOD004".to_string()
             ));
         }
 
@@ -230,6 +242,7 @@ impl ModuleSystem {
         Err(KslError::type_error(
             format!("Item {} not found in module {}", item, module_name),
             SourcePosition::new(1, 1),
+            "MOD005".to_string()
         ))
     }
 }
@@ -253,6 +266,7 @@ pub fn load_and_link(main_file: &PathBuf) -> Result<Vec<AstNode>, KslError> {
         .ok_or_else(|| KslError::type_error(
             "Invalid main file name".to_string(),
             SourcePosition::new(1, 1),
+            "MOD006".to_string()
         ))?;
     module_system.load_module(main_module_name, main_file)?;
     module_system.link(main_module_name)

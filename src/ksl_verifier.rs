@@ -84,7 +84,13 @@ impl<'a> Verifier<'a> {
                 AstNode::AsyncFnDecl { name, params, return_type, body, attributes, doc } => {
                     // Check for #[verify] attribute
                     if let Some(attr) = attributes.iter().find(|a| a.name == "verify") {
-                        let verify_attr = self.parse_verify_attribute(attr)?;
+                        let verify_attr = match self.parse_verify_attribute(attr) {
+                            Ok(attr) => attr,
+                            Err(err) => {
+                                self.errors.push(err);
+                                return Err(self.errors.clone());
+                            }
+                        };
                         if verify_attr.is_async {
                             if let Some(runtime) = &self.async_runtime {
                                 self.verify_async_function(name, params, return_type, body, &verify_attr, runtime).await?;
