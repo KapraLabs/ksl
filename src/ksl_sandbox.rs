@@ -11,7 +11,7 @@ use crate::ksl_parser::{parse, AstNode};
 use crate::ksl_checker::check;
 use crate::ksl_compiler::compile;
 use crate::ksl_bytecode::{KapraBytecode, KapraInstruction, KapraOpCode};
-use crate::kapra_vm::{KapraVM, run};
+use crate::kapra_vm::{KapraVM, run, run_async};
 use crate::ksl_module::ModuleSystem;
 use crate::ksl_errors::{KslError, SourcePosition};
 use std::fs;
@@ -30,7 +30,7 @@ use chrono::{Local, DateTime};
 use serde_json;
 use toml;
 
-/// Network usage quotas for sandboxed programs
+/// Network quota settings
 #[derive(Debug, Clone)]
 pub struct NetworkQuota {
     pub max_requests_per_second: u32,
@@ -52,8 +52,8 @@ impl Default for NetworkQuota {
     }
 }
 
-/// Security policy configuration for sandboxed execution
-#[derive(Debug)]
+/// Sandbox security policy
+#[derive(Debug, Clone)]
 pub struct SandboxPolicy {
     /// Whether to use container-based isolation
     pub containerize: bool,
@@ -345,12 +345,102 @@ impl Sandbox {
 
         Ok(())
     }
+
+    /// Runs a KSL program in a sandbox with the configured security policy asynchronously
+    pub async fn run_sandbox_async(&mut self, file: &PathBuf) -> Result<(), Vec<KslError>> {
+        let main_module_name = file.file_stem()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| vec![KslError::type_error(
+                "Invalid main file name".to_string(),
+                SourcePosition::new(1, 1),
+                "E401".to_string(),
+            )])?;
+
+        // Read source file
+        let source = fs::read_to_string(file)
+            .map_err(|e| vec![KslError::type_error(
+                e.to_string(), 
+                SourcePosition::new(1, 1),
+                "E402".to_string(),
+            )])?;
+
+        // Parse
+        let ast = parse(&source)
+            .map_err(|e| vec![KslError::type_error(
+                format!("Parse error at position {}: {}", e.position, e.message),
+                SourcePosition::new(1, 1),
+                "E403".to_string(),
+            )])?;
+
+        // Collect allowed functions from annotations
+        for node in &ast {
+            if let AstNode::FnDecl { attributes, name, .. } = node {
+                if attributes.iter().any(|attr| attr.name == "allow(http)") {
+                    self.allowed_functions.insert("http.get".to_string());
+                    self.policy.allow_http = true;
+                }
+                if attributes.iter().any(|attr| attr.name == "allow(sensor)") {
+                    self.allowed_functions.insert("device.sensor".to_string());
+                    self.policy.allow_sensor = true;
+                }
+            }
+        }
+
+        // Type-check
+        check(ast.as_slice())
+            .map_err(|errors| errors)?;
+
+        // Compile
+        let bytecode = compile(ast.as_slice())
+            .map_err(|errors| errors.into_iter().map(|e| KslError::type_error(
+                e.to_string(), 
+                SourcePosition::new(1, 1),
+                "E404".to_string(),
+            )).collect())?;
+
+        // Apply containerization if enabled
+        if self.policy.containerize {
+            // TODO: Implement container setup using Docker
+            // This would involve:
+            // 1. Creating a minimal container image
+            // 2. Setting up seccomp profile
+            // 3. Configuring resource limits
+            // 4. Mounting necessary files
+        }
+
+        // Run with sandbox restrictions
+        let mut vm = KapraVM::new_sandboxed(
+            bytecode.clone(),
+            &self.policy,
+            &self.allowed_functions,
+            self.policy.cpu_time_limit,
+        );
+
+        // Set up network monitoring
+        vm.set_network_monitor(Box::new(|domain| self.check_network_request(domain)));
+
+        // Run asynchronously
+        run_async(vm).await
+            .map_err(|e| vec![KslError::type_error(
+                format!("Sandbox violation at instruction {}: {}", e.pc, e.message),
+                SourcePosition::new(1, 1),
+                "E405".to_string(),
+            )])?;
+
+        Ok(())
+    }
 }
 
 // Public API to run a KSL program in a sandbox
 pub fn run_sandbox(file: &PathBuf) -> Result<(), Vec<KslError>> {
     let mut sandbox = Sandbox::new();
     sandbox.run_sandbox(file)
+}
+
+// Public API to run a KSL program in a sandbox asynchronously
+pub async fn run_sandbox_async(file: &PathBuf) -> Result<(), Vec<KslError>> {
+    let mut sandbox = Sandbox::new();
+    sandbox.run_sandbox_async(file).await
 }
 
 // Assume ksl_parser.rs, ksl_checker.rs, ksl_compiler.rs, ksl_bytecode.rs, kapra_vm.rs, ksl_module.rs, and ksl_errors.rs are in the same crate
@@ -371,7 +461,7 @@ mod ksl_bytecode {
 }
 
 mod kapra_vm {
-    pub use super::{KapraVM, run};
+    pub use super::{KapraVM, run, run_async};
 }
 
 mod ksl_module {

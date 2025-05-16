@@ -238,6 +238,7 @@ fn main() {
             .ok_or_else(|| KslError::type_error(
                 format!("Template {} not found", template_name),
                 pos,
+                "E301".to_string(),
             ))?;
 
         // Validate syntax
@@ -245,6 +246,7 @@ fn main() {
             .map_err(|e| KslError::type_error(
                 format!("Invalid template {}: {}", template_name, e.message),
                 SourcePosition::new(e.position, e.position),
+                "E302".to_string(),
             ))?;
 
         // Format code (simulate ksl_formatter.rs)
@@ -258,16 +260,19 @@ fn main() {
                 .map_err(|e| KslError::type_error(
                     format!("Failed to write temporary file {}: {}", temp_file.display(), e),
                     pos,
+                    "E303".to_string(),
                 ))?;
             generate(Some(&temp_file), false, Some(doc_path.parent().unwrap_or_else(|| Path::new("."))))
                 .map_err(|e| KslError::type_error(
                     format!("Documentation generation failed: {}", e),
                     pos,
+                    "E304".to_string(),
                 ))?;
             fs::remove_file(&temp_file)
                 .map_err(|e| KslError::type_error(
                     format!("Failed to clean up temporary file {}: {}", temp_file.display(), e),
                     pos,
+                    "E305".to_string(),
                 ))?;
         }
 
@@ -277,6 +282,7 @@ fn main() {
                 .map_err(|e| KslError::type_error(
                     format!("Failed to write output {}: {}", output_path.display(), e),
                     pos,
+                    "E306".to_string(),
                 ))?;
         } else {
             println!("{}", formatted_code);

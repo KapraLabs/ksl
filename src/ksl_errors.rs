@@ -114,6 +114,13 @@ pub enum KslError {
     },
 }
 
+// Implement From trait for converting String to KslError
+impl From<String> for KslError {
+    fn from(message: String) -> Self {
+        KslError::runtime_error(message, SourcePosition::new(0, 0), "E999".to_string())
+    }
+}
+
 impl KslError {
     /// Creates a parse error with a message, position, and error code.
     /// @param message The error message.
@@ -399,6 +406,22 @@ impl KslError {
     pub fn cli_error(message: String, position: SourcePosition, code: String) -> Self {
         Self::cli(message, position, code)
     }
+
+    /// Creates a new KslError based on the ErrorType
+    pub fn new(error_type: ErrorType, message: String) -> Self {
+        let pos = SourcePosition::new(0, 0);
+        match error_type {
+            ErrorType::ValidationError => Self::validation(message, pos, "E400".to_string()),
+            ErrorType::FileError => Self::io(message, pos, "E401".to_string()),
+            ErrorType::TemplateError => Self::not_found(message, pos, "E402".to_string()),
+            ErrorType::ConfigError => Self::io(message, pos, "E403".to_string()),
+            ErrorType::AsyncError => Self::runtime(message, 0, "E404".to_string()),
+            ErrorType::DataBlobError => Self::io(message, pos, "E405".to_string()),
+            ErrorType::DataBlobVerificationError => Self::validation(message, pos, "E406".to_string()),
+            ErrorType::DataBlobAllocationError => Self::runtime(message, 0, "E407".to_string()),
+            ErrorType::DataBlobTypeError => Self::type_error(message, pos, "E408".to_string()),
+        }
+    }
 }
 
 impl fmt::Display for KslError {
@@ -558,6 +581,11 @@ mod tests {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ErrorType {
     // ... existing error types ...
+    ValidationError,
+    FileError,
+    TemplateError,
+    ConfigError,
+    AsyncError,
     DataBlobError,
     DataBlobVerificationError,
     DataBlobAllocationError,
@@ -568,6 +596,11 @@ impl ErrorType {
     pub fn as_str(&self) -> &'static str {
         match self {
             // ... existing matches ...
+            ErrorType::ValidationError => "Validation error",
+            ErrorType::FileError => "File error",
+            ErrorType::TemplateError => "Template error",
+            ErrorType::ConfigError => "Configuration error",
+            ErrorType::AsyncError => "Async error",
             ErrorType::DataBlobError => "Data blob error",
             ErrorType::DataBlobVerificationError => "Data blob verification failed",
             ErrorType::DataBlobAllocationError => "Data blob allocation failed",

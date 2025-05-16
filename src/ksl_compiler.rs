@@ -48,6 +48,10 @@ pub enum CompileTarget {
     Bytecode,
     Native,
     Wasm,
+    Rust,
+    Python,
+    JavaScript,
+    TypeScript,
 }
 
 /// Optimization feedback for detailed metrics.

@@ -6,6 +6,7 @@
 use crate::ksl_parser::{parse, AstNode, ExprKind, ParseError};
 use crate::ksl_ast_transform::{transform, TransformRule, AstTransformer};
 use crate::ksl_compiler::{compile, CompileConfig, CompileTarget};
+use crate::ksl_analyzer::PerformanceMetrics;
 use crate::ksl_async::{AsyncRuntime, AsyncResult};
 use crate::ksl_errors::{KslError, SourcePosition};
 use serde::{Deserialize, Serialize};
@@ -90,11 +91,13 @@ impl Transpiler {
             .map_err(|e| KslError::type_error(
                 format!("Failed to read file {}: {}", self.config.input_file.display(), e),
                 pos,
+                "E500".to_string(),
             ))?;
         let mut ast = parse(&source)
             .map_err(|e| KslError::type_error(
                 format!("Parse error at position {}: {}", e.position, e.message),
                 pos,
+                "E501".to_string(),
             ))?;
 
         // Transform AST
@@ -102,16 +105,31 @@ impl Transpiler {
         ast = state.transformer.transform_async(&ast).await?;
 
         // Compile with target-specific config
-        let compile_config = CompileConfig {
-            target: match self.config.target {
-                TranspileTarget::Rust => CompileTarget::Rust,
-                TranspileTarget::Python => CompileTarget::Python,
-                TranspileTarget::JavaScript => CompileTarget::JavaScript,
-                TranspileTarget::TypeScript => CompileTarget::TypeScript,
-            },
-            ..self.config.compile_config.clone()
+        let module_name = self.config.input_file.file_stem()
+            .map(|stem| stem.to_string_lossy().to_string())
+            .unwrap_or_else(|| "unknown_module".to_string());
+            
+        let output_path = self.config.output_file.to_string_lossy().to_string();
+        let metrics = &crate::ksl_analyzer::PerformanceMetrics::default();
+        let enable_debug = false;
+        let hot_reload_config = None;
+            
+        let target = match self.config.target {
+            TranspileTarget::Rust => CompileTarget::Rust,
+            TranspileTarget::Python => CompileTarget::Python,
+            TranspileTarget::JavaScript => CompileTarget::JavaScript,
+            TranspileTarget::TypeScript => CompileTarget::TypeScript,
         };
-        let bytecode = compile(&ast, &compile_config)?;
+            
+        let (bytecode_str, _) = compile(
+            ast.as_slice(),
+            &module_name,
+            target,
+            &output_path,
+            metrics,
+            enable_debug,
+            hot_reload_config
+        )?;
 
         // Generate target code
         let output_code = match self.config.target {
@@ -126,6 +144,7 @@ impl Transpiler {
             .map_err(|e| KslError::type_error(
                 format!("Failed to write output file {}: {}", self.config.output_file.display(), e),
                 pos,
+                "E502".to_string(),
             ))?;
 
         Ok(())
@@ -152,10 +171,19 @@ impl Transpiler {
                     // Function signature
                     code.push_str(&format!("fn {}(", name));
                     let param_strings: Vec<String> = params.iter()
-                        .map(|(name, typ)| format!("{}: {}", name, self.type_to_rust(typ)?))
+                        .map(|(name, typ)| {
+                            match self.type_to_rust(typ) {
+                                Ok(type_str) => format!("{}: {}", name, type_str),
+                                Err(e) => format!("{}: /* Error: {} */", name, e),
+                            }
+                        })
                         .collect();
                     code.push_str(&param_strings.join(", "));
-                    code.push_str(&format!(") -> {} {{\n", self.type_to_rust(return_type)?));
+                    let return_type_str = match self.type_to_rust(return_type) {
+                        Ok(type_str) => type_str,
+                        Err(e) => format!("/* Error: {} */", e),
+                    };
+                    code.push_str(&format!(") -> {} {{\n", return_type_str));
 
                     // Function body
                     code.push_str(&self.transpile_rust_body_async(body).await?);
@@ -186,7 +214,12 @@ impl Transpiler {
                     // Function signature
                     code.push_str(&format!("def {}(", name));
                     let param_strings: Vec<String> = params.iter()
-                        .map(|(name, typ)| format!("{}: {}", name, self.type_to_python(typ)?))
+                        .map(|(name, typ)| {
+                            match self.type_to_python(typ) {
+                                Ok(type_str) => format!("{}: {}", name, type_str),
+                                Err(e) => format!("{}: # Error: {}", name, e),
+                            }
+                        })
                         .collect();
                     code.push_str(&param_strings.join(", "));
                     code.push_str("):\n");
@@ -250,10 +283,18 @@ impl Transpiler {
                     // Function signature
                     code.push_str(&format!("function {}(", name));
                     let param_strings: Vec<String> = params.iter()
-                        .map(|(name, typ)| format!("{}: {}", name, self.type_to_ts(typ)?))
+                        .map(|(name, typ)| {
+                            match self.type_to_ts(typ) {
+                                Ok(type_str) => format!("{}: {}", name, type_str),
+                                Err(e) => format!("{}: /* Error: {} */", name, e),
+                            }
+                        })
                         .collect();
-                    code.push_str(&param_strings.join(", "));
-                    code.push_str(&format!("): {} {{\n", self.type_to_ts(return_type)?));
+                    let return_type_str = match self.type_to_ts(return_type) {
+                        Ok(type_str) => type_str,
+                        Err(e) => format!("/* Error: {} */", e),
+                    };
+                    code.push_str(&format!("): {} {{\n", return_type_str));
 
                     // Function body
                     code.push_str(&self.transpile_ts_body_async(body).await?);
@@ -285,6 +326,7 @@ impl Transpiler {
             _ => Err(KslError::type_error(
                 format!("Unsupported type for Rust: {:?}", typ),
                 SourcePosition::new(1, 1),
+                "E503".to_string(),
             )),
         }
     }
@@ -308,6 +350,7 @@ impl Transpiler {
             _ => Err(KslError::type_error(
                 format!("Unsupported type for Python: {:?}", typ),
                 SourcePosition::new(1, 1),
+                "E504".to_string(),
             )),
         }
     }
@@ -331,8 +374,57 @@ impl Transpiler {
             _ => Err(KslError::type_error(
                 format!("Unsupported type for TypeScript: {:?}", typ),
                 SourcePosition::new(1, 1),
+                "E505".to_string(),
             )),
         }
+    }
+
+    /// Transpiles Rust function body asynchronously
+    async fn transpile_rust_body_async(&self, body: &[AstNode]) -> AsyncResult<String> {
+        let mut code = String::new();
+        code.push_str("    // Function body\n");
+        
+        // Add placeholder implementation
+        code.push_str("    // TODO: Implement full body transpilation\n");
+        code.push_str("    Ok(42) // Placeholder return\n");
+        
+        Ok(code)
+    }
+    
+    /// Transpiles Python function body asynchronously
+    async fn transpile_python_body_async(&self, body: &[AstNode]) -> AsyncResult<String> {
+        let mut code = String::new();
+        code.push_str("    # Function body\n");
+        
+        // Add placeholder implementation
+        code.push_str("    # TODO: Implement full body transpilation\n");
+        code.push_str("    return 42  # Placeholder return\n");
+        
+        Ok(code)
+    }
+    
+    /// Transpiles JavaScript function body asynchronously
+    async fn transpile_js_body_async(&self, body: &[AstNode]) -> AsyncResult<String> {
+        let mut code = String::new();
+        code.push_str("    // Function body\n");
+        
+        // Add placeholder implementation
+        code.push_str("    // TODO: Implement full body transpilation\n");
+        code.push_str("    return 42;  // Placeholder return\n");
+        
+        Ok(code)
+    }
+    
+    /// Transpiles TypeScript function body asynchronously
+    async fn transpile_ts_body_async(&self, body: &[AstNode]) -> AsyncResult<String> {
+        let mut code = String::new();
+        code.push_str("    // Function body\n");
+        
+        // Add placeholder implementation
+        code.push_str("    // TODO: Implement full body transpilation\n");
+        code.push_str("    return 42;  // Placeholder return\n");
+        
+        Ok(code)
     }
 }
 
@@ -369,6 +461,10 @@ mod ksl_checker {
 
 mod ksl_types {
     pub use super::Type;
+}
+
+mod ksl_analyzer {
+    pub use super::PerformanceMetrics;
 }
 
 #[cfg(test)]
@@ -453,4 +549,20 @@ mod tests {
         let result = transpile_async(config).await;
         assert!(result.is_ok());
     }
+}
+
+// Define PerformanceMetrics here
+/// Performance metrics for KSL 
+#[derive(Debug, Clone, Default)]
+pub struct PerformanceMetrics {
+    /// List of hot functions
+    pub hot_functions: Vec<String>,
+    /// Runtime performance data
+    pub execution_times: std::collections::HashMap<String, u64>,
+    /// Memory usage patterns
+    pub memory_usage: std::collections::HashMap<String, u64>,
+    /// Cache hit rates
+    pub cache_hits: u64,
+    /// Cache miss rates
+    pub cache_misses: u64,
 }

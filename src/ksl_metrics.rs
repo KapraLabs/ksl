@@ -86,9 +86,144 @@ pub struct MetricsCollector {
     metrics_cache: Arc<RwLock<HashMap<String, BlockResult>>>,
 }
 
+/// Type of metrics collected by the system
+#[derive(Debug, Clone)]
+pub enum MetricType {
+    /// CPU usage metrics (percentage)
+    CpuUsage(f64),
+    /// Memory usage metrics (MB)
+    MemoryUsage(f64),
+    /// Async operation metrics (ms)
+    AsyncOperation(f64),
+}
+
 impl MetricsCollector {
+    /// Create a default metrics collector
+    pub fn new() -> Self {
+        let meter_provider = MeterProvider::builder()
+            .with_reader(PeriodicReader::builder(opentelemetry_stdout::metrics_exporter(std::io::stdout()), Tokio).build())
+            .with_resource(Resource::new(vec![KeyValue::new("service.name", "ksl")]))
+            .build();
+
+        let meter = meter_provider.meter("ksl");
+
+        // Create metrics
+        let execution_time = meter
+            .f64_histogram("ksl.execution.time")
+            .with_description("Execution time of KSL functions")
+            .with_unit(Unit::new("s"))
+            .init();
+
+        let memory_usage = meter
+            .u64_counter("ksl.memory.usage")
+            .with_description("Memory usage of KSL program")
+            .with_unit(Unit::new("bytes"))
+            .init();
+
+        let error_count = meter
+            .u64_counter("ksl.error.count")
+            .with_description("Number of runtime errors in KSL program")
+            .init();
+
+        let http_latency = meter
+            .f64_histogram("ksl.http.latency")
+            .with_description("HTTP request latency")
+            .with_unit(Unit::new("s"))
+            .init();
+
+        let tcp_latency = meter
+            .f64_histogram("ksl.tcp.latency")
+            .with_description("TCP connection latency")
+            .with_unit(Unit::new("s"))
+            .init();
+
+        let async_latency = meter
+            .f64_histogram("ksl.async.latency")
+            .with_description("Async operation latency")
+            .with_unit(Unit::new("s"))
+            .init();
+
+        let tx_counter = meter
+            .u64_counter("transactions_processed")
+            .with_description("Number of transactions processed")
+            .init();
+
+        let failed_tx_counter = meter
+            .u64_counter("transactions_failed")
+            .with_description("Number of failed transactions")
+            .init();
+
+        let gas_usage = meter
+            .f64_histogram("gas_usage")
+            .with_description("Gas used per block")
+            .init();
+
+        let proof_gen_time = meter
+            .f64_histogram("proof_generation_time")
+            .with_description("Proof generation time in seconds")
+            .with_unit(Unit::new("s"))
+            .init();
+
+        let proof_verify_time = meter
+            .f64_histogram("proof_verification_time")
+            .with_description("Proof verification time in seconds")
+            .with_unit(Unit::new("s"))
+            .init();
+
+        let proof_size = meter
+            .f64_histogram("proof_size")
+            .with_description("Proof size in bytes")
+            .with_unit(Unit::new("By"))
+            .init();
+
+        let proof_success = meter
+            .u64_counter("proof_success")
+            .with_description("Number of successful proof verifications")
+            .init();
+
+        let proof_failure = meter
+            .u64_counter("proof_failure")
+            .with_description("Number of failed proof verifications")
+            .init();
+
+        let config = MetricsConfig {
+            otel_endpoint: None,
+            log_path: None,
+            trace_enabled: false,
+        };
+
+        MetricsCollector {
+            config,
+            meter,
+            data: Mutex::new(MetricsData {
+                execution_time,
+                memory_usage,
+                error_count,
+                http_latency,
+                tcp_latency,
+                async_latency,
+                traces: HashMap::new(),
+            }),
+            metrics: Vec::new(),
+            start_time: Local::now().timestamp(),
+            cache_hits: 0,
+            cache_misses: 0,
+            async_operations: Vec::new(),
+            execution_time,
+            tx_counter,
+            failed_tx_counter,
+            gas_usage,
+            proof_gen_time,
+            proof_verify_time,
+            proof_size,
+            proof_success,
+            proof_failure,
+            metrics_cache: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
     /// Create a new metrics collector with the given configuration
-    pub fn new(config: MetricsConfig) -> Result<Self, KslError> {
+    pub fn new_with_config(config: MetricsConfig) -> Result<Self, KslError> {
         let pos = SourcePosition::new(1, 1);
         
         // Initialize OpenTelemetry meter provider
@@ -504,6 +639,41 @@ impl MetricsCollector {
         let attributes = &[KeyValue::new("scheme", scheme.to_string())];
         Duration::from_secs_f64(self.proof_verify_time.get_value(attributes))
     }
+
+    pub fn get_metrics(&self) -> HashMap<String, MetricType> {
+        let mut metrics = HashMap::new();
+        
+        // Add CPU usage
+        metrics.insert("cpu_usage".to_string(), MetricType::CpuUsage(self.get_cpu_usage()));
+        
+        // Add memory metrics
+        let data = self.data.lock().unwrap();
+        metrics.insert("memory_usage".to_string(), MetricType::MemoryUsage(data.memory_usage.get() as f64 / 1024.0 / 1024.0));
+        
+        // Add async metrics
+        let async_metrics = self.get_async_metrics();
+        metrics.insert(
+            "async_operation_count".to_string(), 
+            MetricType::AsyncOperation(async_metrics.operation_count as f64)
+        );
+        metrics.insert(
+            "async_duration".to_string(), 
+            MetricType::AsyncOperation(async_metrics.async_duration.as_secs_f64() * 1000.0)
+        );
+        
+        // Add proof metrics
+        let attributes = &[];
+        metrics.insert(
+            "proof_gen_time".to_string(),
+            MetricType::CpuUsage(self.proof_gen_time.get_value(attributes))
+        );
+        metrics.insert(
+            "proof_verify_time".to_string(),
+            MetricType::CpuUsage(self.proof_verify_time.get_value(attributes))
+        );
+        
+        metrics
+    }
 }
 
 // Extend KapraVM for metrics collection
@@ -548,7 +718,7 @@ pub fn collect_metrics(file: &PathBuf, otel_endpoint: Option<String>, log_path: 
         log_path,
         trace_enabled,
     };
-    let collector = MetricsCollector::new(config)?;
+    let collector = MetricsCollector::new_with_config(config)?;
     collector.start_collection();
     collector.collect(file)
 }

@@ -243,7 +243,10 @@ impl RuntimeMonitor {
     /// Runs the monitored program.
     pub async fn run(&mut self, bytecode: Bytecode) -> Result<String, KslError> {
         let pos = SourcePosition::new(1, 1);
-        let mut vm = KapraVM::new();
+        
+        // Initialize Kapra VM with appropriate parameters
+        let bytecode = KapraBytecode::empty(); // Create empty bytecode or appropriate bytecode
+        let mut vm = KapraVM::new(bytecode, None, None);
 
         // Execute with monitoring
         vm.execute(&bytecode, self).await?;
@@ -283,6 +286,7 @@ pub async fn run_runtime_monitor(file: &str) -> Result<String, KslError> {
         _ => return Err(KslError::type_error(
             format!("Unknown project type for file: {}", file),
             pos,
+            "E203".to_string(),
         )),
     };
 

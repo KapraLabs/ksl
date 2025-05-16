@@ -238,11 +238,30 @@ impl KapraVM {
 
     /// Creates a new KapraVM instance with a transaction ID generator
     pub fn new_with_tx_generator(bytecode: KapraBytecode, runtime: Option<Arc<AsyncRuntime>>, gas_limit: Option<u64>) -> (Self, TransactionIdGenerator) {
-        let vm = KapraVM::new(bytecode, runtime, gas_limit);
-        let generator = TransactionIdGenerator::new();
-        (vm, generator)
+        let tx_generator = TransactionIdGenerator::new();
+        (Self::new(bytecode, runtime, gas_limit), tx_generator)
     }
 
+    /// Creates a new VM instance with profiling enabled
+    pub fn new_with_profiling(bytecode: KapraBytecode) -> Self {
+        let mut vm = Self::new(bytecode.clone(), Some(Arc::new(AsyncRuntime::new())), None);
+        
+        // Enable metrics collection for profiling
+        vm.metrics_data = Some(MetricsData {
+            memory_usage: Vec::new(),
+            instruction_counts: HashMap::new(),
+            call_graph: HashMap::new(),
+            memory_allocations: HashMap::new(),
+            current_alloc_id: 0,
+        });
+        
+        // Enable debug mode for detailed tracking
+        vm.debug_mode = true;
+        
+        vm
+    }
+
+    /// Enables debug mode
     pub fn enable_debug(&mut self) {
         self.debug_mode = true;
     }
@@ -1466,6 +1485,16 @@ pub fn run(bytecode: KapraBytecode, async_support: bool, debug_mode: bool) -> Re
         vm.enable_debug();
     }
     vm.run()?;
+    Ok(())
+}
+
+/// Run a program asynchronously
+pub async fn run_async(bytecode: KapraBytecode, async_support: bool, debug_mode: bool) -> Result<(), KslError> {
+    let mut vm = KapraVM::new(bytecode, None, None);
+    if debug_mode {
+        vm.enable_debug();
+    }
+    vm.run_async().await?;
     Ok(())
 }
 

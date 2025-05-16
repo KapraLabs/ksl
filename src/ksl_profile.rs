@@ -321,13 +321,14 @@ impl Profiler {
             ))?;
 
         // Start metrics collection
-        self.metrics_collector.expect("Failed to initialize metrics collector").start_collection();
+        self.metrics_collector.start_collection();
 
         // Run program with async support
         vm.run_async().await
             .map_err(|e| KslError::type_error(
                 format!("Execution error: {}", e),
                 pos,
+                "PROFILE_EXECUTION_ERROR".to_string()
             ))?;
 
         // Stop metrics collection

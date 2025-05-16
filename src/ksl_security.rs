@@ -109,10 +109,11 @@ impl SecurityAnalyzer {
         self.analyze_ast_async(&ast).await?;
 
         // Verify security properties
-        verify(&ast)
+        verify(&ast, self.config.use_async).await
             .map_err(|e| KslError::type_error(
                 format!("Verification failed: {}", e),
                 pos,
+                "E115".to_string(),
             ))?;
 
         // Generate report
@@ -323,6 +324,22 @@ mod ksl_verifier {
 
 mod ksl_errors {
     pub use super::{KslError, SourcePosition};
+}
+
+/// Extract capabilities from annotations like #[allow(http)]
+fn extract_capabilities(ast: &[AstNode]) -> HashSet<String> {
+    let mut capabilities = HashSet::new();
+    for node in ast {
+        if let AstNode::FnDecl { attributes, .. } = node {
+            for attr in attributes {
+                if attr.name.starts_with("allow(") && attr.name.ends_with(")") {
+                    let capability = attr.name[6..attr.name.len()-1].to_string();
+                    capabilities.insert(capability);
+                }
+            }
+        }
+    }
+    capabilities
 }
 
 #[cfg(test)]

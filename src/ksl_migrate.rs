@@ -31,7 +31,7 @@ pub struct MigrationConfig {
 }
 
 /// Represents a single change made during migration.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct MigrationChange {
     /// Description of the change
     description: String,
@@ -75,12 +75,14 @@ impl Migrator {
             .map_err(|e| KslError::type_error(
                 format!("Failed to read file {}: {}", self.config.input_file.display(), e),
                 pos,
+                "E101".to_string(),
             ))?;
         
         let mut ast = parse(&source)
             .map_err(|e| KslError::type_error(
                 format!("Parse error at position {}: {}", e.position, e.message),
                 pos,
+                "E102".to_string(),
             ))?;
 
         // Apply migration transformations
@@ -91,17 +93,19 @@ impl Migrator {
             _ => return Err(KslError::type_error(
                 format!("Unsupported target version: {}", self.config.target_version),
                 pos,
+                "E103".to_string(),
             )),
         }
 
         // Validate transformed AST
-        check(&ast)
+        check(ast.as_slice())
             .map_err(|errors| KslError::type_error(
                 errors.into_iter()
                     .map(|e| format!("Type error at position {}: {}", e.position, e.message))
                     .collect::<Vec<_>>()
                     .join("\n"),
                 pos,
+                "E104".to_string(),
             ))?;
 
         // Serialize AST back to source code
@@ -113,11 +117,13 @@ impl Migrator {
             .map_err(|e| KslError::type_error(
                 format!("Failed to create output file {}: {}", output_path.display(), e),
                 pos,
+                "E105".to_string(),
             ))?
             .write_all(transformed_source.as_bytes())
             .map_err(|e| KslError::type_error(
                 format!("Failed to write output file {}: {}", output_path.display(), e),
                 pos,
+                "E106".to_string(),
             ))?;
 
         // Generate migration report
@@ -127,11 +133,13 @@ impl Migrator {
                 .map_err(|e| KslError::type_error(
                     format!("Failed to create report file {}: {}", report_path.display(), e),
                     pos,
+                    "E107".to_string(),
                 ))?
                 .write_all(report_content.as_bytes())
                 .map_err(|e| KslError::type_error(
                     format!("Failed to write report file {}: {}", report_path.display(), e),
                     pos,
+                    "E108".to_string(),
                 ))?;
         } else {
             println!("{}", self.generate_report());
@@ -203,6 +211,7 @@ impl Migrator {
                         .map_err(|e| KslError::type_error(
                             format!("AST transformation failed: {}", e),
                             pos,
+                            "E109".to_string(),
                         ))?;
                     new_ast.push(transformed_node);
                 }
@@ -213,7 +222,7 @@ impl Migrator {
         for node in ast.iter() {
             if let AstNode::VarDecl { type_annot, .. } = node {
                 if let Some(TypeAnnotation::Array { element, size }) = type_annot {
-                    if element.contains('[') {
+                    if element.to_string().contains('[') {
                         self.changes.push(MigrationChange {
                             description: "Deprecated array syntax".to_string(),
                             position: pos,
@@ -287,6 +296,7 @@ impl Migrator {
                         .map_err(|e| KslError::type_error(
                             format!("AST transformation failed: {}", e),
                             pos,
+                            "E110".to_string(),
                         ))?;
                     new_body.push(transformed_node);
                 }

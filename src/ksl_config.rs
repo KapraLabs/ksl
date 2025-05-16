@@ -38,6 +38,14 @@ pub struct Config {
     output_dir: Option<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ProjectConfig {
+    pub name: String,
+    pub template: String,
+    pub version: String,
+    pub license: String,
+}
+
 // Configuration manager
 pub struct ConfigManager {
     config_path: PathBuf,
@@ -51,75 +59,28 @@ pub trait AsyncConfigManager {
 }
 
 impl ConfigManager {
-    pub fn new() -> Result<Self, KslError> {
-        let pos = SourcePosition::new(1, 1);
+    pub fn new() -> Self {
+        // Default configuration path in ~/.ksl/config.toml
         let config_path = home_dir()
-            .ok_or_else(|| KslError::type_error("Failed to locate home directory".to_string(), pos, "E1001".to_string()))?
+            .unwrap_or_default()
             .join(".ksl/config.toml");
 
-        let config = if config_path.exists() {
-            let mut file = File::open(&config_path)
-                .map_err(|e| KslError::type_error(
-                    format!("Failed to open config file {}: {}", config_path.display(), e),
-                    pos,
-                    "E1002".to_string(),
-                ))?;
-            let mut contents = String::new();
-            file.read_to_string(&mut contents)
-                .map_err(|e| KslError::type_error(
-                    format!("Failed to read config file {}: {}", config_path.display(), e),
-                    pos,
-                    "E1003".to_string(),
-                ))?;
-            toml::from_str(&contents)
-                .map_err(|e| KslError::type_error(
-                    format!("Failed to parse config file: {}", e),
-                    pos,
-                    "E1004".to_string(),
-                ))?
-        } else {
-            // Create default config
-            let default_config = Config {
-                optimize_level: Some(1),
-                target_arch: Some("x86_64".to_string()),
-                enable_wasm: Some(false),
-                vm_memory_limit: Some(1024),
-                vm_stack_size: Some(8192),
-                enable_jit: Some(true),
-                aws_region: None,
-                aws_bucket: None,
-                prometheus_port: None,
-                docserver_port: None,
-                output_dir: None,
-            };
-            let contents = toml::to_string(&default_config)
-                .map_err(|e| KslError::type_error(
-                    format!("Failed to serialize default config: {}", e),
-                    pos,
-                    "E1005".to_string(),
-                ))?;
-            fs::create_dir_all(config_path.parent().unwrap())
-                .map_err(|e| KslError::type_error(
-                    format!("Failed to create config directory {}: {}", config_path.parent().unwrap().display(), e),
-                    pos,
-                    "E1006".to_string(),
-                ))?;
-            File::create(&config_path)
-                .map_err(|e| KslError::type_error(
-                    format!("Failed to create config file {}: {}", config_path.display(), e),
-                    pos,
-                    "E1007".to_string(),
-                ))?
-                .write_all(contents.as_bytes())
-                .map_err(|e| KslError::type_error(
-                    format!("Failed to write config file {}: {}", config_path.display(), e),
-                    pos,
-                    "E1008".to_string(),
-                ))?;
-            default_config
+        // Default configuration
+        let config = Config {
+            optimize_level: Some(1),
+            target_arch: Some("x86_64".to_string()),
+            enable_wasm: Some(false),
+            vm_memory_limit: Some(1024),
+            vm_stack_size: Some(8192),
+            enable_jit: Some(true),
+            aws_region: None,
+            aws_bucket: None,
+            prometheus_port: None,
+            docserver_port: None,
+            output_dir: None,
         };
 
-        Ok(ConfigManager { config_path, config })
+        ConfigManager { config_path, config }
     }
 
     // Load configuration with environment variable overrides
@@ -326,6 +287,45 @@ impl ConfigManager {
 
         Ok(())
     }
+
+    /// Saves a project configuration to the project directory
+    pub async fn save_project_config(&self, config: &ProjectConfig) -> Result<(), KslError> {
+        let pos = SourcePosition::new(1, 1);
+        let contents = toml::to_string(config)
+            .map_err(|e| KslError::type_error(
+                format!("Failed to serialize project config: {}", e),
+                pos,
+                "E1032".to_string(),
+            ))?;
+        
+        let config_path = Path::new(&config.name).join("ksl_project.toml");
+        
+        tokio_fs::create_dir_all(config_path.parent().unwrap())
+            .await
+            .map_err(|e| KslError::type_error(
+                format!("Failed to create project directory {}: {}", config_path.parent().unwrap().display(), e),
+                pos,
+                "E1033".to_string(),
+            ))?;
+            
+        let mut file = tokio_fs::File::create(&config_path)
+            .await
+            .map_err(|e| KslError::type_error(
+                format!("Failed to create project config file {}: {}", config_path.display(), e),
+                pos,
+                "E1034".to_string(),
+            ))?;
+            
+        file.write_all(contents.as_bytes())
+            .await
+            .map_err(|e| KslError::type_error(
+                format!("Failed to write project config file {}: {}", config_path.display(), e),
+                pos,
+                "E1035".to_string(),
+            ))?;
+
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -430,13 +430,13 @@ impl AsyncConfigManager for ConfigManager {
 
 // Public API to manage configuration
 pub fn get_config(key: &str) -> Result<Option<String>, KslError> {
-    let mut manager = ConfigManager::new()?;
+    let mut manager = ConfigManager::new();
     manager.load()?;
     Ok(manager.get(key))
 }
 
 pub fn set_config(key: &str, value: &str) -> Result<(), KslError> {
-    let mut manager = ConfigManager::new()?;
+    let mut manager = ConfigManager::new();
     manager.set(key, value)
 }
 
