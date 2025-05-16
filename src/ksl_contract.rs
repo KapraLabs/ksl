@@ -197,140 +197,181 @@ pub struct ContractModule {
 /// Contract identifier
 pub type ContractId = [u8; 32];
 
-/// Contract ABI
-#[derive(Debug, Clone)]
-pub struct ContractAbi {
-    /// Contract functions
-    functions: Vec<ContractFunction>,
-    /// Contract events
-    events: Vec<ContractEvent>,
-    /// Contract storage layout
-    storage: Vec<StorageLayout>,
-}
-
-/// Contract function
-#[derive(Debug, Clone)]
+/// Represents a contract function in the ABI
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContractFunction {
     /// Function name
-    name: String,
-    /// Function parameters
-    params: Vec<(String, Type)>,
-    /// Return type
-    return_type: Type,
-    /// Function visibility
-    visibility: Visibility,
-    /// Gas limit
-    gas_limit: u64,
+    pub name: String,
+    /// Parameter types
+    pub params: Vec<String>,
+    /// Return type (if any)
+    pub return_type: Option<String>,
+    /// Whether the function is a view function (read-only)
+    pub is_view: bool,
+    /// Whether the function is externally callable
+    pub is_external: bool,
 }
 
-/// Storage layout
-#[derive(Debug, Clone)]
-pub struct StorageLayout {
-    /// Field name
-    name: String,
-    /// Field type
-    field_type: Type,
-    /// Storage slot
-    slot: u64,
-    /// Field offset
-    offset: u32,
+/// Represents an event in the contract ABI
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContractEvent {
+    /// Event name
+    pub name: String,
+    /// Event fields
+    pub fields: Vec<(String, String)>,
+    /// Whether the event is indexed
+    pub indexed: bool,
 }
 
-/// Compilation mode for contracts
-#[derive(Debug, Clone, PartialEq)]
-pub enum CompilationMode {
-    /// Traditional bytecode compilation
-    Bytecode,
-    /// LLVM-based ahead-of-time compilation
-    Aot {
-        target: String,
-        opt_level: OptimizationLevel,
-    },
-    /// LLVM-based just-in-time compilation
-    Jit {
-        opt_level: OptimizationLevel,
-        speculative: bool,
-    },
+/// Represents a struct in the contract ABI
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContractStruct {
+    /// Struct name
+    pub name: String,
+    /// Struct fields with types
+    pub fields: Vec<(String, String)>,
 }
 
-/// Security profile
-#[derive(Debug, Clone)]
-pub struct SecurityProfile {
-    /// Allowed system calls
-    allowed_syscalls: Vec<String>,
-    /// Memory limits
-    memory_limits: MemoryLimits,
-    /// Call depth limit
-    max_call_depth: u32,
-    /// Static analysis checks
-    static_checks: Vec<SecurityCheck>,
+/// Represents a contract's Application Binary Interface (ABI)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContractAbi {
+    /// Contract functions
+    pub functions: Vec<ContractFunction>,
+    /// Contract events
+    pub events: Vec<ContractEvent>,
+    /// Contract structs
+    pub structs: Vec<ContractStruct>,
 }
 
-/// Memory limits
-#[derive(Debug, Clone)]
-pub struct MemoryLimits {
-    /// Maximum memory pages
-    max_pages: u32,
-    /// Maximum stack size
-    max_stack: u32,
-    /// Maximum allocation size
-    max_allocation: u32,
+/// Contract address type
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct ContractAddress([u8; 32]);
+
+impl ContractAddress {
+    /// Creates a new contract address from a byte array
+    pub fn new(addr: [u8; 32]) -> Self {
+        ContractAddress(addr)
+    }
+
+    /// Gets the raw bytes of the address
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    /// Converts the address to a hex string
+    pub fn to_hex(&self) -> String {
+        let mut result = String::with_capacity(66);
+        result.push_str("0x");
+        for byte in &self.0 {
+            result.push_str(&format!("{:02x}", byte));
+        }
+        result
+    }
+
+    /// Creates a contract address from a hex string
+    pub fn from_hex(hex: &str) -> Result<Self, String> {
+        let hex = hex.strip_prefix("0x").unwrap_or(hex);
+        if hex.len() != 64 {
+            return Err("Invalid address length".to_string());
+        }
+
+        let mut bytes = [0u8; 32];
+        for i in 0..32 {
+            let pos = i * 2;
+            let byte_str = &hex[pos..pos + 2];
+            bytes[i] = u8::from_str_radix(byte_str, 16)
+                .map_err(|e| format!("Invalid hex character: {}", e))?;
+        }
+
+        Ok(ContractAddress(bytes))
+    }
 }
 
-/// Gas model
-#[derive(Debug, Clone)]
-pub struct GasModel {
-    /// Base cost
-    base_cost: u64,
-    /// Operation costs
-    op_costs: HashMap<String, u64>,
-    /// Memory expansion cost
-    memory_expansion_cost: u64,
-    /// Storage cost
-    storage_cost: u64,
+/// Contract instance for interacting with deployed contracts
+pub struct Contract {
+    /// Contract address
+    address: ContractAddress,
+    /// Contract ABI
+    abi: ContractAbi,
+    /// Client for making remote calls
+    client: Option<ContractClient>,
 }
 
-/// Contract metadata
-#[derive(Debug, Clone)]
-pub struct ContractMetadata {
-    /// Contract name
-    name: String,
-    /// Contract version
-    version: String,
-    /// Contract author
-    author: String,
-    /// Contract description
-    description: String,
-    /// Source code hash
-    source_hash: [u8; 32],
-    /// Compilation timestamp
-    timestamp: u64,
+/// Contract client for making remote calls
+pub struct ContractClient {
+    /// Node endpoint
+    endpoint: String,
+    /// Authentication token (if required)
+    auth_token: Option<String>,
 }
 
-/// Function visibility
-#[derive(Debug, Clone, PartialEq)]
-pub enum Visibility {
-    /// Public function
-    Public,
-    /// Private function
-    Private,
-    /// External function
-    External,
+impl Contract {
+    /// Creates a new contract instance
+    pub fn new(address: ContractAddress, abi: ContractAbi) -> Self {
+        Contract {
+            address,
+            abi,
+            client: None,
+        }
+    }
+
+    /// Sets the client for making remote calls
+    pub fn with_client(mut self, endpoint: &str, auth_token: Option<&str>) -> Self {
+        self.client = Some(ContractClient {
+            endpoint: endpoint.to_string(),
+            auth_token: auth_token.map(|s| s.to_string()),
+        });
+        self
+    }
+
+    /// Gets the contract ABI
+    pub fn abi(&self) -> &ContractAbi {
+        &self.abi
+    }
+
+    /// Gets the contract address
+    pub fn address(&self) -> &ContractAddress {
+        &self.address
+    }
+
+    /// Finds a function by name in the contract ABI
+    pub fn find_function(&self, name: &str) -> Option<&ContractFunction> {
+        self.abi.functions.iter().find(|f| f.name == name)
+    }
+
+    /// Gets all functions in the contract ABI
+    pub fn functions(&self) -> &[ContractFunction] {
+        &self.abi.functions
+    }
+
+    /// Gets all events in the contract ABI
+    pub fn events(&self) -> &[ContractEvent] {
+        &self.abi.events
+    }
+
+    /// Gets all structs in the contract ABI
+    pub fn structs(&self) -> &[ContractStruct] {
+        &self.abi.structs
+    }
 }
 
-/// Compilation metrics
-#[derive(Debug, Default)]
-pub struct CompilationMetrics {
-    /// Total contracts compiled
-    total_compiled: u64,
-    /// Total WASM size
-    total_wasm_size: u64,
-    /// Total native size
-    total_native_size: u64,
-    /// Average compilation time
-    avg_compilation_time_ms: u64,
+/// Contract compiler
+pub struct ContractCompiler {
+    /// LLVM context
+    llvm_context: Option<Context>,
+    /// Contract registry
+    registry: Arc<RwLock<ContractRegistry>>,
+    /// Contract verifier
+    verifier: Arc<ContractVerifier>,
+    /// Compilation metrics
+    metrics: CompilationMetrics,
+    /// Configuration
+    config: ContractConfig,
+    /// Async runtime
+    runtime: AsyncRuntime,
 }
 
+/// Contract compiler
 impl ContractCompiler {
     /// Creates a new contract compiler
     pub fn new(config: ContractConfig) -> Self {
@@ -677,7 +718,7 @@ impl Default for ContractAbi {
         ContractAbi {
             functions: Vec::new(),
             events: Vec::new(),
-            storage: Vec::new(),
+            structs: Vec::new(),
         }
     }
 }

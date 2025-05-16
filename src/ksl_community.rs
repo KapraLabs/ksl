@@ -260,6 +260,7 @@ impl Voting {
             return Err(KslError::validation_error(
                 format!("{} has already voted.", voter),
                 SourcePosition::new(1, 1),
+                "E501".to_string()
             ));
         }
 
@@ -325,22 +326,13 @@ impl Community {
     pub async fn submit_package(&mut self, package: Package, reviewer: &str) -> Result<(), KslError> {
         let package_key = format!("{}-{}", package.name, package.version);
         if self.reviews.contains_key(&package_key) {
-            return Err(KslError::validation_error(
-                format!("Package '{}' is already under review.", package_key),
-                SourcePosition::new(1, 1),
-            ));
+                        return Err(KslError::validation_error(                format!("Package '{}' is already under review.", package_key),                SourcePosition::new(1, 1),                "E502".to_string()            ));
         }
 
         // Check compliance with guidelines
         let violations = self.guidelines.check_compliance(&package).await?;
         if !violations.is_empty() {
-            return Err(KslError::validation_error(
-                format!("Package '{}' violates contributor guidelines:\n{}", 
-                    package_key, 
-                    violations.join("\n")
-                ),
-                SourcePosition::new(1, 1),
-            ));
+                        return Err(KslError::validation_error(                format!("Package '{}' violates contributor guidelines:\n{}",                     package_key,                     violations.join("\n")                ),                SourcePosition::new(1, 1),                "E503".to_string()            ));
         }
 
         let mut async_ctx = self.async_context.lock().await;
@@ -364,6 +356,7 @@ impl Community {
             KslError::not_found_error(
                 format!("Package '{}' not found in review queue.", package_key),
                 SourcePosition::new(1, 1),
+                "E601".to_string()
             )
         })?;
 
@@ -393,6 +386,7 @@ impl Community {
             return Err(KslError::validation_error(
                 format!("Voting for proposal '{}' already exists.", proposal),
                 SourcePosition::new(1, 1),
+                "E504".to_string()
             ));
         }
 
@@ -410,6 +404,7 @@ impl Community {
             KslError::not_found_error(
                 format!("Voting for proposal '{}' not found.", proposal),
                 SourcePosition::new(1, 1),
+                "E602".to_string()
             )
         })?;
 
@@ -443,6 +438,7 @@ impl Community {
             _ => Err(KslError::cli_error(
                 "Unsupported command".to_string(),
                 SourcePosition::new(1, 1),
+                "E701".to_string()
             )),
         }
     }

@@ -9,13 +9,11 @@ use crate::ksl_errors::{KslError, SourcePosition};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use reqwest::Client;
-use tar::Builder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use std::fs::{self, File};
-use std::io::Write;
+use std::io::{self, Read, Write};
 use std::path::PathBuf;
-use toml;
 use serde::{Deserialize, Serialize};
 use crate::ksl_validator_keys::{ValidatorKeys, Signature};
 use crate::ksl_contract::{ContractAbi, ContractFunction};
@@ -25,9 +23,10 @@ use sha2::{Sha256, Digest};
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::path::Path;
-use tar::Header;
 use flate2::Compress;
 use reqwest::StatusCode;
+use serde_json::json;
+use tar::{Builder, Header};
 
 /// Package publish configuration
 #[derive(Debug, Clone)]
@@ -138,11 +137,13 @@ impl PackagePublisher {
             .map_err(|e| KslError::io_error(
                 format!("Failed to read directory {}: {}", path.display(), e),
                 SourcePosition::new(1, 1),
+                "E101".to_string()
             ))? {
             let entry = entry
                 .map_err(|e| KslError::io_error(
                     format!("Failed to read directory entry: {}", e),
                     SourcePosition::new(1, 1),
+                    "E102".to_string()
                 ))?;
             let path = entry.path();
 
@@ -153,7 +154,8 @@ impl PackagePublisher {
                     .map_err(|e| KslError::io_error(
                         format!("Failed to read file {}: {}", path.display(), e),
                         SourcePosition::new(1, 1),
-            ))?;
+                        "E103".to_string()
+                    ))?;
                 files.insert(path.strip_prefix(path).unwrap().to_path_buf(), content);
             }
         }
@@ -170,12 +172,14 @@ impl PackagePublisher {
             .map_err(|e| KslError::serialization_error(
                 format!("Failed to serialize package metadata: {}", e),
                 SourcePosition::new(1, 1),
+                "E201".to_string()
             ))?;
         let mut header = Header::new_gnu();
         header.set_path("metadata.json")
             .map_err(|e| KslError::io_error(
                 format!("Failed to set metadata path: {}", e),
                 SourcePosition::new(1, 1),
+                "E104".to_string()
             ))?;
         header.set_size(metadata.len() as u64);
         header.set_mode(0o644);
@@ -183,6 +187,7 @@ impl PackagePublisher {
             .map_err(|e| KslError::io_error(
                 format!("Failed to append metadata: {}", e),
                 SourcePosition::new(1, 1),
+                "E105".to_string()
             ))?;
 
         // Add package files
@@ -192,13 +197,15 @@ impl PackagePublisher {
                 .map_err(|e| KslError::io_error(
                     format!("Failed to set file path: {}", e),
                     SourcePosition::new(1, 1),
+                    "E106".to_string()
                 ))?;
             header.set_size(content.len() as u64);
             header.set_mode(0o644);
-            builder.append(&header, content)
+            builder.append(&header, content.as_slice())
                 .map_err(|e| KslError::io_error(
                     format!("Failed to append file: {}", e),
                     SourcePosition::new(1, 1),
+                    "E107".to_string()
                 ))?;
         }
 
@@ -206,40 +213,24 @@ impl PackagePublisher {
             .map_err(|e| KslError::io_error(
                 format!("Failed to finish archive: {}", e),
                 SourcePosition::new(1, 1),
+                "E108".to_string()
             ))?;
 
-        // Compress archive
-        let mut compress = Compress::new(Compression::best(), false);
+        // Compress the tar archive with gzip
         let mut compressed = Vec::new();
-        let mut buffer = [0; 1024];
-        let mut cursor = std::io::Cursor::new(&tar_data);
-
-        loop {
-            let n = cursor.read(&mut buffer)
-                .map_err(|e| KslError::io_error(
-                    format!("Failed to read archive: {}", e),
-                    SourcePosition::new(1, 1),
-                ))?;
-            if n == 0 {
-                break;
-            }
-
-            let mut out = vec![0; n * 2];
-            let n = compress.compress(&buffer[..n], &mut out, flate2::FlushCompress::None)
-                .map_err(|e| KslError::io_error(
-                    format!("Failed to compress archive: {}", e),
-                    SourcePosition::new(1, 1),
-                ))?;
-            compressed.extend_from_slice(&out[..n]);
-        }
-
-        let mut out = vec![0; 1024];
-        let n = compress.finish(&mut out)
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::best());
+        encoder.write_all(&tar_data)
+            .map_err(|e| KslError::io_error(
+                format!("Failed to compress archive: {}", e),
+                SourcePosition::new(1, 1),
+                "E109".to_string()
+            ))?;
+        compressed = encoder.finish()
             .map_err(|e| KslError::io_error(
                 format!("Failed to finish compression: {}", e),
                 SourcePosition::new(1, 1),
+                "E110".to_string()
             ))?;
-        compressed.extend_from_slice(&out[..n]);
 
         Ok(compressed)
     }
@@ -262,28 +253,28 @@ impl PackagePublisher {
         // Upload to registry
         let token = self.registry_token.as_ref()
             .ok_or_else(|| KslError::validation_error(
-                "No registry token provided".to_string(),
+                format!("No registry token provided"),
                 SourcePosition::new(1, 1),
+                "E201".to_string()
             ))?;
 
         let response = self.registry_client
-            .post("https://registry.ksl.dev/upload")
+            .post(format!("https://registry.ksl.dev/packages/{}/{}/publish", archive.config.name, archive.config.version))
             .header("Authorization", format!("Bearer {}", token))
-            .json(&archive.config)
             .body(compressed)
             .send()
             .await
             .map_err(|e| KslError::network(
                 format!("Failed to publish package: {}", e),
                 SourcePosition::new(1, 1),
-                "E305".to_string()
+                "E307".to_string()
             ))?;
 
         if response.status() != StatusCode::OK {
             return Err(KslError::network(
                 format!("Failed to publish package: HTTP {}", response.status()),
                 SourcePosition::new(1, 1),
-                "E306".to_string()
+                "E308".to_string()
             ));
         }
 
@@ -295,10 +286,21 @@ impl PackagePublisher {
         for (path, content) in &archive.files {
             if path.extension().map_or(false, |ext| ext == "ksl") {
                 let gas_stats = self.analyzer.analyze_gas_usage_from_source(content).await?;
-                if gas_stats.avg_gas > 1_000_000 {
+                // Check for unsafe macro combinations
+                if content.contains("#[validator]") && content.contains("#[async]") {
+                }
+                if content.contains("unsafe") && !content.contains("#[allow(unsafe)]") {
                     return Err(KslError::validation_error(
-                        format!("Contract {} exceeds gas limit", path.display()),
+                        format!("Unsafe code in {} without #[allow(unsafe)]", path.display()),
                         SourcePosition::new(1, 1),
+                        "E202".to_string()
+                    ));
+                }
+                if gas_stats.gas_utilization > 0.8 {
+                    return Err(KslError::validation_error(
+                        format!("Contract exceeds gas limit: {} in {}", gas_stats.gas_utilization, path.display()),
+                        SourcePosition::new(1, 1),
+                        "E208".to_string()
                     ));
                 }
             }
@@ -311,18 +313,21 @@ impl PackagePublisher {
         for (path, content) in &archive.files {
             if path.extension().map_or(false, |ext| ext == "ksl") {
                 // Check for unsafe macro combinations
-                if content.contains("#[validator]") && content.contains("#[async]") {
+                let content_str = String::from_utf8_lossy(content);
+                if content_str.contains("#[validator]") && content_str.contains("#[async]") {
                     return Err(KslError::validation_error(
                         format!("Invalid macro combination in {}", path.display()),
                         SourcePosition::new(1, 1),
+                        "E203".to_string()
                     ));
-        }
+                }
 
                 // Check for unsafe FFI
-                if content.contains("unsafe") && !content.contains("#[allow(unsafe)]") {
+                if content_str.contains("unsafe") && !content_str.contains("#[allow(unsafe)]") {
                     return Err(KslError::validation_error(
                         format!("Unsafe code in {} without #[allow(unsafe)]", path.display()),
                         SourcePosition::new(1, 1),
+                        "E204".to_string()
                     ));
                 }
             }
@@ -341,6 +346,7 @@ impl PackagePublisher {
                         .map_err(|e| KslError::io_error(
                             format!("Failed to write ABI docs: {}", e),
                             SourcePosition::new(1, 1),
+                            "E111".to_string()
                         ))?;
                 }
             }
@@ -369,8 +375,9 @@ impl PackagePublisher {
     pub async fn yank_package(&self, name: &str, version: &str) -> AsyncResult<()> {
         let token = self.registry_token.as_ref()
             .ok_or_else(|| KslError::validation_error(
-                "No registry token provided".to_string(),
+                format!("No registry token provided"),
                 SourcePosition::new(1, 1),
+                "E205".to_string()
             ))?;
 
         let response = self.registry_client
@@ -399,16 +406,17 @@ impl PackagePublisher {
     pub async fn deprecate_package(&self, name: &str, version: &str, reason: &str) -> AsyncResult<()> {
         let token = self.registry_token.as_ref()
             .ok_or_else(|| KslError::validation_error(
-                "No registry token provided".to_string(),
+                format!("No registry token provided"),
                 SourcePosition::new(1, 1),
+                "E206".to_string()
             ))?;
 
         let response = self.registry_client
             .post(format!("https://registry.ksl.dev/packages/{}/{}/deprecate", name, version))
             .header("Authorization", format!("Bearer {}", token))
             .json(&json!({ "reason": reason }))
-                    .send()
-                    .await
+            .send()
+            .await
             .map_err(|e| KslError::network(
                 format!("Failed to deprecate package: {}", e),
                 SourcePosition::new(1, 1),
@@ -423,15 +431,16 @@ impl PackagePublisher {
             ));
         }
 
-                Ok(())
+        Ok(())
     }
 
     /// Rollback package version
     pub async fn rollback_package(&self, name: &str, version: &str) -> AsyncResult<()> {
         let token = self.registry_token.as_ref()
             .ok_or_else(|| KslError::validation_error(
-                "No registry token provided".to_string(),
+                format!("No registry token provided"),
                 SourcePosition::new(1, 1),
+                "E207".to_string()
             ))?;
 
         let response = self.registry_client

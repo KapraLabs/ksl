@@ -256,10 +256,40 @@ impl EmbeddedVM {
         let command = AsyncCommand::ExecuteBytecode(bytecode.clone());
         async_ctx.execute_command(command).await?;
 
+        // Convert to the Kapra validator bytecode format
+        let kapra_bytecode = self.convert_to_kapra_bytecode(bytecode);
+        
         // Execute using Kapra VM
-        self.kapra_vm.execute(bytecode).await?;
+        self.kapra_vm.execute(&kapra_bytecode).await?;
 
         Ok(())
+    }
+
+    /// Converts embedded bytecode to Kapra validator bytecode
+    fn convert_to_kapra_bytecode(&self, bytecode: &Bytecode) -> crate::ksl_kapra_validator::Bytecode {
+        // Create a new Kapra bytecode instance with the same instructions
+        let mut kapra_constants = Vec::new();
+        
+        // Convert constants if needed
+        for constant in &bytecode.constants {
+            // Add appropriate constant conversion here
+            // This is a simplified example
+            match constant {
+                Constant::U64(val) => {
+                    kapra_constants.push(crate::ksl_kapra_validator::Constant::U64(*val));
+                },
+                Constant::String(s) => {
+                    kapra_constants.push(crate::ksl_kapra_validator::Constant::String(s.clone()));
+                },
+                // Add more conversions as needed
+                _ => { /* Handle other constant types */ },
+            }
+        }
+        
+        crate::ksl_kapra_validator::Bytecode::new(
+            bytecode.instructions.clone(),
+            kapra_constants
+        )
     }
 
     /// Checks stack overflow.
@@ -335,7 +365,7 @@ impl EmbeddedCompiler {
 }
 
 /// Runs embedded compilation asynchronously.
-pub async fn run_compile_embedded(file: &str) -> Result<Vec<u8>, KslError> {
+pub async fn run_compile_embedded(_file: &str) -> Result<Vec<u8>, KslError> {
     let memory_limit = 32 * 1024; // 32KB
     let compiler = EmbeddedCompiler::new(memory_limit);
     

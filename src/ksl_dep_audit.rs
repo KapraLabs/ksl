@@ -28,6 +28,32 @@ impl Package {
             license: license.to_string(),
         }
     }
+
+    pub fn load(project: &str) -> Result<Self, KslError> {
+        // Load package from project
+        // This is a mock implementation for demonstration
+        Ok(Package {
+            name: project.to_string(),
+            version: SemVer::new(1, 0, 0),
+            dependencies: vec![],
+            license: "MIT".to_string(),
+        })
+    }
+
+    pub fn metadata(&self) -> PackageMetadata {
+        // Return package metadata
+        PackageMetadata {}
+    }
+
+    /// Returns the package license
+    pub fn license(&self) -> &str {
+        &self.license
+    }
+
+    /// Returns the package name
+    pub fn name(&self) -> &str {
+        &self.name
+    }
 }
 
 /// Represents a semantic version (aligned with ksl_package_version.rs).

@@ -269,7 +269,7 @@ impl Scheduler {
         for (_, task, metadata) in &self.tasks {
             // Check resource limits
             if let Some(error) = self.limits.check(&metadata.resource_usage) {
-                return Err(KslError::scheduler_error(error, SourcePosition::new(1, 1)));
+                return Err(KslError::scheduler_error(error, SourcePosition::new(1, 1), "E301".to_string()));
             }
 
             // Execute contract if present
@@ -302,7 +302,7 @@ impl Scheduler {
 
     async fn execute_consensus(&self, consensus: &ConsensusRuntime, task: &Bytecode) -> AsyncResult<bool> {
         // Execute consensus tasks
-        let result = consensus.validate_block(&[0; 32], 0).await?;
+        let result = consensus.validate_block_gpu(&[0; 32], 0).await?;
         Ok(result)
     }
 }
@@ -819,11 +819,11 @@ impl KapraScheduler {
 
     /// Predicts workload for the next epoch
     pub async fn predict_workload(&self) -> Result<u32, String> {
-        let history = self.workload_history.read().await;
-        let prediction = history.prediction_model.predict(&history.history);
+        let _history = self.workload_history.read().await;
+        let prediction = self.prediction_model.predict(&self.history);
         
         // Update prediction metrics
-        if let Some(actual) = history.history.last() {
+        if let Some(actual) = self.history.last() {
             let error = (prediction as i64 - actual.total_workload as i64).abs() as u64;
             self.metrics.avg_prediction_error.fetch_add(error, Ordering::Relaxed);
             self.metrics.successful_predictions.fetch_add(1, Ordering::Relaxed);
@@ -903,7 +903,7 @@ impl KapraScheduler {
         let mut rng = rand::thread_rng();
         
         for _ in 0..count {
-            selected.insert(rng.gen());
+            selected.insert(rng.random());
         }
         
         Ok(selected)
@@ -911,7 +911,7 @@ impl KapraScheduler {
 
     /// Calculates retry path for validator
     async fn calculate_retry_path(&self, validator: &ValidatorState) -> Result<u32, String> {
-        let history = self.workload_history.read().await;
+        let _history = self.workload_history.read().await;
         
         // Calculate retry path based on:
         // 1. Current workload

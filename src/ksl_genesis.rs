@@ -673,10 +673,7 @@ impl GenesisBundle {
 
     /// Resolves validator DNS names to IP addresses
     pub async fn resolve_validator_dns(&mut self) -> Result<(), String> {
-        let resolver = TokioAsyncResolver::tokio(
-            ResolverConfig::default(),
-            ResolverOpts::default(),
-        ).map_err(|e| format!("Failed to create DNS resolver: {}", e))?;
+                let resolver = match TokioAsyncResolver::tokio(            ResolverConfig::default(),            ResolverOpts::default(),        ) {            Ok(r) => r,            Err(e) => return Err(format!("Failed to create DNS resolver: {}", e)),        };
 
         for validator in &mut self.validators {
             if let Some(ref dns_name) = validator.dns_name {

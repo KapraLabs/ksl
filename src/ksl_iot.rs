@@ -186,7 +186,7 @@ impl NetClient {
     /// 
     /// # Returns
     /// A Result indicating success or failure
-    pub async fn send(&self, topic: &[u8], message: &[u8]) -> Result<(), IoTRuntimeError> {
+    pub async fn send(&self, _topic: &[u8], _message: &[u8]) -> Result<(), IoTRuntimeError> {
         match self.protocol {
             NetworkProtocol::CoAP => {
                 // Implement CoAP protocol

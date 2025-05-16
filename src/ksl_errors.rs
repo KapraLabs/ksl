@@ -55,6 +55,7 @@ impl fmt::Display for SourcePosition {
 }
 
 // Main error type for KSL
+#[derive(Debug)]
 pub enum KslError {
     Parse {
         message: String,
@@ -77,6 +78,36 @@ pub enum KslError {
         code: String,
     },
     Network {
+        message: String,
+        position: SourcePosition,
+        code: String,
+    },
+    Serialization {
+        message: String,
+        position: SourcePosition,
+        code: String,
+    },
+    IO {
+        message: String,
+        position: SourcePosition,
+        code: String,
+    },
+    Validation {
+        message: String,
+        position: SourcePosition,
+        code: String,
+    },
+    NotFound {
+        message: String,
+        position: SourcePosition,
+        code: String,
+    },
+    Scheduler {
+        message: String,
+        position: SourcePosition,
+        code: String,
+    },
+    CLI {
         message: String,
         position: SourcePosition,
         code: String,
@@ -149,6 +180,84 @@ impl KslError {
         KslError::Network { message, position, code }
     }
 
+    /// Creates a serialization error with a message, position, and error code.
+    /// @param message The error message.
+    /// @param position The source position of the error.
+    /// @param code The error code (e.g., "E011").
+    /// @returns A new `KslError::Serialization` variant.
+    /// @example
+    /// ```ksl
+    /// let err = KslError::serialization("Serialization failed".to_string(), SourcePosition::new(1, 5), "E011".to_string());
+    /// ```
+    pub fn serialization(message: String, position: SourcePosition, code: String) -> Self {
+        KslError::Serialization { message, position, code }
+    }
+
+    /// Creates an I/O error with a message, position, and error code.
+    /// @param message The error message.
+    /// @param position The source position of the error.
+    /// @param code The error code (e.g., "E012").
+    /// @returns A new `KslError::IO` variant.
+    /// @example
+    /// ```ksl
+    /// let err = KslError::io("File not found".to_string(), SourcePosition::new(1, 5), "E012".to_string());
+    /// ```
+    pub fn io(message: String, position: SourcePosition, code: String) -> Self {
+        KslError::IO { message, position, code }
+    }
+
+    /// Creates a validation error with a message, position, and error code.
+    /// @param message The error message.
+    /// @param position The source position of the error.
+    /// @param code The error code (e.g., "E013").
+    /// @returns A new `KslError::Validation` variant.
+    /// @example
+    /// ```ksl
+    /// let err = KslError::validation("Invalid input".to_string(), SourcePosition::new(1, 5), "E013".to_string());
+    /// ```
+    pub fn validation(message: String, position: SourcePosition, code: String) -> Self {
+        KslError::Validation { message, position, code }
+    }
+
+    /// Creates a not found error with a message, position, and error code.
+    /// @param message The error message.
+    /// @param position The source position of the error.
+    /// @param code The error code (e.g., "E014").
+    /// @returns A new `KslError::NotFound` variant.
+    /// @example
+    /// ```ksl
+    /// let err = KslError::not_found("Resource not found".to_string(), SourcePosition::new(1, 5), "E014".to_string());
+    /// ```
+    pub fn not_found(message: String, position: SourcePosition, code: String) -> Self {
+        KslError::NotFound { message, position, code }
+    }
+
+    /// Creates a scheduler error with a message, position, and error code.
+    /// @param message The error message.
+    /// @param position The source position of the error.
+    /// @param code The error code (e.g., "E015").
+    /// @returns A new `KslError::Scheduler` variant.
+    /// @example
+    /// ```ksl
+    /// let err = KslError::scheduler("Scheduler error".to_string(), SourcePosition::new(1, 5), "E015".to_string());
+    /// ```
+    pub fn scheduler(message: String, position: SourcePosition, code: String) -> Self {
+        KslError::Scheduler { message, position, code }
+    }
+
+    /// Creates a CLI error with a message, position, and error code.
+    /// @param message The error message.
+    /// @param position The source position of the error.
+    /// @param code The error code (e.g., "E016").
+    /// @returns A new `KslError::CLI` variant.
+    /// @example
+    /// ```ksl
+    /// let err = KslError::cli("CLI error".to_string(), SourcePosition::new(1, 5), "E016".to_string());
+    /// ```
+    pub fn cli(message: String, position: SourcePosition, code: String) -> Self {
+        KslError::CLI { message, position, code }
+    }
+
     /// Logs the error with a stack trace using ksl_logger.
     /// @example
     /// ```ksl
@@ -210,7 +319,85 @@ impl KslError {
                 },
                 severity: ksl_lsp::Severity::Error,
             },
+            KslError::Serialization { message, position, code } => ksl_lsp::Diagnostic {
+                message: format!("[{}] {}", code, message),
+                range: ksl_lsp::Range {
+                    start: *position,
+                    end: *position,
+                },
+                severity: ksl_lsp::Severity::Error,
+            },
+            KslError::IO { message, position, code } => ksl_lsp::Diagnostic {
+                message: format!("[{}] {}", code, message),
+                range: ksl_lsp::Range {
+                    start: *position,
+                    end: *position,
+                },
+                severity: ksl_lsp::Severity::Error,
+            },
+            KslError::Validation { message, position, code } => ksl_lsp::Diagnostic {
+                message: format!("[{}] {}", code, message),
+                range: ksl_lsp::Range {
+                    start: *position,
+                    end: *position,
+                },
+                severity: ksl_lsp::Severity::Error,
+            },
+            KslError::NotFound { message, position, code } => ksl_lsp::Diagnostic {
+                message: format!("[{}] {}", code, message),
+                range: ksl_lsp::Range {
+                    start: *position,
+                    end: *position,
+                },
+                severity: ksl_lsp::Severity::Error,
+            },
+            KslError::Scheduler { message, position, code } => ksl_lsp::Diagnostic {
+                message: format!("[{}] {}", code, message),
+                range: ksl_lsp::Range {
+                    start: *position,
+                    end: *position,
+                },
+                severity: ksl_lsp::Severity::Error,
+            },
+            KslError::CLI { message, position, code } => ksl_lsp::Diagnostic {
+                message: format!("[{}] {}", code, message),
+                range: ksl_lsp::Range {
+                    start: *position,
+                    end: *position,
+                },
+                severity: ksl_lsp::Severity::Error,
+            },
         }
+    }
+
+    /// Alias for serialization
+    pub fn serialization_error(message: String, position: SourcePosition, code: String) -> Self {
+        Self::serialization(message, position, code)
+    }
+
+    /// Alias for io
+    pub fn io_error(message: String, position: SourcePosition, code: String) -> Self {
+        Self::io(message, position, code)
+    }
+
+    /// Alias for validation
+    pub fn validation_error(message: String, position: SourcePosition, code: String) -> Self {
+        Self::validation(message, position, code)
+    }
+
+    /// Alias for not_found
+    pub fn not_found_error(message: String, position: SourcePosition, code: String) -> Self {
+        Self::not_found(message, position, code)
+    }
+
+    /// Alias for scheduler
+    pub fn scheduler_error(message: String, position: SourcePosition, code: String) -> Self {
+        Self::scheduler(message, position, code)
+    }
+
+    /// Alias for cli
+    pub fn cli_error(message: String, position: SourcePosition, code: String) -> Self {
+        Self::cli(message, position, code)
     }
 }
 
@@ -231,6 +418,24 @@ impl fmt::Display for KslError {
             }
             KslError::Network { message, position, code } => {
                 write!(f, "Network error [{}] at {}: {}", code, position, message)
+            }
+            KslError::Serialization { message, position, code } => {
+                write!(f, "Serialization error [{}] at {}: {}", code, position, message)
+            }
+            KslError::IO { message, position, code } => {
+                write!(f, "I/O error [{}] at {}: {}", code, position, message)
+            }
+            KslError::Validation { message, position, code } => {
+                write!(f, "Validation error [{}] at {}: {}", code, position, message)
+            }
+            KslError::NotFound { message, position, code } => {
+                write!(f, "Not found error [{}] at {}: {}", code, position, message)
+            }
+            KslError::Scheduler { message, position, code } => {
+                write!(f, "Scheduler error [{}] at {}: {}", code, position, message)
+            }
+            KslError::CLI { message, position, code } => {
+                write!(f, "CLI error [{}] at {}: {}", code, position, message)
             }
         }
     }

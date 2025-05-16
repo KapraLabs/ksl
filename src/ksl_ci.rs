@@ -389,10 +389,9 @@ impl CiSystem {
         }
 
         // Check runtime bounds
-        if let Some(metrics) = self.collect_resource_metrics()? {
-            self.check_runtime_bounds(&metrics)?;
-            self.update_chart_data(&metrics);
-        }
+        let metrics = self.collect_resource_metrics()?;
+        self.check_runtime_bounds(&metrics)?;
+        self.update_chart_data(&metrics);
 
         // Check for regressions
         self.check_regressions()?;
@@ -477,14 +476,15 @@ impl CiSystem {
             snapshot_dir: None,
             update_snapshots: false,
             measure_gas: true,
+            output_dir: self.config.output_dir.clone(),
         };
 
-        let test_result = crate::ksl_test::run_tests(file, test_config).await?;
+        let test_result: Result<(), String> = crate::ksl_test::run_tests(file, test_config).await;
         let duration = start_time.elapsed();
 
         // Collect resource metrics if enabled
         let resource_metrics = if self.config.measure_resources {
-            self.collect_resource_metrics()?
+            Some(self.collect_resource_metrics()?)
         } else {
             None
         };
@@ -505,7 +505,6 @@ impl CiSystem {
             duration,
             gas_metrics: self.analyzer.get_gas_stats().map(|stats| GasStats {
                 total_gas: stats.total_gas,
-                max_gas: stats.max_gas,
                 avg_gas: stats.avg_gas,
                 gas_by_operation: stats.gas_by_operation.clone(),
             }),
@@ -793,6 +792,81 @@ impl CiSystem {
                 }
             }
         }
+        Ok(())
+    }
+
+    // Load baseline
+    fn load_baseline(&mut self) -> Result<(), String> {
+        let file = std::fs::File::open(&self.config.baseline_path)
+            .map_err(|e| format!("Failed to open baseline file: {}", e))?;
+        
+        let results: Vec<CiTestResult> = serde_json::from_reader(file)
+            .map_err(|e| format!("Failed to parse baseline file: {}", e))?;
+        
+        // Index baseline results by hash
+        for result in results {
+            let key = format!("{}:{:?}", result.name, result.target);
+            self.baseline_results.insert(key, result);
+        }
+        
+        Ok(())
+    }
+
+    // Check for regressions
+    fn check_regressions(&mut self) -> Result<(), String> {
+        self.regressions.clear();
+        
+        for result in &self.current_results {
+            let key = format!("{}:{:?}", result.name, result.target);
+            
+            if let Some(baseline) = self.baseline_results.get(&key) {
+                // Check gas usage regression
+                if let (Some(current_gas), Some(baseline_gas)) = (&result.gas_metrics, &baseline.gas_metrics) {
+                    let threshold = 0.05; // 5% threshold
+                    
+                    if current_gas.total_gas > (baseline_gas.total_gas as f64 * (1.0 + threshold)) as u64 {
+                        self.regressions.push(CiRegression {
+                            test_name: result.name.clone(),
+                            target: result.target,
+                            regression_type: RegressionType::GasUsage,
+                            baseline_value: baseline_gas.total_gas as f64,
+                            current_value: current_gas.total_gas as f64,
+                            threshold,
+                        });
+                    }
+                }
+                
+                // Check execution time regression
+                let threshold = 0.10; // 10% threshold
+                if result.duration > baseline.duration.mul_f64(1.0 + threshold) {
+                    self.regressions.push(CiRegression {
+                        test_name: result.name.clone(),
+                        target: result.target,
+                        regression_type: RegressionType::ExecutionTime,
+                        baseline_value: baseline.duration.as_millis() as f64,
+                        current_value: result.duration.as_millis() as f64,
+                        threshold,
+                    });
+                }
+                
+                // Check memory usage regression
+                if let (Some(current_metrics), Some(baseline_metrics)) = (&result.resource_metrics, &baseline.resource_metrics) {
+                    let threshold = 0.15; // 15% threshold
+                    
+                    if current_metrics.memory_usage > (baseline_metrics.memory_usage as f64 * (1.0 + threshold)) as u64 {
+                        self.regressions.push(CiRegression {
+                            test_name: result.name.clone(),
+                            target: result.target,
+                            regression_type: RegressionType::MemoryUsage,
+                            baseline_value: baseline_metrics.memory_usage as f64 / (1024.0 * 1024.0),
+                            current_value: current_metrics.memory_usage as f64 / (1024.0 * 1024.0),
+                            threshold,
+                        });
+                    }
+                }
+            }
+        }
+        
         Ok(())
     }
 }

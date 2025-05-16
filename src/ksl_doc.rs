@@ -12,7 +12,7 @@ use crate::ksl_stdlib_math::MathStdLib;
 use crate::ksl_stdlib_io::IOStdLib;
 use crate::ksl_stdlib_net::NetStdLib;
 use crate::ksl_errors::{KslError, SourcePosition};
-use crate::ksl_docgen::{DocGen, DocItem, DocParam, DocReturn};
+use crate::ksl_docgen::{DocGen, DocItem, DocParam, DocReturn, DocGenConfig};
 use crate::ksl_async::AsyncRuntime;
 use std::fs::{self, File};
 use std::io::Write;
@@ -53,6 +53,7 @@ impl DocGenerator {
             .ok_or_else(|| KslError::type_error(
                 "Invalid main file name".to_string(),
                 SourcePosition::new(1, 1),
+                "E200".to_string(),
             ))?;
 
         // Load and link modules asynchronously
@@ -69,16 +70,19 @@ impl DocGenerator {
 
         // Write to output file
         fs::create_dir_all(output.parent().unwrap_or(output))
-            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1)))?;
+            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1), "E201".to_string()))?;
         let output_file = output.join(format!("{}.md", main_module_name));
         let mut file = File::create(&output_file)
-            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1)))?;
+            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1), "E202".to_string()))?;
         file.write_all(markdown.as_bytes())
-            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1)))?;
+            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1), "E203".to_string()))?;
 
         // Generate JSON documentation
         let doc_items = self.generate_doc_items(&ast)?;
-        let docgen = DocGen::new(main_module_name.to_string(), output.clone());
+        let docgen = DocGen::new(DocGenConfig {
+            library: main_module_name.to_string(),
+            output_dir: output.clone(),
+        });
         docgen.generate(&doc_items)?;
 
         Ok(())
@@ -87,7 +91,7 @@ impl DocGenerator {
     /// Generates documentation for the standard library with async support
     pub async fn generate_for_std_async(&self, output: &PathBuf) -> Result<(), KslError> {
         fs::create_dir_all(output)
-            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1)))?;
+            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1), "E204".to_string()))?;
 
         // Generate Markdown for stdlib
         let mut markdown = String::new();
@@ -95,38 +99,41 @@ impl DocGenerator {
 
         // Crypto functions
         markdown.push_str("## Module std::crypto\n\n");
-        for func in &self.crypto_stdlib.functions {
+        for func in self.crypto_stdlib.get_functions() {
             self.document_std_function(&mut markdown, func, 3)?;
         }
 
         // Math functions
         markdown.push_str("## Module std::math\n\n");
-        for func in &self.math_stdlib.functions {
+        for func in self.math_stdlib.get_functions() {
             self.document_std_function(&mut markdown, func, 3)?;
         }
 
         // IO functions
         markdown.push_str("## Module std::io\n\n");
-        for func in &self.io_stdlib.functions {
+        for func in self.io_stdlib.get_functions() {
             self.document_std_function(&mut markdown, func, 3)?;
         }
 
         // Network functions
         markdown.push_str("## Module std::net\n\n");
-        for func in &self.net_stdlib.functions {
+        for func in self.net_stdlib.get_functions() {
             self.document_std_function(&mut markdown, func, 3)?;
         }
 
         // Write to output file
         let output_file = output.join("std.md");
         let mut file = File::create(&output_file)
-            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1)))?;
+            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1), "E205".to_string()))?;
         file.write_all(markdown.as_bytes())
-            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1)))?;
+            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1), "E206".to_string()))?;
 
         // Generate JSON documentation
         let doc_items = self.generate_std_doc_items()?;
-        let docgen = DocGen::new("std".to_string(), output.clone());
+        let docgen = DocGen::new(DocGenConfig {
+            library: "std".to_string(),
+            output_dir: output.clone(),
+        });
         docgen.generate(&doc_items)?;
 
         Ok(())
@@ -429,7 +436,7 @@ impl StdLibFunctionTrait for crate::ksl_stdlib_io::IOStdLibFunction {
 // Public API to generate documentation with async support
 pub async fn generate_async(file: Option<&PathBuf>, std: bool, output: Option<&PathBuf>) -> Result<(), KslError> {
     let mut generator = DocGenerator::new();
-    let output_dir = output.unwrap_or_else(|| PathBuf::from("docs"));
+    let output_dir = output.unwrap_or_else(|| &PathBuf::from("docs"));
 
     if std {
         generator.generate_for_std_async(&output_dir).await?;
@@ -439,6 +446,7 @@ pub async fn generate_async(file: Option<&PathBuf>, std: bool, output: Option<&P
         return Err(KslError::type_error(
             "Either --file or --std must be specified".to_string(),
             SourcePosition::new(1, 1),
+            "E207".to_string(),
         ));
     }
 

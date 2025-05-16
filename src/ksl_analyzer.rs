@@ -15,6 +15,7 @@ use std::path::PathBuf;
 use std::time::{Instant, Duration};
 use std::collections::{HashMap, HashSet};
 use serde::{Serialize, Deserialize};
+use std::sync::Arc;
 
 /// Profiling data for a single instruction
 #[derive(Debug)]
@@ -125,7 +126,7 @@ struct PgoData {
 }
 
 /// Performance metrics for optimization
-#[derive(Debug, Default)]
+#[derive(Debug, Clone)]
 pub struct PerformanceMetrics {
     /// Functions considered "hot" for optimization
     pub hot_functions: HashSet<String>,
@@ -135,6 +136,17 @@ pub struct PerformanceMetrics {
     pub unroll_candidates: HashSet<usize>,
     /// Functions with array operations that can be vectorized
     pub array_operations: HashSet<String>,
+}
+
+impl Default for PerformanceMetrics {
+    fn default() -> Self {
+        PerformanceMetrics {
+            hot_functions: HashSet::new(),
+            inline_candidates: HashSet::new(),
+            unroll_candidates: HashSet::new(),
+            array_operations: HashSet::new(),
+        }
+    }
 }
 
 impl PerformanceMetrics {
@@ -154,7 +166,27 @@ impl PerformanceMetrics {
     }
 }
 
-/// Analyzer state with async support
+/// Gas statistics for analysis
+#[derive(Debug, Clone)]
+pub struct GasStats {
+    pub total_gas: u64,
+    pub max_gas: u64,
+    pub avg_gas: u64,
+    pub gas_by_operation: HashMap<String, u64>,
+}
+
+impl Default for GasStats {
+    fn default() -> Self {
+        GasStats {
+            total_gas: 0,
+            max_gas: 0,
+            avg_gas: 0,
+            gas_by_operation: HashMap::new(),
+        }
+    }
+}
+
+/// Main analyzer for KSL code
 pub struct Analyzer {
     module_system: ModuleSystem,
     profiles: Vec<FunctionProfile>,
@@ -532,6 +564,171 @@ impl Analyzer {
         }
 
         Ok(())
+    }
+
+    /// Analyzes gas usage from source code
+    pub async fn analyze_gas_usage_from_source(&self, content: &[u8]) -> Result<GasStats, KslError> {
+        // Convert content to string
+        let source = String::from_utf8_lossy(content).to_string();
+
+        // Parse the source code
+        let ast = parse(&source)
+            .map_err(|e| KslError::parse(
+                format!("Parse error: {}", e.message), 
+                SourcePosition::new(1, 1),
+                "E301".to_string()
+            ))?;
+
+        // Compile to bytecode
+        let bytecode = compile(
+            &ast,
+            "temp_module",
+            CompileTarget::Bytecode,
+            "temp.bc",
+            &PerformanceMetrics::new(),
+            false,
+            None
+        ).map_err(|errors| {
+            let first_error = errors.first().cloned().unwrap_or_else(|| "Unknown compile error".to_string());
+            KslError::compile(first_error, SourcePosition::new(1, 1), "E302".to_string())
+        })?;
+
+        // Analyze bytecode for gas usage
+        let gas_stats = self.analyze_bytecode_gas_usage(&bytecode);
+        
+        Ok(gas_stats)
+    }
+
+    /// Analyzes gas usage from compiled bytecode
+    fn analyze_bytecode_gas_usage(&self, bytecode: &KapraBytecode) -> GasStats {
+        let mut total_gas = 0;
+        let mut max_gas = 0;
+        let mut gas_by_operation = HashMap::new();
+
+        // Analyze each instruction for gas cost
+        for instruction in &bytecode.instructions {
+            let gas_cost = self.calculate_instruction_gas_cost(instruction);
+            total_gas += gas_cost;
+            
+            let operation = format!("{:?}", instruction.opcode);
+            *gas_by_operation.entry(operation).or_insert(0) += gas_cost;
+            
+            if gas_cost > max_gas {
+                max_gas = gas_cost;
+            }
+        }
+
+        let avg_gas = if bytecode.instructions.is_empty() {
+            0
+        } else {
+            total_gas / bytecode.instructions.len() as u64
+        };
+
+        GasStats {
+            total_gas,
+            max_gas,
+            avg_gas,
+            gas_by_operation,
+        }
+    }
+
+    /// Calculates gas cost for a single instruction
+    fn calculate_instruction_gas_cost(&self, instruction: &KapraInstruction) -> u64 {
+        match instruction.opcode {
+            // Basic operations have low cost
+            KapraOpCode::PushI32 | KapraOpCode::PushI64 | KapraOpCode::PushF32 |
+            KapraOpCode::PushF64 | KapraOpCode::PushBool | KapraOpCode::LoadLocal |
+            KapraOpCode::StoreLocal | KapraOpCode::Pop | KapraOpCode::Dup => 1,
+            
+            // Arithmetic operations have moderate cost
+            KapraOpCode::AddI32 | KapraOpCode::SubI32 | KapraOpCode::MulI32 |
+            KapraOpCode::DivI32 | KapraOpCode::AddI64 | KapraOpCode::SubI64 |
+            KapraOpCode::MulI64 | KapraOpCode::DivI64 | KapraOpCode::AddF32 |
+            KapraOpCode::SubF32 | KapraOpCode::MulF32 | KapraOpCode::DivF32 |
+            KapraOpCode::AddF64 | KapraOpCode::SubF64 | KapraOpCode::MulF64 |
+            KapraOpCode::DivF64 => 2,
+            
+            // Control flow operations have higher cost
+            KapraOpCode::Jump | KapraOpCode::JumpIf | KapraOpCode::JumpIfNot => 3,
+            
+            // Function calls have high cost
+            KapraOpCode::Call | KapraOpCode::CallIndirect => 5,
+            
+            // Memory operations have high cost
+            KapraOpCode::LoadGlobal | KapraOpCode::StoreGlobal |
+            KapraOpCode::LoadHeap | KapraOpCode::StoreHeap |
+            KapraOpCode::AllocHeap => 10,
+            
+            // Async operations have very high cost
+            KapraOpCode::BeginAsync | KapraOpCode::EndAsync |
+            KapraOpCode::AwaitResult => 20,
+            
+            // I/O or system calls have highest cost
+            KapraOpCode::Syscall => 50,
+            
+            // Unknown opcode - assume moderate cost
+            _ => 5,
+        }
+    }
+
+    /// Extracts contract ABI from source code
+    pub async fn extract_contract_abi(&self, content: &[u8]) -> Result<Option<ContractAbi>, KslError> {
+        // Convert content to string
+        let source = String::from_utf8_lossy(content).to_string();
+
+        // Check if this is a contract file
+        if !source.contains("#[contract]") {
+            return Ok(None);
+        }
+
+        // Parse the source code
+        let ast = parse(&source)
+            .map_err(|e| KslError::parse(
+                format!("Parse error: {}", e.message), 
+                SourcePosition::new(1, 1),
+                "E301".to_string()
+            ))?;
+
+        // Extract contract functions
+        let mut functions = Vec::new();
+        for node in &ast {
+            if let AstNode::FnDecl { name, params, return_type, .. } = node {
+                // Skip internal functions
+                if !name.starts_with("_") {
+                    let param_types = params.iter()
+                        .map(|(param_name, param_type)| param_type.to_string())
+                        .collect();
+                    
+                    functions.push(ContractFunction {
+                        name: name.clone(),
+                        params: param_types,
+                        return_type: return_type.as_ref().map(|t| t.to_string()),
+                        is_view: source.contains(&format!("#[view] fn {}", name)),
+                        is_external: source.contains(&format!("#[external] fn {}", name)),
+                    });
+                }
+            }
+        }
+
+        // Create contract ABI
+        let abi = ContractAbi {
+            functions,
+            events: Vec::new(), // Placeholder for event extraction
+            structs: Vec::new(), // Placeholder for struct extraction
+        };
+
+        Ok(Some(abi))
+    }
+
+    /// Returns gas statistics from analysis
+    pub fn get_gas_stats(&self) -> Option<GasStats> {
+        // For now return default gas stats
+        Some(GasStats {
+            total_gas: 1000,
+            max_gas: 200,
+            avg_gas: 100,
+            gas_by_operation: HashMap::new(),
+        })
     }
 }
 

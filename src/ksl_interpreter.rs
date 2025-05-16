@@ -88,11 +88,13 @@ impl Interpreter {
             .map_err(|e| KslError::type_error(
                 format!("Failed to read file {}: {}", file.display(), e),
                 pos,
+                "E100".to_string(),
             ))?;
         let ast = parse(&source)
             .map_err(|e| KslError::type_error(
                 format!("Parse error at position {}: {}", e.position, e.message),
                 pos,
+                "E101".to_string(),
             ))?;
 
         // Transform AST
@@ -100,6 +102,7 @@ impl Interpreter {
             .map_err(|e| KslError::type_error(
                 format!("AST transformation error: {}", e),
                 pos,
+                "E102".to_string(),
             ))?;
 
         // Type-check
@@ -110,14 +113,17 @@ impl Interpreter {
                     .collect::<Vec<_>>()
                     .join("\n"),
                 pos,
+                "E103".to_string(),
             ))?;
 
         // Run in sandbox
-        let mut sandbox = Sandbox::new(SandboxPolicy::default());
-        sandbox.run_sandbox_async(file).await
+        let mut sandbox = Sandbox::new();
+        sandbox.configure_policy(SandboxPolicy::default());
+        sandbox.run_sandbox(file)
             .map_err(|e| KslError::type_error(
                 e.into_iter().map(|e| e.to_string()).collect::<Vec<_>>().join("\n"),
                 pos,
+                "E104".to_string(),
             ))?;
 
         // Populate function definitions
@@ -137,6 +143,7 @@ impl Interpreter {
                 return Err(KslError::type_error(
                     "Main function must have no parameters".to_string(),
                     pos,
+                    "E105".to_string(),
                 ));
             }
             self.execute_block_async(&body).await
@@ -144,6 +151,7 @@ impl Interpreter {
             Err(KslError::type_error(
                 "No main function found".to_string(),
                 pos,
+                "E106".to_string(),
             ))
         }
     }
@@ -180,6 +188,7 @@ impl Interpreter {
                 _ => return Err(KslError::type_error(
                     "Unsupported statement in interpreter".to_string(),
                     pos,
+                    "E107".to_string(),
                 )),
             };
         }
@@ -193,11 +202,12 @@ impl Interpreter {
             AstNode::Expr { kind } => match kind {
                 ExprKind::Ident(name) => {
                     let env = self.env.read().await;
-                    env.variables.get(name)
+                    env.variables.get(&name)
                         .cloned()
                         .ok_or_else(|| KslError::type_error(
                             format!("Undefined variable: {}", name),
                             pos,
+                            "E108".to_string(),
                         ))
                 }
                 ExprKind::Number(num) => {
@@ -207,6 +217,7 @@ impl Interpreter {
                             .map_err(|_| KslError::type_error(
                                 format!("Invalid float: {}", num),
                                 pos,
+                                "E109".to_string(),
                             ))
                     } else {
                         num.parse::<u32>()
@@ -214,6 +225,7 @@ impl Interpreter {
                             .map_err(|_| KslError::type_error(
                                 format!("Invalid integer: {}", num),
                                 pos,
+                                "E110".to_string(),
                             ))
                     }
                 }
@@ -234,6 +246,7 @@ impl Interpreter {
                         _ => Err(KslError::type_error(
                             format!("Unsupported operation: {} on {:?} and {:?}", op, left_val, right_val),
                             pos,
+                            "E111".to_string(),
                         )),
                     }
                 }
@@ -244,6 +257,7 @@ impl Interpreter {
                             return Err(KslError::type_error(
                                 format!("Expected {} arguments, got {}", params.len(), args.len()),
                                 pos,
+                                "E112".to_string(),
                             ));
                         }
                         let mut local_env = Environment {
@@ -265,6 +279,7 @@ impl Interpreter {
                         Err(KslError::type_error(
                             format!("Undefined function: {}", name),
                             pos,
+                            "E113".to_string(),
                         ))
                     }
                 }
@@ -282,6 +297,7 @@ impl Interpreter {
             _ => Err(KslError::type_error(
                 "Expected expression".to_string(),
                 pos,
+                "E114".to_string(),
             )),
         }
     }

@@ -133,6 +133,23 @@ impl AsyncRuntime {
             ))?;
         Ok(body)
     }
+
+    /// Executes a contract bytecode
+    /// @param contract_id The contract ID
+    /// @param bytecode The bytecode to execute
+    /// @returns Whether the execution succeeded
+    pub async fn execute_contract(&self, contract_id: [u8; 32], bytecode: &Bytecode) -> AsyncResult<bool> {
+        // Create a new VM instance for the contract
+        let mut vm = KapraVM::new_with_contract(contract_id);
+        
+        // Execute the bytecode
+        vm.execute(bytecode)
+            .map_err(|e| KslError::runtime(
+                format!("Contract execution failed: {}", e),
+                0,
+                "E401".to_string()
+            ))
+    }
 }
 
 /// Async compiler and executor

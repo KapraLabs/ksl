@@ -716,7 +716,7 @@ impl Default for BytecodeConfig {
 }
 
 /// Bytecode program structure.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct KapraBytecode {
     pub instructions: Vec<KapraInstruction>,
     pub config: BytecodeConfig,

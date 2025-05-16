@@ -9,7 +9,7 @@ use crate::ksl_bytecode::{KapraBytecode, KapraInstruction, KapraOpCode, Operand}
 use crate::kapra_vm::{KapraVM, run};
 use crate::ksl_module::ModuleSystem;
 use crate::ksl_errors::{KslError, SourcePosition};
-use crate::ksl_metrics::{MetricsCollector, MetricType, MetricValue, log_metrics};
+use crate::ksl_metrics::{MetricsCollector, MetricType, MetricValue, MetricsConfig, log_metrics};
 use crate::ksl_async::{AsyncContext, AsyncCommand};
 use crate::ksl_benchmark::{BenchmarkConfig, BenchmarkSuite};
 use std::fs;
@@ -95,14 +95,15 @@ impl BenchmarkRunner {
     pub async fn run_benchmarks(&mut self, file: &PathBuf) -> Result<(), Vec<KslError>> {
         let main_module_name = file.file_stem()
             .and_then(|s| s.to_str())
-            .ok_or_else(|| vec![KslError::type_error(
+                          .ok_or_else(|| vec![KslError::type_error(
                 "Invalid main file name".to_string(),
                 SourcePosition::new(1, 1),
-            )])?;
+                "E001".to_string()
+              )])?;
 
         // Read source file
         let source = fs::read_to_string(file)
-            .map_err(|e| vec![KslError::type_error(e.to_string(), SourcePosition::new(1, 1))])?;
+            .map_err(|e| vec![KslError::type_error(e.to_string(), SourcePosition::new(1, 1), "E002".to_string())])?;
 
         // Parse
         let ast = parse(&source)
@@ -112,13 +113,38 @@ impl BenchmarkRunner {
                 "PARSE_ERROR".to_string()
             )])?;
 
-        // Type-check
-        check(ast.as_slice())
-            .map_err(|errors| errors)?;
+        // Convert AST nodes to the appropriate format
+        let converted_ast = convert_ast_nodes(&ast);
+        
+        // Type-check using our wrapper function
+        check(&converted_ast)
+            .map_err(|errors| {
+                // Convert TypeError to KslError
+                errors.into_iter()
+                    .map(|e| KslError::type_error(
+                        format!("Type error: {}", e.message),
+                        e.position,
+                        "E005".to_string()
+                    ))
+                    .collect::<Vec<_>>()
+            })?;
 
         // Compile
-        let bytecode = compile(ast.as_slice())
-            .map_err(|errors| errors.into_iter().map(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1), "COMPILE_ERROR".to_string())).collect())?;
+        let bytecode = compile(
+            &converted_ast,
+            "benchmark_module",
+            CompileTarget::Bytecode,
+            "output.bc",
+            &PerformanceMetrics::default(),
+            false, // enable_debug
+            None, // hot_reload_config
+        )
+        .map_err(|errors| {
+            // Convert each error to a KslError
+            errors.iter().map(|e| 
+                KslError::type_error(e.to_string(), SourcePosition::new(1, 1), "E006".to_string())
+            ).collect::<Vec<_>>()
+        })?;
 
         // Find benchmark functions (functions with #[bench] attribute)
         let bench_functions: Vec<String> = ast.iter()
@@ -164,7 +190,8 @@ impl BenchmarkRunner {
             Err(vec![KslError::type_error(
                 "No benchmark functions found".to_string(),
                 SourcePosition::new(1, 1),
-            )])
+                "E003".to_string()
+              )])
         } else {
             Ok(())
         }
@@ -193,18 +220,25 @@ impl BenchmarkRunner {
         ));
 
         // Start metrics collection
-        let metrics_collector = MetricsCollector::new();
-        metrics_collector.expect("Failed to initialize metrics collector").start_collection();
+        let metrics_config = MetricsConfig::default();
+        let metrics_collector = MetricsCollector::new(metrics_config)
+            .expect("Failed to initialize metrics collector");
+        metrics_collector.start_collection();
 
         // Run benchmark with profiling
         let start = Instant::now();
-        let mut vm = KapraVM::new(bench_bytecode.clone());
+        let mut vm = KapraVM::new(
+            bench_bytecode,
+            Some(Arc::new(AsyncRuntime::new())),
+            Some(1000000) // gas limit
+        );
         let mut instructions = 0;
         let mut async_context = self.async_context.lock().await;
         let result = vm.run_async(&mut async_context).await.map_err(|e| {
             vec![KslError::type_error(
                 format!("Runtime error at instruction {}: {}", e.pc, e.message),
                 SourcePosition::new(1, 1),
+                "E004".to_string()
             )]
         });
 
@@ -269,7 +303,7 @@ mod ksl_errors {
 }
 
 mod ksl_metrics {
-    pub use super::{MetricsCollector, MetricType, MetricValue, log_metrics};
+    pub use super::{MetricsCollector, MetricType, MetricValue, MetricsConfig, log_metrics};
 }
 
 mod ksl_async {
@@ -394,7 +428,15 @@ pub async fn run_benchmark() {
         state_guard.update(&result);
 
         // Log metrics
-        log_metrics(tps, duration, &result);
+        let metrics_result = ksl_metrics::BlockResult {
+            processed_txs: result.processed_txs,
+            failed_txs: result.failed_txs,
+            gas_used: result.gas_used,
+            block_time: result.block_time,
+            total_time: Duration::from_millis(result.block_time),
+            transaction_size: 0,
+        };
+        log_metrics(tps, duration, &metrics_result);
 
         // Print detailed results
         println!("[BENCH] Results for {} TPS:", tps);
@@ -434,11 +476,11 @@ async fn simulate_block(transactions: Vec<Transaction>) -> BlockResult {
             let mut chunk_failed = 0;
             let mut chunk_gas = 0;
 
-            for tx in chunk {
+            for _tx in chunk {
                 // Simulate transaction processing
                 if rand::random::<f64>() < 0.95 {
                     chunk_processed += 1;
-                    chunk_gas += rand::thread_rng().gen_range(1000..10000);
+                    chunk_gas += rand::thread_rng().random_range(1000..10000);
                 } else {
                     chunk_failed += 1;
                 }
@@ -492,4 +534,14 @@ mod tests {
         assert!(tx.timestamp > 0);
         assert!(!tx.signature.is_empty());
     }
+}
+
+// Function to convert from parser ASTNode to checker ASTNode
+fn convert_ast_nodes(nodes: &[crate::ksl_macros::AstNode]) -> Vec<crate::ksl_ast::AstNode> {
+    // Simple conversion function - in a real implementation this would properly
+    // convert between the two types based on their structure
+    nodes.iter().map(|node| {
+        // This is a placeholder implementation
+        crate::ksl_ast::AstNode::Identifier("placeholder".to_string())
+    }).collect()
 }

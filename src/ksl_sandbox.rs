@@ -559,8 +559,8 @@ impl SandboxManager {
 
     pub async fn run_in_sandbox<T: Send + 'static>(
         &self,
-        contract_id: &str,
-        bytecode: KapraBytecode,
+        _contract_id: &str,
+        _bytecode: KapraBytecode,
         // ... other params ...
     ) -> Result<T, KslError> {
         // ...
