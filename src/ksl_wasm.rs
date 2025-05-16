@@ -1,7 +1,7 @@
 // ksl_wasm.rs
 // Translates KapraBytecode 2.0 to WebAssembly for KSL programs, with async support.
 
-use crate::ksl_bytecode::{KapraBytecode, KapraInstruction, KapraOpCode, Operand};
+use crate::ksl_bytecode::{KapraBytecode, KapraInstruction, KapraOpCode, Operand, BytecodeConfig};
 use crate::ksl_types::Type;
 use crate::ksl_async::{AsyncRuntime, AsyncVM};
 use crate::ksl_compiler::compile;
@@ -10,7 +10,8 @@ use crate::ksl_abi::{ABIGenerator, ContractABI};
 use crate::ksl_version::{ContractVersion, VersionManager};
 use wasm_encoder::{
     Module, Function, Instruction, ValType, TypeSection, ImportSection, FunctionSection,
-    ExportSection, CodeSection, MemArg, MemoryType, ExportKind, BlockType
+    ExportSection, CodeSection, MemArg, MemoryType, ExportKind, BlockType, CustomSection, EntityType,
+    MemorySection, RawSection,
 };
 use std::collections::HashMap;
 use std::convert::TryInto;
@@ -66,20 +67,20 @@ impl WasmGenerator {
         // Define types
         let mut type_section = TypeSection::new();
         // Main function: () -> ()
-        type_section.function([], []);
+        type_section.ty().function(vec![], vec![]);
         // Async function: () -> i32 (promise handle)
-        type_section.function([], [ValType::I32]);
+        type_section.ty().function(vec![], vec![ValType::I32]);
         // Imported crypto functions: (i32, i32) -> () (ptr, len -> result in memory)
-        type_section.function([ValType::I32, ValType::I32], []); // sha3, sha3_512, kaprekar
+        type_section.ty().function(vec![ValType::I32, ValType::I32], vec![]); // sha3, sha3_512, kaprekar
         // Imported crypto verify functions: (i32, i32, i32, i32, i32, i32) -> i32 (msg_ptr, msg_len, pubkey_ptr, pubkey_len, sig_ptr, sig_len -> bool)
-        type_section.function(
-            [ValType::I32, ValType::I32, ValType::I32, ValType::I32, ValType::I32, ValType::I32],
-            [ValType::I32],
+        type_section.ty().function(
+            vec![ValType::I32, ValType::I32, ValType::I32, ValType::I32, ValType::I32, ValType::I32],
+            vec![ValType::I32],
         ); // bls_verify, dil_verify
         // Merkle verify: (i32, i32, i32, i32) -> i32 (root_ptr, root_len, proof_ptr, proof_len -> bool)
-        type_section.function([ValType::I32, ValType::I32, ValType::I32, ValType::I32], [ValType::I32]); // merkle_verify
+        type_section.ty().function(vec![ValType::I32, ValType::I32, ValType::I32, ValType::I32], vec![ValType::I32]); // merkle_verify
         // Async imports: (i32, i32) -> i32 (ptr, len -> promise handle)
-        type_section.function([ValType::I32, ValType::I32], [ValType::I32]); // async_http_get, async_http_post
+        type_section.ty().function(vec![ValType::I32, ValType::I32], vec![ValType::I32]); // async_http_get, async_http_post
         self.module.section(&type_section);
 
         // Define imports
@@ -102,13 +103,20 @@ impl WasmGenerator {
 
         // Define memory
         let mut memory_section = MemorySection::new();
-        memory_section.memory(MemoryType::new(1, None)); // 1 page (64KB)
+        let memory_type = MemoryType {
+            minimum: 1,       // 1 page (64KB)
+            maximum: None,    // No maximum
+            memory64: false,  // Use 32-bit memory
+            shared: false,    // Not shared memory
+            page_size_log2: 16, // Default page size (2^16 = 64KB)
+        };
+        memory_section.memory(memory_type);
         self.module.section(&memory_section);
 
         // Define exports
         let mut export_section = ExportSection::new();
-        export_section.export("main", wasm_encoder::ExportKind::Function, 0);
-        export_section.export("main_async", wasm_encoder::ExportKind::Function, 1);
+        export_section.export("main", wasm_encoder::ExportKind::Func, 0);
+        export_section.export("main_async", wasm_encoder::ExportKind::Func, 1);
         export_section.export("memory", wasm_encoder::ExportKind::Memory, 0);
         self.module.section(&export_section);
 
@@ -649,8 +657,11 @@ mod tests {
                         Operand::Register(1),
                         Operand::Register(2),
                     ],
+                    type_info: Some(Type::U32),
                 },
             ],
+            constants: Vec::new(),
+            debug_info: None,
         };
 
         let mut generator = WasmGenerator::new(bytecode);
@@ -679,5 +690,36 @@ mod tests {
 
         assert!(found_abi);
         assert!(found_version);
+    }
+
+    #[test]
+    fn test_generate_arithmetic() {
+        // Create a simple bytecode with arithmetic operations
+        let mut instructions = Vec::new();
+        
+        // Add 1 + 2 -> r0
+        let add_instr = KapraInstruction {
+            opcode: KapraOpCode::Add,
+            operands: vec![
+                Operand::Register(0), // Destination
+                Operand::Immediate(vec![1, 0, 0, 0]), // First operand: 1
+                Operand::Immediate(vec![2, 0, 0, 0]), // Second operand: 2
+            ],
+            type_info: None,
+        };
+        instructions.push(add_instr);
+        
+        let bytecode = KapraBytecode {
+            instructions,
+            config: BytecodeConfig::default(),
+            llvm_ir: None,
+            micro_vm_optimizations: None,
+        };
+        
+        // Generate WASM
+        let mut generator = WasmGenerator::new(bytecode);
+        let _result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async { generator.generate_async().await });
     }
 }

@@ -236,6 +236,7 @@ impl ShardRuntime {
             return Err(KslError::type_error(
                 format!("Invalid shard ID: {}", shard_id),
                 SourcePosition::new(1, 1),
+                "E701".to_string()
             ));
         }
 
@@ -245,6 +246,7 @@ impl ShardRuntime {
             KslError::type_error(
                 format!("Shard {} not found", shard_id),
                 SourcePosition::new(1, 1),
+                "E702".to_string()
             )
         })?;
 
@@ -270,6 +272,7 @@ impl ShardRuntime {
             KslError::type_error(
                 format!("Shard {} not found", shard_id),
                 SourcePosition::new(1, 1),
+                "E702".to_string()
             )
         })?;
 
@@ -278,6 +281,7 @@ impl ShardRuntime {
             KslError::type_error(
                 format!("Failed to serialize shard state: {}", e),
                 SourcePosition::new(1, 1),
+                "E703".to_string()
             )
         })?;
 
@@ -335,6 +339,7 @@ impl KapraVM {
                         return Err(KslError::type_error(
                             "Not enough values on stack for SHARD_ROUTE".to_string(),
                             SourcePosition::new(1, 1),
+                            "E704".to_string()
                         ));
                     }
                     let account_idx = self.stack.pop().unwrap() as usize;
@@ -342,6 +347,7 @@ impl KapraVM {
                         return Err(KslError::type_error(
                             "Invalid constant index for SHARD_ROUTE".to_string(),
                             SourcePosition::new(1, 1),
+                            "E705".to_string()
                         ));
                     }
                     let account = match &bytecode.constants[account_idx] {
@@ -349,6 +355,7 @@ impl KapraVM {
                         _ => return Err(KslError::type_error(
                             "Invalid type for SHARD_ROUTE argument".to_string(),
                             SourcePosition::new(1, 1),
+                            "E706".to_string()
                         )),
                     };
                     let shard_id = self.shard_runtime.shard_route(account);
@@ -359,6 +366,7 @@ impl KapraVM {
                         return Err(KslError::type_error(
                             "Not enough values on stack for SHARD_SEND".to_string(),
                             SourcePosition::new(1, 1),
+                            "E707".to_string()
                         ));
                     }
                     let msg_idx = self.stack.pop().unwrap() as usize;
@@ -367,6 +375,7 @@ impl KapraVM {
                         return Err(KslError::type_error(
                             "Invalid constant index for SHARD_SEND".to_string(),
                             SourcePosition::new(1, 1),
+                            "E708".to_string()
                         ));
                     }
                     let message = match &bytecode.constants[msg_idx] {
@@ -374,6 +383,7 @@ impl KapraVM {
                         _ => return Err(KslError::type_error(
                             "Invalid type for SHARD_SEND argument".to_string(),
                             SourcePosition::new(1, 1),
+                            "E709".to_string()
                         )),
                     };
                     let success = self.shard_runtime.shard_send(shard_id, message).await?;
@@ -387,6 +397,7 @@ impl KapraVM {
                         return Err(KslError::type_error(
                             "Not enough values on stack for SHARD_SYNC".to_string(),
                             SourcePosition::new(1, 1),
+                            "E710".to_string()
                         ));
                     }
                     let shard_id = self.stack.pop().unwrap() as u32;
@@ -397,6 +408,7 @@ impl KapraVM {
                         return Err(KslError::type_error(
                             "Incomplete PUSH instruction".to_string(),
                             SourcePosition::new(1, 1),
+                            "E711".to_string()
                         ));
                     }
                     let value = bytecode.instructions[ip] as u64;
@@ -408,6 +420,7 @@ impl KapraVM {
                         return Err(KslError::type_error(
                             "Stack underflow".to_string(),
                             SourcePosition::new(1, 1),
+                            "E712".to_string()
                         ));
                     }
                     self.stack.pop();
@@ -415,6 +428,7 @@ impl KapraVM {
                 _ => return Err(KslError::type_error(
                     format!("Unsupported opcode: {}", instr),
                     SourcePosition::new(1, 1),
+                    "E713".to_string()
                 )),
             }
         }

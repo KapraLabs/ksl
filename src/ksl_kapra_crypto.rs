@@ -936,7 +936,6 @@ impl GpuBLSEngine {
     pub async fn new() -> Result<Self, String> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
-            dx12_shader_compiler: Default::default(),
         });
 
         let adapter = instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -973,6 +972,8 @@ impl GpuBLSEngine {
             layout: Some(&pipeline_layout),
             module: &aggregate_shader,
             entry_point: "main",
+            compilation_options: Default::default(),
+            cache: None,
         });
 
         // Create batch buffers
@@ -1023,7 +1024,11 @@ impl GpuBLSEngine {
         });
 
         // Write data to GPU
-        self.queue.write_buffer(&self.batch_buffers[0], 0, bytemuck::cast_slice(signatures));
+        let signature_bytes: Vec<u8> = signatures
+            .iter()
+            .flat_map(|sig| sig.data.clone())
+            .collect();
+        self.queue.write_buffer(&self.batch_buffers[0], 0, &signature_bytes);
 
         // Create command encoder
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1034,6 +1039,7 @@ impl GpuBLSEngine {
         {
             let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("BLS Aggregation Compute Pass"),
+                timestamp_writes: None,
             });
             compute_pass.set_pipeline(&self.pipeline);
             compute_pass.set_bind_group(0, &bind_group, &[]);
@@ -1065,7 +1071,15 @@ impl GpuBLSEngine {
         }
 
         let data = buffer_slice.get_mapped_range();
-        let result: BLSSignature = bytemuck::from_bytes(&data[..std::mem::size_of::<BLSSignature>()]).clone();
+        // Specify the concrete type for result
+        let result_data = &data[..std::mem::size_of::<BLSSignature>()];
+        let params = BLSParams {
+            curve_type: BLSCurve::BLS12381,
+            public_key_size: 96,
+            signature_size: 48,
+            aggregation_threshold: 1,
+        };
+        let result = BLSSignature::new(result_data.to_vec(), params);
         drop(data);
         staging_buffer.unmap();
 
@@ -1349,8 +1363,10 @@ impl KeyStore {
 
         let pk = PublicKey::from_bytes(&key_pair.ed25519_public)
             .map_err(|_| "Invalid Ed25519 public key".to_string())?;
-        let sig = Signature::from_bytes(signature)
-            .map_err(|_| "Invalid Ed25519 signature".to_string())?;
+        let sig = match Signature::from_bytes(signature) {
+            Ok(sig) => sig,
+            Err(_) => return Ok(false),
+        };
 
         Ok(pk.verify(data, &sig).is_ok())
     }

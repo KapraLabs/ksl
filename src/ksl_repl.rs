@@ -42,6 +42,7 @@ use std::sync::Arc;
 use crate::ksl_network::NetworkManager;
 use crate::ksl_value::Value;
 use crate::ksl_async_vm::AsyncVM;
+use tempdir::TempDir;
 
 /// REPL state
 pub struct Repl {
@@ -168,7 +169,7 @@ impl Repl {
     }
 
     /// Starts the REPL
-    pub fn run(&mut self) -> Result<(), String> {
+    pub async fn run(&mut self) -> Result<(), String> {
         let mut rl = Editor::<()>::new();
         println!("KSL REPL (type :help for commands)");
 
@@ -178,13 +179,13 @@ impl Repl {
                 Ok(line) => {
                     rl.add_history_entry(line.as_str());
                     if line.trim().starts_with(':') {
-                        match self.handle_command(&line.trim()[1..]) {
+                        match self.handle_command(&line.trim()[1..]).await {
                             Ok(should_continue) => if !should_continue { break; },
                             Err(e) => println!("Error: {}", e),
                         }
                         continue;
                     }
-                    match self.process_input(&line) {
+                    match self.process_input(&line).await {
                         Ok(result) => {
                             if let Some(value) = result {
                                 println!("=> {}", value);
@@ -202,25 +203,30 @@ impl Repl {
     }
 
     /// Handles REPL commands
-    fn handle_command(&mut self, command: &str) -> Result<bool, String> {
+    async fn handle_command(&mut self, command: &str) -> Result<bool, String> {
         let parts: Vec<&str> = command.split_whitespace().collect();
         match parts.get(0).map(|s| *s) {
-            Some("quit") | Some("exit") => Ok(false),
+            Some("exit") | Some("quit") => {
+                Ok(false)
+            }
             Some("help") => {
                 println!("Available commands:");
-                println!("  :help - Show this help message");
-                println!("  :quit - Exit the REPL");
-                println!("  :reset - Reset REPL state");
-                println!("  :debug - Enter debug mode");
-                println!("  :async - Show async tasks");
-                println!("  :vars - Show variables");
-                println!("  :funcs - Show functions");
-                println!("\nModule Management:");
-                println!("  :reload validator - Reload validator module");
-                println!("  :reload contract <name> - Reload contract module");
-                println!("  :patch contract <name> --path <path> - Patch contract from path");
-                println!("  :list modules - List all loaded modules");
-                println!("  :show module <name> - Show module details");
+                println!("  exit, quit - Exit the REPL");
+                println!("  help - Show this help message");
+                println!("  clear - Clear the variables and functions");
+                println!("  load <file> - Load and execute KSL code from a file");
+                println!("  save <file> - Save the current session to a file");
+                println!("  debug - Enter debug mode");
+                println!("  async - List active async tasks");
+                println!("  vars - List defined variables");
+                println!("  funcs - List defined functions");
+                println!("  module list - List all loaded modules");
+                println!("  module show <name> - Show module details");
+                println!("  reload validator - Reload validator module");
+                println!("  reload contract <name> - Reload contract module");
+                println!("  patch contract <name> <path> - Patch contract from path");
+                println!("  wasm load <contract_name> <path.wasm> - Load WASM contract");
+                println!("  wasm call <contract_name> <func> [args...] - Call WASM function");
                 Ok(true)
             }
             Some("reload") => {
@@ -538,14 +544,17 @@ impl Repl {
                 .join("\n"))
     }
 
-    /// Processes a single input line
-    fn process_input(&mut self, input: &str) -> Result<Option<String>, String> {
-        // Create temporary file for the input
-        let temp_file = PathBuf::from("repl_temp.ksl");
-        File::create(&temp_file)
-            .map_err(|e| e.to_string())?
-            .write_all(input.as_bytes())
-            .map_err(|e| e.to_string())?;
+    /// Process user input and execute it
+    async fn process_input(&mut self, input: &str) -> Result<Option<String>, String> {
+        // Skip empty input
+        if input.trim().is_empty() {
+            return Ok(None);
+        }
+
+        // Create a temporary file for the input
+        let temp_dir = TempDir::new().map_err(|e| e.to_string())?;
+        let temp_file = temp_dir.path().join("input.ksl");
+        fs::write(&temp_file, input).map_err(|e| e.to_string())?;
 
         // Parse input
         let ast = parse(input)
@@ -744,9 +753,9 @@ impl Repl {
 }
 
 /// Public API to start the REPL
-pub fn start_repl() -> Result<(), String> {
+pub async fn start_repl() -> Result<(), String> {
     let mut repl = Repl::new();
-    repl.run()
+    repl.run().await
 }
 
 // Assume ksl_parser.rs, ksl_checker.rs, ksl_compiler.rs, ksl_bytecode.rs, kapra_vm.rs, ksl_module.rs, ksl_errors.rs, ksl_async.rs, and ksl_debug.rs are in the same crate

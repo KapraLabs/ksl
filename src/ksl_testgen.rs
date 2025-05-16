@@ -2,13 +2,11 @@
 /// Automatically generates unit tests for KSL code, analyzing functions to produce
 /// #[test]-annotated test cases with edge cases, property-based testing, and async tests.
 /// Supports advanced type system features and async test generation.
-
-use crate::ksl_parser::{parse, AstNode, ParseError};
+use crate::ksl_parser::{parse, AstNode};
 use crate::ksl_types::{Type, TypeSystem, TypeConstraint, TypeInfo};
-use crate::ksl_test::{TestRunner, TestCase, TestResult, TestSuite};
+use crate::ksl_test::{TestRunner, TestCase, TestSuite};
 use crate::ksl_async::{AsyncRuntime, AsyncResult};
 use crate::ksl_errors::{KslError, SourcePosition};
-use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::Write;
@@ -432,19 +430,19 @@ pub async fn generate_tests_async(config: TestGenConfig) -> AsyncResult<()> {
 
 // Module imports
 mod ksl_parser {
-    pub use super::{parse, AstNode, ParseError};
+    pub use super::{parse, AstNode};
 }
 
 mod ksl_types {
-    pub use super::{Type, TypeSystem, TypeConstraint, TypeInfo};
+    pub use super::{Type, TypeSystem};
 }
 
 mod ksl_test {
-    pub use super::{TestRunner, TestCase, TestResult, TestSuite};
+    pub use super::{TestCase, TestSuite};
 }
 
 mod ksl_async {
-    pub use super::{AsyncRuntime, AsyncResult};
+    pub use super::AsyncRuntime;
 }
 
 mod ksl_errors {

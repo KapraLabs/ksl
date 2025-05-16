@@ -31,10 +31,17 @@ use pqcrypto_dilithium::dilithium5;
 
 #[cfg(not(target_arch = "wasm32"))]
 use pqcrypto_traits::sign::{
-    DetachedSignature as DilithiumSignature,
-    PublicKey as DilithiumPublicKey,
-    SecretKey as DilithiumSecretKey,
+    DetachedSignature as DilithiumSignatureTrait,
+    PublicKey as DilithiumPublicKeyTrait,
+    SecretKey as DilithiumSecretKeyTrait,
 };
+
+#[cfg(not(target_arch = "wasm32"))]
+type DilithiumSignature = pqcrypto_dilithium::dilithium5::DetachedSignature;
+#[cfg(not(target_arch = "wasm32"))]
+type DilithiumPublicKey = pqcrypto_dilithium::dilithium5::PublicKey;
+#[cfg(not(target_arch = "wasm32"))]
+type DilithiumSecretKey = pqcrypto_dilithium::dilithium5::SecretKey;
 
 use itertools::Itertools;
 

@@ -589,8 +589,13 @@ impl Analyzer {
             false,
             None
         ).map_err(|errors| {
-            let first_error = errors.first().cloned().unwrap_or_else(|| "Unknown compile error".to_string());
-            KslError::compile(first_error, SourcePosition::new(1, 1), "E302".to_string())
+            // Handle the error properly based on its actual type
+            // If errors is a Vec<KslError>, extract the first one, otherwise use a generic error message
+            if let Some(error_msg) = errors.to_string().lines().next() {
+                KslError::compile(error_msg.to_string(), SourcePosition::new(1, 1), "E302".to_string())
+            } else {
+                KslError::compile("Unknown compile error".to_string(), SourcePosition::new(1, 1), "E302".to_string())
+            }
         })?;
 
         // Analyze bytecode for gas usage
@@ -696,13 +701,13 @@ impl Analyzer {
                 // Skip internal functions
                 if !name.starts_with("_") {
                     let param_types = params.iter()
-                        .map(|(param_name, param_type)| param_type.to_string())
+                        .map(|(param_name, param_type)| format!("{}", param_type))
                         .collect();
                     
                     functions.push(ContractFunction {
                         name: name.clone(),
                         params: param_types,
-                        return_type: return_type.as_ref().map(|t| t.to_string()),
+                        return_type: return_type.as_ref().map(|t| format!("{}", t)),
                         is_view: source.contains(&format!("#[view] fn {}", name)),
                         is_external: source.contains(&format!("#[external] fn {}", name)),
                     });

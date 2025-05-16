@@ -596,7 +596,7 @@ fn expr_to_source(expr: &AstNode) -> String {
 }
 
 // Public API to refactor KSL code
-pub fn refactor(input_file: &PathBuf, output_file: Option<PathBuf>, rule: &str, old_name: Option<String>, new_name: Option<String>, report_path: Option<PathBuf>, enable_async: bool) -> Result<Vec<RefactorChange>, KslError> {
+pub async fn refactor(input_file: &PathBuf, output_file: Option<PathBuf>, rule: &str, old_name: Option<String>, new_name: Option<String>, report_path: Option<PathBuf>, enable_async: bool) -> Result<Vec<RefactorChange>, KslError> {
     let config = RefactorConfig {
         input_file: input_file.clone(),
         output_file,

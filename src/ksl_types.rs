@@ -159,6 +159,67 @@ impl std::fmt::Display for TypeError {
 pub struct TypeSystem;
 
 impl TypeSystem {
+    /// Validates if a type is well-formed and valid.
+    /// @param ty The type to validate.
+    /// @returns `true` if the type is valid, `false` otherwise.
+    /// @example
+    /// ```ksl
+    /// let type_system = TypeSystem;
+    /// assert!(type_system.is_valid_type(&Type::U32));
+    /// ```
+    pub fn is_valid_type(&self, ty: &Type) -> bool {
+        match ty {
+            Type::U8 | Type::U16 | Type::U32 | Type::U64 |
+            Type::I8 | Type::I16 | Type::I32 | Type::I64 |
+            Type::F32 | Type::F64 | Type::Bool | Type::String |
+            Type::Void | Type::Error | Type::Socket |
+            Type::HttpRequest | Type::HttpResponse => true,
+            
+            Type::Array(element_type, size) => {
+                *size > 0 && self.is_valid_type(element_type)
+            },
+            
+            Type::Struct { fields, .. } => {
+                fields.iter().all(|(_, field_type)| self.is_valid_type(field_type))
+            },
+            
+            Type::Enum { variants, .. } => {
+                variants.iter().all(|(_, payload_type)| {
+                    payload_type.as_ref().map_or(true, |ty| self.is_valid_type(ty))
+                })
+            },
+            
+            Type::Option(inner) | Type::Result { ok: inner, .. } => {
+                self.is_valid_type(inner)
+            },
+            
+            Type::Result { ok, err } => {
+                self.is_valid_type(ok) && self.is_valid_type(err)
+            },
+            
+            Type::Tuple(types) => {
+                types.iter().all(|ty| self.is_valid_type(ty))
+            },
+            
+            Type::Generic { constraints, .. } => {
+                constraints.iter().all(|constraint| self.is_valid_type(constraint))
+            },
+            
+            Type::Generated { .. } => true,
+            
+            Type::Function { params, return_type } => {
+                params.iter().all(|param| self.is_valid_type(param)) &&
+                self.is_valid_type(return_type)
+            },
+            
+            Type::ZkProof(_) | Type::Signature(_) | Type::Blockchain(_) => true,
+            
+            Type::DataBlob { element_type, size, alignment } => {
+                *size > 0 && *alignment > 0 && self.is_valid_type(element_type)
+            },
+        }
+    }
+
     /// Parses a type annotation from a string.
     /// @param annot The type annotation (e.g., "u32", "array<u8, 32>", "T<U32 | F32>").
     /// @param position The source position for error reporting.

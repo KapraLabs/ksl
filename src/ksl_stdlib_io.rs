@@ -94,6 +94,7 @@ impl IOStdLib {
         let func = self.get_function(name).ok_or_else(|| KslError::type_error(
             format!("Undefined I/O function: {}", name),
             position,
+            "E801".to_string()
         ))?;
         if arg_types.len() != func.params.len() {
             return Err(KslError::type_error(
@@ -103,6 +104,7 @@ impl IOStdLib {
                     arg_types.len()
                 ),
                 position,
+                "E802".to_string()
             ));
         }
         for (expected, actual) in func.params.iter().zip(arg_types) {
@@ -110,6 +112,7 @@ impl IOStdLib {
                 return Err(KslError::type_error(
                     format!("Argument type mismatch: expected {:?}, got {:?}", expected, actual),
                     position,
+                    "E803".to_string()
                 ));
             }
         }
@@ -130,6 +133,7 @@ impl IOStdLib {
         let func = self.get_function(name).ok_or_else(|| KslError::type_error(
             format!("Undefined I/O function: {}", name),
             SourcePosition::new(1, 1),
+            "E803".to_string()
         ))?;
         if arg_regs.len() != func.params.len() {
             return Err(KslError::type_error(
@@ -139,6 +143,7 @@ impl IOStdLib {
                     arg_regs.len()
                 ),
                 SourcePosition::new(1, 1),
+                "E802".to_string()
             ));
         }
 
@@ -155,6 +160,7 @@ impl IOStdLib {
             None => Err(KslError::type_error(
                 format!("No implementation for {}", name),
                 SourcePosition::new(1, 1),
+                "E803".to_string()
             )),
         }
     }
@@ -170,12 +176,14 @@ impl IOStdLib {
             .map_err(|e| KslError::type_error(
                 format!("HTTP GET failed: {}", e),
                 SourcePosition::new(1, 1),
+                "E804".to_string()
             ))?;
         
         if !response.status().is_success() {
             return Err(KslError::type_error(
                 format!("HTTP GET failed with status: {}", response.status()),
                 SourcePosition::new(1, 1),
+                "E805".to_string()
             ));
         }
 
@@ -184,6 +192,7 @@ impl IOStdLib {
             .map_err(|e| KslError::type_error(
                 format!("Failed to read response: {}", e),
                 SourcePosition::new(1, 1),
+                "E806".to_string()
             ))?;
         Ok(text)
     }
@@ -197,6 +206,7 @@ impl IOStdLib {
             .map_err(|e| KslError::type_error(
                 format!("Failed to print: {}", e),
                 SourcePosition::new(1, 1),
+                "E807".to_string()
             ))
     }
 }

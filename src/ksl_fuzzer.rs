@@ -1314,7 +1314,7 @@ pub fn run_fuzzer_sync(config: FuzzerConfig) -> Result<FuzzerResult, String> {
 }
 
 /// CLI wrapper for fuzzer
-pub fn run_fuzzer_cli() -> Result<(), String> {
+pub async fn run_fuzzer_cli() -> Result<(), String> {
     let matches = clap::App::new("ksl-fuzz")
         .version("1.0")
         .author("KSL Team")

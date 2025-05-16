@@ -274,7 +274,7 @@ impl Scheduler {
 
             // Execute contract if present
             if let Some(contract_id) = metadata.contract_id {
-                let result = self.execute_contract(contract_id, task).await?;
+                let result = self.execute_contract(contract_id, &task).await?;
                 if !result {
                     continue;
                 }
@@ -282,7 +282,7 @@ impl Scheduler {
 
             // Execute consensus tasks if needed
             if let Some(consensus) = &self.consensus_runtime {
-                let result = self.execute_consensus(consensus, task).await?;
+                let result = self.execute_consensus(consensus, &task).await?;
                 if !result {
                     continue;
                 }
@@ -361,16 +361,17 @@ impl KapraVM {
         }
     }
 
-    pub fn execute(&mut self, bytecode: &Bytecode) -> Result<bool, String> {
+    /// Execute the bytecode.
+    pub async fn execute(&mut self, bytecode: &mut Bytecode) -> Result<bool, String> {
         let mut ip = 0;
         while ip < bytecode.instructions.len() {
+            self.metrics.record_instruction();
+            if let Some(err) = self.limits.check(&self.metrics) {
+                return Err(err);
+            }
+
             let instr = bytecode.instructions[ip];
             ip += 1;
-
-            self.metrics.record_instruction();
-            if let Some(violation) = self.limits.check(&self.metrics) {
-                return Err(format!("Resource limit exceeded: {}", violation));
-            }
 
             match instr {
                 OPCODE_SCHEDULE => {
@@ -379,8 +380,15 @@ impl KapraVM {
                     }
                     let priority = bytecode.instructions[ip] as u32;
                     ip += 1;
+                    if ip >= bytecode.instructions.len() {
+                        return Err("Incomplete SCHEDULE instruction: missing task".to_string());
+                    }
                     let task_idx = bytecode.instructions[ip] as usize;
                     ip += 1;
+                    if task_idx >= bytecode.constants.len() {
+                        return Err("Invalid task index".to_string());
+                    }
+
                     let task_bytecode = match &bytecode.constants[task_idx] {
                         Constant::String(task_code) => {
                             // Simplified: Parse task bytecode (in reality, this would be precompiled)

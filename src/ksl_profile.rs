@@ -3,7 +3,7 @@
 // providing call graph analysis, memory leak detection, and visual flame graphs.
 // Supports async profiling and metrics collection for comprehensive performance analysis.
 
-use crate::ksl_parser::{parse, AstNode, ParseError};
+use crate::ksl_parser::{parse, AstNode};
 use crate::ksl_checker::check;
 use crate::ksl_compiler::compile;
 use crate::ksl_bytecode::{KapraBytecode, KapraInstruction, KapraOpCode};
@@ -11,9 +11,8 @@ use crate::kapra_vm::{KapraVM, RuntimeError, VmMetrics};
 use crate::ksl_metrics::{MetricsCollector, MetricType};
 use crate::ksl_async::{AsyncRuntime, AsyncResult};
 use crate::ksl_errors::{KslError, SourcePosition};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::Write;
 use std::path::PathBuf;
 use std::time::{Instant, Duration};
 use std::sync::Arc;
@@ -375,34 +374,26 @@ pub async fn run_profile_async(
     profiler.generate_report_async(&profile_data, flamegraph_path).await
 }
 
-// Assume ksl_parser.rs, ksl_checker.rs, ksl_compiler.rs, ksl_bytecode.rs,
-// kapra_vm.rs, ksl_metrics.rs, ksl_async.rs, and ksl_errors.rs are in the same crate
 mod ksl_parser {
-    pub use super::{parse, AstNode, ParseError};
+    pub use super::{parse, AstNode};
 }
 
 mod ksl_checker {
-    pub use super::check;
 }
 
 mod ksl_compiler {
-    pub use super::compile;
 }
 
 mod ksl_bytecode {
-    pub use super::{KapraBytecode, KapraInstruction, KapraOpCode};
 }
 
 mod kapra_vm {
-    pub use super::{KapraVM, RuntimeError, VmMetrics};
 }
 
 mod ksl_metrics {
-    pub use super::{MetricsCollector, MetricType};
 }
 
 mod ksl_async {
-    pub use super::{AsyncRuntime, AsyncResult};
 }
 
 mod ksl_errors {

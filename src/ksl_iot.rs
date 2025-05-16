@@ -525,7 +525,7 @@ mod tests {
     }
 
     #[test]
-    fn test_device_comm_execution() {
+    async fn test_device_comm_execution() {
         let mut bytecode = Bytecode::new(vec![], vec![]);
         bytecode.constants.extend_from_slice(&[
             Constant::ArrayU8(32, vec![1; 32]), // topic
@@ -545,7 +545,7 @@ mod tests {
     }
 
     #[test]
-    fn test_power_manage_execution() {
+    async fn test_power_manage_execution() {
         let mut bytecode = Bytecode::new(vec![], vec![]);
         bytecode.instructions.extend_from_slice(&[
             OPCODE_PUSH, 1000,        // Push sleep duration
@@ -561,7 +561,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sensor_reading() {
+    async fn test_sensor_reading() {
         let mut bytecode = Bytecode::new(vec![], vec![]);
         bytecode.instructions.extend_from_slice(&[
             OPCODE_PUSH, 1,           // Push sensor_id

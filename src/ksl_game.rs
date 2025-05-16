@@ -562,7 +562,7 @@ mod tests {
     }
 
     #[test]
-    fn test_physics_execution() {
+    async fn test_physics_execution() {
         let mut bytecode = Bytecode::new(vec![], vec![]);
         bytecode.constants.extend_from_slice(&[
             Constant::ArrayU32(4, vec![0, 0, 10, 10]), // obj1: [x, y, width, height]
@@ -581,7 +581,7 @@ mod tests {
     }
 
     #[test]
-    fn test_render_execution() {
+    async fn test_render_execution() {
         let mut bytecode = Bytecode::new(vec![], vec![]);
         bytecode.constants.extend_from_slice(&[
             Constant::ArrayU32(3, vec![10, 20, 1]), // sprite: [x, y, sprite_id]
@@ -598,7 +598,7 @@ mod tests {
     }
 
     #[test]
-    fn test_multiplayer_execution() {
+    async fn test_multiplayer_execution() {
         let mut bytecode = Bytecode::new(vec![], vec![]);
         bytecode.constants.extend_from_slice(&[
             Constant::ArrayU8(32, vec![1; 32]), // state

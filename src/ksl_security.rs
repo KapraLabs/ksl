@@ -3,7 +3,7 @@
 // like reentrancy and buffer overflows, enforcing stricter capability checks, and
 // generating security reports with async support.
 
-use crate::ksl_parser::{parse, AstNode, ExprKind, ParseError};
+use crate::ksl_parser::{parse, AstNode, ExprKind};
 use crate::ksl_sandbox::{Sandbox, SandboxPolicy, run_sandbox_async};
 use crate::ksl_kapra_crypto::{CryptoContext, CryptoError};
 use crate::ksl_async::{AsyncRuntime, AsyncResult};
@@ -301,13 +301,12 @@ pub async fn analyze_security_async(
     analyzer.analyze_async().await
 }
 
-// Assume ksl_parser.rs, ksl_sandbox.rs, ksl_kapra_crypto.rs, ksl_async.rs, and ksl_errors.rs are in the same crate
 mod ksl_parser {
-    pub use super::{parse, AstNode, ExprKind, ParseError};
+    pub use super::{parse, AstNode, ExprKind};
 }
 
 mod ksl_sandbox {
-    pub use super::{Sandbox, SandboxPolicy, run_sandbox_async};
+    pub use super::{Sandbox, SandboxPolicy};
 }
 
 mod ksl_kapra_crypto {
@@ -315,11 +314,10 @@ mod ksl_kapra_crypto {
 }
 
 mod ksl_async {
-    pub use super::{AsyncRuntime, AsyncResult};
+    pub use super::AsyncRuntime;
 }
 
 mod ksl_verifier {
-    pub use super::verify;
 }
 
 mod ksl_errors {

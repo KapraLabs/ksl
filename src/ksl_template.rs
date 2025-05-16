@@ -2,20 +2,19 @@
 // Generates boilerplate KSL code for rapid project setup, supporting predefined
 // templates for blockchain, AI, gaming, IoT, and custom templates via .ksltemplate.
 
-use crate::ksl_parser::{parse, ParseError};
-use crate::ksl_doc::{generate, StdLibFunctionTrait};
+use crate::ksl_parser::parse;
+use crate::ksl_doc::generate;
 use crate::ksl_errors::{KslError, SourcePosition};
 use crate::ksl_project::{ProjectConfig, ProjectInitializer};
 use crate::ksl_async::{AsyncContext, AsyncCommand};
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use dirs::home_dir;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use serde_json::Value as JsonValue;
 
 /// Template configuration for custom templates with async support.
 #[derive(Debug, Deserialize, Serialize)]

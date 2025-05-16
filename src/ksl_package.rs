@@ -80,20 +80,22 @@ impl PackageSystem {
             return Err(KslError::type_error(
                 format!("Package {}@{} not found in repository", name, version),
                 SourcePosition::new(1, 1),
+                "PKG001".to_string()
             ));
         }
 
         // Read metadata
         let metadata_content = fs::read_to_string(&metadata_file)
-            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1)))?;
+            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1), "PKG002".to_string()))?;
         let metadata: PackageMetadata = toml::from_str(&metadata_content)
-            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1)))?;
+            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1), "PKG003".to_string()))?;
 
         // Verify package metadata
         if metadata.name != name || metadata.version != version {
             return Err(KslError::type_error(
                 format!("Mismatched package metadata for {}@{}", name, version),
                 SourcePosition::new(1, 1),
+                "PKG004".to_string()
             ));
         }
 
@@ -105,9 +107,9 @@ impl PackageSystem {
         // Load package modules asynchronously
         let package_path = package_dir.join("src");
         for entry in fs::read_dir(&package_path)
-            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1)))?
+            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1), "PKG005".to_string()))?
         {
-            let entry = entry?;
+            let entry = entry.map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1), "PKG006".to_string()))?;
             if entry.path().extension().map(|ext| ext == "ksl").unwrap_or(false) {
                 let module_name = entry.path().file_stem().unwrap().to_str().unwrap().to_string();
                 self.modules.load_module_async(&module_name, &entry.path()).await?;
@@ -142,9 +144,9 @@ impl PackageSystem {
         }
 
         let metadata_content = fs::read_to_string(&metadata_file)
-            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1)))?;
+            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1), "PKG007".to_string()))?;
         let metadata: PackageMetadata = toml::from_str(&metadata_content)
-            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1)))?;
+            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1), "PKG008".to_string()))?;
 
         for (dep_name, dep_version) in metadata.dependencies {
             self.install_async(&dep_name, &dep_version).await?;
@@ -163,37 +165,37 @@ impl PackageSystem {
     pub fn publish(&mut self, package_dir: &Path) -> Result<(), KslError> {
         let metadata_file = package_dir.join("ksl_package.toml");
         let metadata_content = fs::read_to_string(&metadata_file)
-            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1)))?;
+            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1), "PKG009".to_string()))?;
         let metadata: PackageMetadata = toml::from_str(&metadata_content)
-            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1)))?;
+            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1), "PKG010".to_string()))?;
 
         // Create package directory in repository
         let target_dir = self.repository.join(&metadata.name).join(&metadata.version);
         fs::create_dir_all(&target_dir)
-            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1)))?;
+            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1), "PKG011".to_string()))?;
 
         // Copy package files
         let src_dir = package_dir.join("src");
         let target_src_dir = target_dir.join("src");
         fs::create_dir_all(&target_src_dir)
-            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1)))?;
+            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1), "PKG012".to_string()))?;
         for entry in fs::read_dir(&src_dir)
-            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1)))?
+            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1), "PKG013".to_string()))?
         {
-            let entry = entry?;
+            let entry = entry.map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1), "PKG014".to_string()))?;
             let target_path = target_src_dir.join(entry.file_name());
             fs::copy(entry.path(), &target_path)
-                .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1)))?;
+                .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1), "PKG015".to_string()))?;
         }
 
         // Write metadata
         let target_metadata_file = target_dir.join("ksl_package.toml");
         let metadata_content = toml::to_string(&metadata)
-            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1)))?;
+            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1), "PKG016".to_string()))?;
         let mut file = File::create(&target_metadata_file)
-            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1)))?;
+            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1), "PKG017".to_string()))?;
         file.write_all(metadata_content.as_bytes())
-            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1)))?;
+            .map_err(|e| KslError::type_error(e.to_string(), SourcePosition::new(1, 1), "PKG018".to_string()))?;
 
         Ok(())
     }
@@ -201,6 +203,11 @@ impl PackageSystem {
     /// Gets the module system for compilation
     pub fn module_system(&self) -> &ModuleSystem {
         &self.modules
+    }
+
+    /// Consumes the PackageSystem and returns its ModuleSystem
+    pub fn into_module_system(self) -> ModuleSystem {
+        self.modules
     }
 
     /// Gets the async runtime
@@ -252,14 +259,16 @@ pub fn publish_package(package_dir: &Path) -> Result<(), KslError> {
 pub fn resolve_project_dependencies(project_dir: &Path) -> Result<ModuleSystem, KslError> {
     let mut package_system = PackageSystem::new();
     package_system.resolve_dependencies(project_dir)?;
-    Ok(package_system.modules)
+    // Use into_module_system to get ownership of the ModuleSystem
+    Ok(package_system.into_module_system())
 }
 
 /// Resolves project dependencies asynchronously
 pub async fn resolve_project_dependencies_async(project_dir: &Path) -> Result<ModuleSystem, KslError> {
     let mut package_system = PackageSystem::new();
     package_system.resolve_dependencies_async(project_dir).await?;
-    Ok(package_system.modules)
+    // Use into_module_system to get ownership of the ModuleSystem
+    Ok(package_system.into_module_system())
 }
 
 /// Package manifest format documentation

@@ -301,6 +301,7 @@ impl GenericDef {
                     substitutions.len()
                 ),
                 SourcePosition::new(1, 1),
+                "G001".to_string()
             ));
         }
 
@@ -312,6 +313,7 @@ impl GenericDef {
                 return Err(KslError::type_error(
                     format!("Failed to validate constraints: {}", e),
                     SourcePosition::new(1, 1),
+                    "G002".to_string()
                 ));
             }
             param.validate_constraints(ty, type_system)?;
@@ -417,6 +419,7 @@ impl GenericTypeChecker {
                         return Err(KslError::type_error(
                             format!("Invalid argument type: {:?}", arg_type),
                             SourcePosition::new(1, 1),
+                            "E003".to_string(),
                         ));
                     }
                 }
@@ -426,6 +429,7 @@ impl GenericTypeChecker {
                     return Err(KslError::type_error(
                         format!("Invalid return type: {:?}", return_type),
                         SourcePosition::new(1, 1),
+                        "E004".to_string(),
                     ));
                 }
 
@@ -452,6 +456,7 @@ impl GenericTypeChecker {
                         return Err(KslError::type_error(
                             format!("Invalid field type: {:?}", field_type),
                             SourcePosition::new(1, 1),
+                            "E005".to_string(),
                         ));
                     }
                 }
@@ -494,6 +499,7 @@ impl GenericCompiler {
                     return Err(KslError::type_error(
                         "Generic function must be monomorphized".to_string(),
                         SourcePosition::new(1, 1),
+                        "E006".to_string(),
                     ));
                 }
 
@@ -507,6 +513,7 @@ impl GenericCompiler {
                         return Err(KslError::type_error(
                             format!("Failed to compile node: {}", e),
                             SourcePosition::new(1, 1),
+                            "E007".to_string(),
                         ));
                     }
                     let node_bytecode = self.compile_generic_node(node, generics).await?;

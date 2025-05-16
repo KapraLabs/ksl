@@ -3,15 +3,13 @@
 /// enabling cross-platform use through AST transformation and async code generation.
 /// Supports advanced language features and async/await patterns.
 
-use crate::ksl_parser::{parse, AstNode, ExprKind, ParseError};
+use crate::ksl_parser::{parse, AstNode};
 use crate::ksl_ast_transform::{transform, TransformRule, AstTransformer};
 use crate::ksl_compiler::{compile, CompileConfig, CompileTarget};
-use crate::ksl_analyzer::PerformanceMetrics;
-use crate::ksl_async::{AsyncRuntime, AsyncResult};
+use crate::ksl_async::{AsyncResult};
 use crate::ksl_errors::{KslError, SourcePosition};
 use serde::{Deserialize, Serialize};
-use std::fs::{self, File};
-use std::io::Write;
+use std::fs::{self};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -436,19 +434,18 @@ pub async fn transpile_async(config: TranspilerConfig) -> AsyncResult<()> {
 
 // Module imports
 mod ksl_parser {
-    pub use super::{parse, AstNode, ExprKind, ParseError};
+    pub use super::{parse, AstNode};
 }
 
 mod ksl_ast_transform {
-    pub use super::{transform, TransformRule, AstTransformer};
+    pub use super::transform;
 }
 
 mod ksl_compiler {
-    pub use super::{compile, CompileConfig, CompileTarget};
+    pub use super::{compile, CompileTarget};
 }
 
 mod ksl_async {
-    pub use super::{AsyncRuntime, AsyncResult};
 }
 
 mod ksl_errors {
@@ -456,15 +453,12 @@ mod ksl_errors {
 }
 
 mod ksl_checker {
-    pub use super::check;
 }
 
 mod ksl_types {
-    pub use super::Type;
 }
 
 mod ksl_analyzer {
-    pub use super::PerformanceMetrics;
 }
 
 #[cfg(test)]

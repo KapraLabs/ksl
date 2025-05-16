@@ -183,6 +183,7 @@ impl Web3Runtime {
             return Err(KslError::web3_error(
                 format!("Failed to create DID: {}", e),
                 SourcePosition::new(1, 1),
+                "E601".to_string()
             ));
         }
 
@@ -201,6 +202,7 @@ impl Web3Runtime {
             return Err(KslError::web3_error(
                 format!("Failed to verify DID: {}", e),
                 SourcePosition::new(1, 1),
+                "E601".to_string()
             ));
         }
 
@@ -219,6 +221,7 @@ impl Web3Runtime {
             return Err(KslError::web3_error(
                 format!("Oracle request failed with status {}", response.status_code),
                 SourcePosition::new(1, 1),
+                "E602".to_string()
             ));
         }
 
@@ -238,6 +241,7 @@ impl Web3Runtime {
             return Err(KslError::web3_error(
                 format!("Failed to send cross-chain message: {}", e),
                 SourcePosition::new(1, 1),
+                "E603".to_string()
             ));
         }
 
@@ -282,6 +286,7 @@ impl KapraVM {
                         return Err(KslError::web3_error(
                             "Not enough values on stack for CREATE_DID".to_string(),
                             SourcePosition::new(1, 1),
+                            "E604".to_string()
                         ));
                     }
                     let credential_idx = self.stack.pop().unwrap() as usize;
@@ -291,6 +296,7 @@ impl KapraVM {
                         _ => return Err(KslError::web3_error(
                             "Invalid type for CREATE_DID identity".to_string(),
                             SourcePosition::new(1, 1),
+                            "E605".to_string()
                         )),
                     };
                     let credential = match &bytecode.constants[credential_idx] {
@@ -298,6 +304,7 @@ impl KapraVM {
                         _ => return Err(KslError::web3_error(
                             "Invalid type for CREATE_DID credential".to_string(),
                             SourcePosition::new(1, 1),
+                            "E606".to_string()
                         )),
                     };
                     let did = self.web3_runtime.create_did(&identity, &credential).await?;
@@ -313,6 +320,7 @@ impl KapraVM {
                         return Err(KslError::web3_error(
                             "Not enough values on stack for VERIFY_DID".to_string(),
                             SourcePosition::new(1, 1),
+                            "E607".to_string()
                         ));
                     }
                     let credential_idx = self.stack.pop().unwrap() as usize;
@@ -322,6 +330,7 @@ impl KapraVM {
                         _ => return Err(KslError::web3_error(
                             "Invalid type for VERIFY_DID did".to_string(),
                             SourcePosition::new(1, 1),
+                            "E608".to_string()
                         )),
                     };
                     let credential = match &bytecode.constants[credential_idx] {
@@ -329,6 +338,7 @@ impl KapraVM {
                         _ => return Err(KslError::web3_error(
                             "Invalid type for VERIFY_DID credential".to_string(),
                             SourcePosition::new(1, 1),
+                            "E609".to_string()
                         )),
                     };
                     let valid = self.web3_runtime.verify_did(&did, &credential).await?;
@@ -339,6 +349,7 @@ impl KapraVM {
                         return Err(KslError::web3_error(
                             "Not enough values on stack for FETCH_ORACLE".to_string(),
                             SourcePosition::new(1, 1),
+                            "E610".to_string()
                         ));
                     }
                     let url_idx = self.stack.pop().unwrap() as usize;
@@ -347,6 +358,7 @@ impl KapraVM {
                         _ => return Err(KslError::web3_error(
                             "Invalid type for FETCH_ORACLE url".to_string(),
                             SourcePosition::new(1, 1),
+                            "E611".to_string()
                         )),
                     };
                     let data = self.web3_runtime.fetch_oracle_data(url).await?;
@@ -362,6 +374,7 @@ impl KapraVM {
                         return Err(KslError::web3_error(
                             "Not enough values on stack for CROSS_CHAIN".to_string(),
                             SourcePosition::new(1, 1),
+                            "E612".to_string()
                         ));
                     }
                     let message_idx = self.stack.pop().unwrap() as usize;
@@ -371,6 +384,7 @@ impl KapraVM {
                         _ => return Err(KslError::web3_error(
                             "Invalid type for CROSS_CHAIN message".to_string(),
                             SourcePosition::new(1, 1),
+                            "E613".to_string()
                         )),
                     };
                     let success = self.web3_runtime.send_cross_chain(chain_id, &message).await?;
@@ -381,6 +395,7 @@ impl KapraVM {
                     return Err(KslError::web3_error(
                         format!("Unknown opcode: {}", instr),
                         SourcePosition::new(1, 1),
+                        "E614".to_string()
                     ));
                 }
             }
@@ -481,6 +496,7 @@ impl Web3Compiler {
                 return Err(KslError::web3_error(
                     format!("Unsupported node type: {:?}", node),
                     SourcePosition::new(1, 1),
+                    "E615".to_string()
                 ));
             }
         }
